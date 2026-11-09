@@ -1,4 +1,46 @@
-# CAD prompt
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img src="docs/logo.svg" width="150" alt="CAD prompt">
+  </picture>
+</p>
+
+<h1 align="center">CAD prompt</h1>
+
+<p align="center"><b>Tell Claude what to build. Watch FreeCAD build it.</b><br>
+A hotkey and a bar menu for Omarchy. One line to install, the same line to update.</p>
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mechanicsunlocked/cadprompt/main/install | bash
+```
+
+You need: Omarchy 4, FreeCAD 1.1 (`sudo pacman -S freecad`, or the Flathub
+app), Claude Code logged in, and `uv jq git`. For the grab keys also
+`grim slurp wl-clipboard`. The installer checks all of it and says what is
+missing. Then restart FreeCAD if it was open, press SUPER+ALT+C, name a
+project, and say what to build.
+
+That clones into `~/Work/cadprompt` and installs. **The same line updates**:
+run it again and it pulls the newest version and reinstalls. From inside the
+folder, `./setup update` does the same, `./setup install` reinstalls without
+pulling, and:
+
+```bash
+./setup remove           # takes every link and line away; --purge also token and vendor/
+```
+
+Nothing is copied into the system. `setup` makes symlinks into this folder
+(three in `~/.local/bin`, one in `~/.config/hypr`, two in FreeCAD's `Mod`),
+appends one `require` line to `~/.config/hypr/hyprland.lua`, adds one
+command-module entry to the bar in `~/.config/omarchy/shell.json`, writes a
+token to `~/.config/cadprompt/`, and sets FreeCAD's MCP addon to localhost
+plus token. `remove` undoes exactly that. Move or delete this folder after `remove`
+and nothing is left. `~/Work/CAD` is yours and never touched. No plugin code in the
+shell, no desktop files, no daemons.
+
+## What it is
 
 Press **SUPER+ALT+C**, name a project, say what you want. A Claude Code
 window opens tiled next to FreeCAD and the part appears there, feature by
@@ -28,7 +70,7 @@ Each project is a folder in `~/Work/CAD`: `model/` (the .FCStd), `refs/` (what y
 grabbed), `drawings/` (PDFs). Reopening a project continues its conversation
 and opens its newest model in FreeCAD, in the running one if there is one.
 
-## To the workshop tablet
+### To the workshop tablet
 
 The cube menu has "Send newest drawing to tablet". It takes the newest PDF in
 the active project's `drawings/` and sends it over Taildrop, Tailscale's own
@@ -40,35 +82,9 @@ any PDF reader. If the tablet is asleep or off the tailnet, you get a
 "could not send" notification; send again when it is awake. Also:
 `cadprompt-send some.pdf other.pdf`.
 
-## Install, update, remove
+## In depth
 
-Needs Omarchy 4, FreeCAD 1.1 (`pacman -S freecad` or the Flathub app), Claude
-Code (logged in), `uv`, `jq`, `git`, and for the grab keys `grim slurp
-wl-clipboard`.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mechanicsunlocked/cadprompt/main/install | bash
-```
-
-That clones into `~/Work/cadprompt` and installs. **The same line updates**:
-run it again and it pulls the newest version and reinstalls. From inside the
-folder, `./setup update` does the same, `./setup install` reinstalls without
-pulling, and:
-
-```bash
-./setup remove           # takes every link and line away; --purge also token and vendor/
-```
-
-Nothing is copied into the system. `setup` makes symlinks into this folder
-(three in `~/.local/bin`, one in `~/.config/hypr`, two in FreeCAD's `Mod`),
-appends one `require` line to `~/.config/hypr/hyprland.lua`, adds one
-command-module entry to the bar in `~/.config/omarchy/shell.json`, writes a
-token to `~/.config/cadprompt/`, and sets FreeCAD's MCP addon to localhost
-plus token. `remove` undoes exactly that. Move or delete this folder after `remove`
-and nothing is left. `~/Work/CAD` is yours and never touched. No bar widget, no
-desktop files, no daemons.
-
-## What runs, what it can reach
+### What runs, what it can reach
 
 ```
 key -> cadprompt -> foot, tiled: Claude Code in ~/Work/CAD/<project>
@@ -104,7 +120,7 @@ reads, and FreeCAD screenshots when Claude asks for one (to Anthropic, via
 Claude Code). At install, `git` fetches freecad-mcp from GitHub and `uvx`
 fetches it from PyPI. Nothing else phones anywhere. No telemetry of its own.
 
-## Updates
+### Updates
 
 - **cadprompt itself**: the install line above, again. Or `./setup update`.
 - **freecad-mcp** (the bridge inside FreeCAD): pinned to one version in
@@ -114,7 +130,7 @@ fetches it from PyPI. Nothing else phones anywhere. No telemetry of its own.
 - Nothing updates by itself. Claude Code and `uv` update through their own
   channels; the Hoischen addon ships in this repo.
 
-## Layout
+### Layout
 
 ```
 install               the one-line installer (clone or pull, then setup install)
@@ -130,7 +146,7 @@ freecad-hoischen/     TechDraw addon: DIN preset, dimension lines at 10 / 7 mm
 vendor/               freecad-mcp checkout, created by setup
 ```
 
-## Checks after install
+### Checks after install
 
 1. `hyprctl configerrors` empty; `omarchy menu keybindings --print | grep CAD`
    shows five lines.

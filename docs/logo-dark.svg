@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- CAD prompt: the cube everyone draws first, and a prompt waiting on its face. -->
+  <g fill="none" stroke="#d8dee6" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M128 36 L212 84 L212 172 L128 220 L44 172 L44 84 Z"/>
+    <path d="M44 84 L128 132 L212 84 M128 132 L128 220"/>
+  </g>
+  <g fill="none" stroke="#58a6ff" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M70 148 L88 166 L70 184"/>
+    <path d="M98 190 L116 198"/>
+  </g>
+</svg>
