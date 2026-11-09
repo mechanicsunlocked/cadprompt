@@ -1,7 +1,3 @@
-
-
-https://github.com/user-attachments/assets/e0831170-1a63-43ba-8b24-3d5591cea3ef
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
@@ -14,7 +10,7 @@ https://github.com/user-attachments/assets/e0831170-1a63-43ba-8b24-3d5591cea3ef
 <p align="center"><b>Tell Claude what to build. Watch FreeCAD build it.</b><br>
 A hotkey and a bar menu for Omarchy. One line to install, the same line to update.</p>
 
-<p align="center"><img src="docs/demo.png" width="800" alt="Claude Code on the left building a machine foot in FreeCAD on the right"></p>
+https://github.com/user-attachments/assets/e0831170-1a63-43ba-8b24-3d5591cea3ef
 
 ## Install
 
