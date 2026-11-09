@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Hoischen</name>
+  <description>TechDraw the way the book says (Hoischen, DIN 406-11, ISO 128/129): one-click DIN preset and automatic dimension spacing, 10 mm to the first line, 7 mm between lines, small dimensions inside.</description>
+  <version>0.1.0</version>
+  <date>2026-10-30</date>
+  <maintainer email="noreply@example.invalid">mechanicsunlocked</maintainer>
+  <license file="LICENSE">LGPL-2.1-or-later</license>
+  <url type="repository" branch="main">https://github.com/mechanicsunlocked/cadprompt</url>
+  <icon>icons/hoischen_arrange.svg</icon>
+  <freecadmin>1.0.0</freecadmin>
+  <content>
+    <workbench>
+      <!-- No workbench of its own: InitGui.py only adds a toolbar to TechDraw.
+           Declared so FreeCAD 1.x runs InitGui.py at all. -->
+      <classname>HoischenToolbar</classname>
+      <name>Hoischen</name>
+      <subdirectory>./</subdirectory>
+    </workbench>
+  </content>
+</package>

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "freecad": {
+      "command": "uvx",
+      "args": [
+        "--python", ">=3.12",
+        "freecad-mcp==${FREECAD_MCP_VERSION:-0.1.28}",
+        "--freecadcmd", "${CADPROMPT_FREECADCMD:-freecadcmd}"
+      ],
+      "env": {
+        "FREECAD_MCP_TOKEN": "${FREECAD_MCP_TOKEN:-}"
+      }
+    }
+  }
+}

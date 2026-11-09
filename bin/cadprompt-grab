@@ -1,0 +1,90 @@
+#!/bin/bash
+# cadprompt-grab -- drop reference material into the active CAD project.
+#
+#   cadprompt-grab                 screenshot a region (a photo on a web page, a drawing)
+#   cadprompt-grab clipboard       whatever is on the clipboard: image, copied files, a link
+#   cadprompt-grab last-download   the newest file in Downloads (a PDF you just saved)
+#   cadprompt-grab FILE...         these files
+#
+# Everything lands in <project>/refs/ with a timestamp and a line in
+# refs/INDEX.md, which Claude reads at the start of each request.
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+source "$here/lib/common.sh"
+
+[[ ${1:-} == -h || ${1:-} == --help ]] && { sed -n '2,10p' "$0" | sed 's/^# \?//'; exit 0; }
+
+project=$(active_project) || true
+[[ -n ${project:-} && -d $project ]] || die "No active CAD project. Open one with the CAD prompt first."
+refs="$project/refs"
+mkdir -p "$refs"
+stamp=$(date +%Y%m%d-%H%M%S)
+added=()
+
+unique() {  # a free name in refs/, so two grabs in one second do not collide
+    local want=$1 stem ext n=2
+    [[ -e $want ]] || { printf '%s' "$want"; return; }
+    stem=${want%.*}; ext=${want##*.}
+    [[ $stem == "$want" ]] && ext="" || ext=".$ext"
+    while [[ -e $stem-$n$ext ]]; do n=$((n + 1)); done
+    printf '%s' "$stem-$n$ext"
+}
+
+record() {  # file, how it came in
+    added+=("$(basename "$1")")
+    # shellcheck disable=SC2016  # the backticks are Markdown
+    printf -- '- %s  `%s`  (%s)\n' "$(date '+%Y-%m-%d %H:%M')" "$(basename "$1")" "$2" >> "$refs/INDEX.md"
+}
+
+add_file() {
+    local src=$1 dest
+    [[ -f $src ]] || return 0
+    dest=$(unique "$refs/$stamp-$(basename "$src")")
+    cp -- "$src" "$dest"
+    record "$dest" "file"
+}
+
+case ${1:-region} in
+    region)
+        command -v grim >/dev/null && command -v slurp >/dev/null || die "Needs grim and slurp."
+        geom=$(slurp 2>/dev/null) || exit 0          # Esc cancels
+        dest=$(unique "$refs/$stamp-screenshot.png")
+        grim -g "$geom" "$dest"
+        record "$dest" "screenshot"
+        ;;
+    clipboard)
+        command -v wl-paste >/dev/null || die "Needs wl-clipboard."
+        types=$(wl-paste --list-types 2>/dev/null || true)
+        if grep -q '^image/png' <<<"$types"; then
+            dest=$(unique "$refs/$stamp-clipboard.png")
+            wl-paste --type image/png > "$dest"
+            record "$dest" "clipboard image"
+        elif grep -q '^text/uri-list' <<<"$types"; then
+            while IFS= read -r uri; do
+                uri=${uri%$'\r'}
+                [[ $uri == file://* ]] || continue
+                add_file "$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "${uri#file://}")"
+            done < <(wl-paste --type text/uri-list)
+        else
+            text=$(wl-paste --no-newline 2>/dev/null || true)
+            [[ -n $text ]] || die "Clipboard is empty."
+            printf -- '- %s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$text" >> "$refs/links.md"
+            printf -- '- %s  links.md  (clipboard text)\n' "$(date '+%Y-%m-%d %H:%M')" >> "$refs/INDEX.md"
+            added+=("text in links.md")
+        fi
+        ;;
+    last-download)
+        dl=$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")
+        newest=$(find "$dl" -maxdepth 1 -type f ! -name '*.part' ! -name '*.crdownload' -printf '%T@ %p\n' 2>/dev/null \
+                 | sort -rn | head -n1 | cut -d' ' -f2-)
+        [[ -n $newest ]] || die "Nothing in $dl."
+        add_file "$newest"
+        ;;
+    *)
+        for f in "$@"; do add_file "$f"; done
+        ;;
+esac
+
+((${#added[@]})) && notify "Added to $(basename "$project")" "$(printf '%s\n' "${added[@]}")"
+exit 0

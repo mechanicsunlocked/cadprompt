@@ -1,0 +1,118 @@
+#!/bin/bash
+# cadprompt-tui -- your CAD projects in one window: what each one was last
+# working on, open one, start a new one, delete one. Bar icon opens it.
+#
+#   cadprompt-tui          the window (needs a terminal; cadprompt --projects gives it one)
+#   cadprompt-tui --menu   the same as an Omarchy menu, attached to the bar (bar icon click)
+#   cadprompt-tui --list   the rows as text, for scripts
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+source "$here/lib/common.sh"
+
+command -v gum >/dev/null 2>&1 || die "needs gum (Omarchy ships it)"
+mkdir -p "$CAD_HOME"
+
+transcripts() { printf '%s/.claude/projects/%s' "$HOME" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g')"; }
+
+# "what was worked on": the last thing typed into Claude in that project
+last_prompt() {
+    local f
+    f=$(ls -t "$(transcripts "$1")"/*.jsonl 2>/dev/null | head -n1) || true
+    [[ -n $f ]] || return 0
+    jq -r 'select(.type == "user" and (.message.content | type) == "string") | .message.content' "$f" 2>/dev/null \
+        | grep -v '^<' | tail -n1 | tr '\n\t' '  ' | cut -c1-70
+}
+
+ago() {  # seconds -> "3 min", "2 h", "5 d"
+    local s=$(( $(date +%s) - $1 ))
+    if ((s < 3600)); then echo "$((s / 60)) min"
+    elif ((s < 86400)); then echo "$((s / 3600)) h"
+    else echo "$((s / 86400)) d"; fi
+}
+
+rows() {  # name<TAB>display line, newest first
+    local p name when models mode what active
+    active=$(active_project) || true
+    while IFS= read -r p; do
+        [[ -d $p ]] || continue
+        name=$(basename "$p")
+        when=$(find "$p" -path "$p/.claude" -prune -o -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -n1 | cut -d. -f1)
+        when=$(ago "${when:-$(stat -c %Y "$p")}")
+        models=$(ls "$p/model/"*.FCStd 2>/dev/null | wc -l)
+        mode=$(cat "$p/.cadprompt/mode" 2>/dev/null || echo build)
+        what=$(last_prompt "$p")
+        printf '%s\t%s%-24s %-5s %6s ago  %s model%s  %s\n' "$name" "$([[ $p == "$active" ]] && echo '● ' || echo '  ')" \
+            "$name" "$mode" "$when" "$models" "$([[ $models == 1 ]] || echo s)" "${what:+· $what}"
+    done < <(find "$CAD_HOME" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+}
+
+if [[ ${1:-} == --list ]]; then rows | cut -f2-; exit 0; fi
+
+# ---- Omarchy menu: the shell's own overlay, rows as glyph<TAB>label<TAB>subtext
+if [[ ${1:-} == --menu ]]; then
+    command -v omarchy-menu-select >/dev/null 2>&1 || die "needs omarchy-menu-select"
+    menu() {  # header, rows on stdin -> label of the pick (subtext stripped)
+        local sel
+        sel=$(omarchy-menu-select "$1" -- --width 600) || return 1   # twice Omarchy's default, so names are readable
+        printf '%s' "${sel%%$'\t'*}"
+    }
+    project_rows() {
+        local r line name rest
+        while IFS= read -r r; do
+            name=${r%%$'\t'*}; line=${r#*$'\t'}
+            rest=$(printf '%s' "$line" | cut -c27- | tr -s ' ')   # mode, age, models, last prompt
+            printf '%s\t%s\t%s\n' "$([[ $line == '● '* ]] && echo '●' || echo '󰆧')" "$name" "$rest"
+        done < <(rows)
+    }
+    pick=$( { project_rows; printf '＋\tNew project\n󰒊\tSend newest drawing to tablet\n✕\tDelete a project\n\tProjects window\n'; } | menu "CAD projects") || exit 0
+    case $pick in
+        "New project")
+            name=$(omarchy-menu-input "Project name") || exit 0
+            [[ -n $name ]] && exec "$here/bin/cadprompt" "$name" ;;
+        "Delete a project")
+            name=$(project_rows | menu "Delete which project?") || exit 0
+            [[ -n $name ]] || exit 0
+            yes=$(printf '✕\tDelete %s and its conversation\n\tKeep it\n' "$name" | menu "Sure?") || exit 0
+            [[ $yes == Delete* ]] || exit 0
+            rm -rf "${CAD_HOME:?}/$name" "$(transcripts "$CAD_HOME/$name")"
+            [[ $(active_project || true) == "$CAD_HOME/$name" ]] && rm -f "$STATE_DIR/active"
+            notify "Deleted $name" ;;
+        "Send newest drawing to tablet") exec "$here/bin/cadprompt-send" ;;
+        "Projects window") exec "$here/bin/cadprompt" --projects ;;
+        "") exit 0 ;;
+        *) exec "$here/bin/cadprompt" "$pick" ;;
+    esac
+    exit 0
+fi
+
+NEW="＋  New project"
+DEL="✕  Delete a project"
+QUIT="   Quit"
+
+while :; do
+    mapfile -t table < <(rows)
+    names=(); lines=()
+    for r in "${table[@]}"; do names+=("${r%%$'\t'*}"); lines+=("${r#*$'\t'}"); done
+    pick=$(printf '%s\n' "${lines[@]}" "$NEW" "$DEL" "$QUIT" \
+           | gum choose --header "CAD projects in $CAD_HOME   (enter: open)" --height 20 --cursor "▸ ") || exit 0
+    case $pick in
+        "$QUIT") exit 0 ;;
+        "$NEW")
+            name=$(gum input --placeholder "project name" --header "New project") || continue
+            [[ -n $name ]] || continue
+            exec "$here/bin/cadprompt" "$name"
+            ;;
+        "$DEL")
+            ((${#names[@]})) || continue
+            victim=$(printf '%s\n' "${lines[@]}" | gum choose --header "Delete which project?" --height 20) || continue
+            for i in "${!lines[@]}"; do [[ ${lines[$i]} == "$victim" ]] && name=${names[$i]}; done
+            gum confirm --default=false "Delete $CAD_HOME/$name, its model, refs, drawings and its Claude conversation?" || continue
+            rm -rf "${CAD_HOME:?}/$name" "$(transcripts "$CAD_HOME/$name")"
+            [[ $(active_project || true) == "$CAD_HOME/$name" ]] && rm -f "$STATE_DIR/active"
+            ;;
+        *)
+            for i in "${!lines[@]}"; do [[ ${lines[$i]} == "$pick" ]] && exec "$here/bin/cadprompt" "${names[$i]}"; done
+            ;;
+    esac
+done

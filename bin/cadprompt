@@ -1,0 +1,77 @@
+#!/bin/bash
+# cadprompt -- say what you want; FreeCAD builds it in front of you.
+#
+#   cadprompt                 pick a project (or name a new one), open the prompt
+#   cadprompt NAME            open project NAME in ~/Work/CAD (created if new)
+#   cadprompt --teach [NAME]  teach mode: one feature at a time, with the why
+#   cadprompt --where         print the active project folder
+#   cadprompt --projects      the projects window (open, new, delete)
+#   cadprompt --bar           one line of JSON for the bar icon
+#
+# Opens a floating terminal with Claude Code in the project folder and starts
+# FreeCAD beside it if needed. Reopening a project continues its conversation.
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+source "$here/lib/common.sh"
+
+mode=build
+name=""
+for arg in "$@"; do
+    case $arg in
+        --teach)   mode=teach ;;
+        --where)   active_project || true; exit 0 ;;
+        --projects) launch xdg-terminal-exec --app-id=TUI.float --title="CAD projects" -e "$here/bin/cadprompt-tui"; exit 0 ;;
+        --bar)
+            n=$(find "$CAD_HOME" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l)
+            a=$(active_project) || true
+            jq -cn --arg a "${a:+$(basename "$a")}" --arg n "$n" '{text: "󰆧", tooltip: ("CAD · " + (if $a == "" then "no project open" else $a end) + " · " + $n + " projects · click: projects, right click: prompt")}'
+            exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)         name=$arg ;;
+    esac
+done
+
+[[ -s $CONF_DIR/token ]] || die "Not installed yet: run $here/setup install"
+command -v claude >/dev/null 2>&1 || die "Claude Code (claude) is not installed."
+command -v xdg-terminal-exec >/dev/null 2>&1 || die "xdg-terminal-exec not found."
+mkdir -p "$CAD_HOME"
+
+# ---- which project --------------------------------------------------------
+if [[ -z $name ]]; then
+    command -v omarchy-menu-select >/dev/null 2>&1 || die "No picker: give the project name, e.g. cadprompt frame"
+    new="+ New project"
+    mapfile -t existing < <(find "$CAD_HOME" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %f\n' 2>/dev/null \
+                            | sort -rn | cut -d' ' -f2-)
+    choice=$(printf '%s\n' "$new" "${existing[@]}" | omarchy-menu-select "CAD project") || exit 0
+    [[ $choice == "$new" ]] && { choice=$(omarchy-menu-input "Project name") || exit 0; }
+    [[ -n $choice ]] || exit 0
+    name=$choice
+fi
+project="$CAD_HOME/$(slug "$name")"
+
+if [[ ! -d $project ]]; then
+    mkdir -p "$project"
+    cp -r "$here/template/." "$project/"     # fresh folder, nothing to overwrite
+fi
+printf '%s\n' "$mode" > "$project/.cadprompt/mode"
+set_active_project "$project"
+
+# ---- FreeCAD with the project's model, in parallel with the terminal ------
+model=$(ls -t "$project/model/"*.FCStd 2>/dev/null | head -n1) || true
+( ensure_freecad ${model:+"$model"} && [[ -z $FC_STARTED && -n $model ]] && fc_open "$model"; true ) &
+fc_wait=$!
+
+# ---- the prompt window ----------------------------------------------------
+# `claude --continue` only when Claude Code has a session for this folder
+# (it keeps them under the path with every non-alphanumeric turned into "-").
+args=()
+sessions="$HOME/.claude/projects/$(printf '%s' "$project" | sed 's/[^A-Za-z0-9]/-/g')"
+compgen -G "$sessions/*.jsonl" >/dev/null && args+=(--continue)
+
+# The token is read inside the terminal, so it never shows up on a command line.
+launch xdg-terminal-exec --app-id=cadprompt --title="CAD · $(basename "$project")" --dir="$project" \
+    -e bash -c 'FREECAD_MCP_TOKEN=$(<"$1"); CADPROMPT_FREECADCMD=$2; FREECAD_MCP_VERSION=$3; export FREECAD_MCP_TOKEN CADPROMPT_FREECADCMD FREECAD_MCP_VERSION; shift 3; exec claude "$@"' \
+    _ "$CONF_DIR/token" "$(fc_cmd_string)" "$FREECAD_MCP_VERSION" "${args[@]}"
+
+wait "$fc_wait" || true   # the terminal is detached; only FreeCAD's start-up is awaited

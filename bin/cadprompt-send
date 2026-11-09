@@ -1,0 +1,42 @@
+#!/bin/bash
+# cadprompt-send -- the newest drawing to the workshop tablet, over Taildrop
+# (Tailscale's own file drop: direct, encrypted, no cloud in between).
+#
+#   cadprompt-send            newest PDF in the active project's drawings/
+#   cadprompt-send FILE...    these files instead
+#   cadprompt-send --tablet   pick (or change) the tablet among your tailnet machines
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+source "$here/lib/common.sh"
+
+command -v tailscale >/dev/null 2>&1 || die "Tailscale is not installed."
+command -v omarchy-tailscale-send >/dev/null 2>&1 || die "needs omarchy-tailscale-send (Omarchy 4)."
+tablet_file="$CONF_DIR/tablet"
+
+pick_tablet() {
+    local me rows
+    me=$(hostname | tr '[:upper:]' '[:lower:]')
+    rows=$(tailscale status 2>/dev/null | awk 'NF >= 4 && $2 != "" {print $4 "\t" $2}' | grep -v $'\t'"$me" || true)
+    [[ -n $rows ]] || die "No other machines on the tailnet (is Tailscale up?)."
+    sel=$(omarchy-menu-select "Workshop tablet" -- --width 600 <<<"$rows") || exit 0
+    [[ -n $sel ]] || exit 0
+    mkdir -p "$CONF_DIR"; printf '%s\n' "${sel%%$'\t'*}" > "$tablet_file"
+    notify "Drawings go to ${sel%%$'\t'*}" "Change it with: cadprompt-send --tablet"
+}
+
+[[ ${1:-} == -h || ${1:-} == --help ]] && { sed -n '2,7p' "$0" | sed 's/^# \?//'; exit 0; }
+[[ ${1:-} == --tablet ]] && { pick_tablet; exit 0; }
+[[ -s $tablet_file ]] || pick_tablet
+tablet=$(<"$tablet_file")
+
+if (($#)); then
+    files=("$@")
+else
+    project=$(active_project) || true
+    [[ -n ${project:-} && -d $project ]] || die "No active CAD project."
+    newest=$(ls -t "$project/drawings/"*.pdf 2>/dev/null | head -n1) || true
+    [[ -n $newest ]] || die "No PDF in $project/drawings yet. In the prompt: /drawing A3"
+    files=("$newest")
+fi
+exec omarchy-tailscale-send "$tablet" "${files[@]}"

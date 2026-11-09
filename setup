@@ -1,0 +1,230 @@
+#!/bin/bash
+# cadprompt -- setup. Everything lives in this folder; the system only gets links.
+#
+#   ./setup install           install (run again after changes)
+#   ./setup update            pull the newest cadprompt from GitHub and reinstall
+#   ./setup remove            remove every link and line it added
+#   ./setup remove --purge    also the token, the active-project state and vendor/
+#   ./setup upgrade           move freecad-mcp to its newest release (restart FreeCAD after)
+#   ./setup upgrade 0.1.28    pin a specific release instead (e.g. to go back)
+#
+# What install touches, and nothing else:
+#   ~/.local/bin/cadprompt, -grab, -tui, -send    symlinks into bin/
+#   ~/.config/hypr/cadprompt.lua                  symlink into hypr/
+#   ~/.config/hypr/hyprland.lua                   one appended line: require("hypr.cadprompt")
+#   <FreeCAD user dir>/Mod/FreeCADMCP, Hoischen   symlinks (copies for a Flatpak FreeCAD)
+#   <FreeCAD user dir>/freecad_mcp_settings.json  token, localhost only, auto-start
+#   ~/.config/cadprompt/token, tablet             the token; the tablet's tailnet name
+#   ~/.config/omarchy/shell.json                  one bar entry {id: "cadprompt", type: command}
+#   vendor/freecad-mcp                            pinned git checkout, inside this folder
+# ~/Work/CAD (your projects) is never touched. No sudo, nothing outside $HOME.
+set -euo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+source "$here/lib/common.sh"
+
+say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+fail() { printf '\n\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+warnings=()
+warn() { warnings+=("$*"); printf '    \033[33mwarning:\033[0m %s\n' "$*"; }
+
+bin="$HOME/.local/bin"
+hypr="$HOME/.config/hypr"
+require_line='require("hypr.cadprompt") -- cadprompt keys and window; ./setup remove deletes this line'
+marker=".cadprompt-copy"   # dropped into Mod/ copies (Flatpak), so remove knows they are ours
+shell_json="$HOME/.config/omarchy/shell.json"
+bar_entry='{"id":"cadprompt","type":"command","exec":"cadprompt --bar","interval":30,"onClick":"cadprompt-tui --menu","onRightClick":"cadprompt"}'
+
+install() {
+    say "Checking"
+    command -v claude >/dev/null 2>&1 || fail "Claude Code not found: install it and run 'claude' once to log in."
+    command -v uvx >/dev/null 2>&1 || fail "uv not found (it runs the MCP server): sudo pacman -S uv"
+    command -v git >/dev/null 2>&1 || fail "git not found"
+    command -v jq >/dev/null 2>&1 || fail "jq not found: sudo pacman -S jq"
+    command -v xdg-terminal-exec >/dev/null 2>&1 || fail "xdg-terminal-exec not found"
+    kind=$(fc_kind)
+    [[ $kind != none ]] || fail "FreeCAD not found: sudo pacman -S freecad, or the Flathub app $FLATPAK_ID"
+    note "FreeCAD: $kind"
+    command -v omarchy-menu-select >/dev/null 2>&1 || warn "omarchy-menu-select missing: the hotkey needs it for the project picker"
+    for t in grim slurp wl-paste notify-send; do
+        command -v "$t" >/dev/null 2>&1 || warn "$t missing; the grab keys need it"
+    done
+
+    say "Token"
+    # freecad-mcp lets anything that reaches 127.0.0.1:9875 run Python in FreeCAD,
+    # a web page in your browser included. With a token, only Claude gets in.
+    mkdir -p "$CONF_DIR"; chmod 700 "$CONF_DIR"
+    if [[ -s $CONF_DIR/token ]]; then
+        note "keeping $CONF_DIR/token"
+    else
+        (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > "$CONF_DIR/token")
+        note "new token in $CONF_DIR/token"
+    fi
+    token=$(<"$CONF_DIR/token")
+
+    say "freecad-mcp $FREECAD_MCP_VERSION (pinned)"
+    vendor="$here/vendor/freecad-mcp"
+    if [[ ! -d $vendor/.git ]] || [[ $(git -C "$vendor" describe --tags 2>/dev/null) != "v$FREECAD_MCP_VERSION" ]]; then
+        rm -rf "$vendor"
+        git -c advice.detachedHead=false clone -q --depth 1 --branch "v$FREECAD_MCP_VERSION" \
+            https://github.com/neka-nat/freecad-mcp "$vendor"
+    fi
+    note "$vendor"
+
+    say "FreeCAD addons"
+    uad=$(fc_user_dir) || fail "could not ask FreeCAD for its user folder (does freecadcmd run?)"
+    mod="$uad/Mod"
+    mkdir -p "$mod"
+    for pair in "FreeCADMCP:$vendor/addon/FreeCADMCP" "Hoischen:$here/freecad-hoischen"; do
+        name=${pair%%:*}; src=${pair#*:}
+        if [[ -e $mod/$name && ! -L $mod/$name && ! -f $mod/$name/$marker ]]; then
+            fail "$mod/$name exists and was not put there by cadprompt; move it away first"
+        fi
+        rm -rf "${mod:?}/$name"
+        if [[ $kind == flatpak ]]; then
+            cp -r "$src" "$mod/$name"; touch "$mod/$name/$marker"   # a sandbox cannot follow links out
+        else
+            ln -s "$src" "$mod/$name"
+        fi
+    done
+    note "$mod/FreeCADMCP, $mod/Hoischen"
+
+    settings="$uad/freecad_mcp_settings.json"
+    [[ -s $settings ]] || echo '{}' > "$settings"
+    tmp=$(mktemp)
+    jq --arg t "$token" '. + {remote_enabled: false, allowed_ips: "127.0.0.1", auto_start_rpc: true, auth_token: $t}' \
+        "$settings" > "$tmp" && mv "$tmp" "$settings"
+    chmod 600 "$settings"
+    note "MCP server: starts with FreeCAD, localhost only, token required"
+
+    say "Commands"
+    mkdir -p "$bin"
+    ln -sfn "$here/bin/cadprompt" "$bin/cadprompt"
+    ln -sfn "$here/bin/cadprompt-grab" "$bin/cadprompt-grab"
+    ln -sfn "$here/bin/cadprompt-tui" "$bin/cadprompt-tui"
+    ln -sfn "$here/bin/cadprompt-send" "$bin/cadprompt-send"
+    note "cadprompt, cadprompt-grab, cadprompt-tui, cadprompt-send"
+
+    say "Hyprland keys and window"
+    [[ -f $hypr/hyprland.lua ]] || fail "$hypr/hyprland.lua not found: this expects Omarchy's Lua config"
+    ln -sfn "$here/hypr/cadprompt.lua" "$hypr/cadprompt.lua"
+    grep -qF 'require("hypr.cadprompt")' "$hypr/hyprland.lua" || printf '\n%s\n' "$require_line" >> "$hypr/hyprland.lua"
+    if command -v hyprctl >/dev/null 2>&1; then
+        # keys someone else already uses on this machine (our own binds say "CAD")
+        taken=$(hyprctl binds -j 2>/dev/null | jq -r '.[] | select((.description // "") | test("CAD") | not) | "\(.modmask) \(.key | ascii_downcase)"' 2>/dev/null || true)
+        for want in "72 c" "73 c" "72 r" "73 r" "72 v"; do
+            grep -qx "$want" <<<"$taken" && warn "key already bound on this machine: $want (72 = SUPER+ALT, 73 = SUPER+ALT+SHIFT); change it in $here/hypr/cadprompt.lua"
+        done
+        hyprctl reload >/dev/null 2>&1 || true
+        errs=$(hyprctl configerrors 2>/dev/null || true)
+        [[ -z $errs || $errs == "No errors"* ]] || warn "hyprctl configerrors: $errs"
+    fi
+    note "SUPER+ALT+C prompt · +SHIFT teach · SUPER+ALT+R grab region · +SHIFT last download · SUPER+ALT+V clipboard"
+
+    say "Bar icon"
+    if [[ -s $shell_json ]]; then
+        tmp=$(mktemp)
+        jq --argjson e "$bar_entry" '
+            .bar.layout |= map_values(map(if .id == "cadprompt" then $e else . end))
+            | if [.bar.layout[]?[]? | select(.id == "cadprompt")] | length > 0 then .
+            else .bar.layout.right = ((.bar.layout.right // []) as $r
+                 | ($r | map(.id) | index("omarchy.agents")) as $i
+                 | if $i == null then $r + [$e] else $r[:$i] + [$e] + $r[$i:] end) end' \
+            "$shell_json" > "$tmp" && mv "$tmp" "$shell_json"
+        note "cube icon in the bar (the shell reloads shell.json by itself)"
+    else
+        warn "no $shell_json: for the bar icon add this to bar.layout.right: $bar_entry"
+    fi
+
+    say "Fetching the MCP server once, so the first prompt does not time out"
+    if env -u PYTHONPATH uvx --python '>=3.12' "freecad-mcp==$FREECAD_MCP_VERSION" --help >/dev/null 2>&1; then
+        note "ready"
+    else
+        warn "uvx could not run freecad-mcp; try: uvx --python '>=3.12' freecad-mcp==$FREECAD_MCP_VERSION --help"
+    fi
+
+    say "Done"
+    note "Restart FreeCAD if it is open. Then SUPER+ALT+C, name a project, say what to build."
+    if [[ $kind == flatpak ]]; then
+        note "To make the trust rule a real wall, confine the Flatpak to your projects:"
+        note "  flatpak override --user --nofilesystem=home --filesystem=$CAD_HOME $FLATPAK_ID"
+    else
+        note "Note: a native FreeCAD runs Claude's Python with your full user rights (see README, Security)."
+    fi
+    if ((${#warnings[@]})); then
+        printf '\n\033[33m%d warning(s):\033[0m\n' "${#warnings[@]}"
+        printf '  - %s\n' "${warnings[@]}"
+    fi
+}
+
+remove() {
+    local purge=${1:-}
+    say "Removing cadprompt"
+    rm -f "$bin/cadprompt" "$bin/cadprompt-grab" "$bin/cadprompt-tui" "$bin/cadprompt-send"
+    if [[ -s $shell_json ]] && jq -e '[.bar.layout[]?[]? | select(.id == "cadprompt")] | length > 0' "$shell_json" >/dev/null 2>&1; then
+        tmp=$(mktemp); jq '.bar.layout |= map_values(map(select(.id != "cadprompt")))' "$shell_json" > "$tmp" && mv "$tmp" "$shell_json"
+        note "bar icon"
+    fi
+    rm -f "$hypr/cadprompt.lua"
+    [[ -f $hypr/hyprland.lua ]] && sed -i '/^require("hypr.cadprompt")/d' "$hypr/hyprland.lua"
+    command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1 || true
+    note "commands, keys and window rule"
+
+    if uad=$(fc_user_dir); then
+        for name in FreeCADMCP Hoischen; do
+            p="$uad/Mod/$name"
+            if [[ -L $p ]] || [[ -f $p/$marker ]]; then rm -rf "$p"; fi
+        done
+        s="$uad/freecad_mcp_settings.json"
+        if [[ -s $s ]]; then
+            tmp=$(mktemp); jq '.auto_start_rpc = false | .auth_token = ""' "$s" > "$tmp" && mv "$tmp" "$s"
+        fi
+        note "FreeCAD addons and MCP auto-start"
+    else
+        warn "FreeCAD not reachable; its Mod/FreeCADMCP and Mod/Hoischen links were left in place"
+    fi
+    rm -rf "$STATE_DIR"
+    if [[ $purge == --purge ]]; then
+        rm -rf "$CONF_DIR" "$here/vendor"
+        note "token and vendor/ removed"
+    else
+        note "kept: $CONF_DIR/token and vendor/ (--purge removes them)"
+    fi
+    note "projects in $CAD_HOME untouched"
+}
+
+upgrade() {
+    local want=${1:-} newest
+    newest=$(git ls-remote --tags --refs https://github.com/neka-nat/freecad-mcp 2>/dev/null \
+             | sed -n 's#.*refs/tags/v##p' | sort -V | tail -n1)
+    [[ -n $newest ]] || fail "could not reach GitHub to look for a newer freecad-mcp"
+    want=${want:-$newest}
+    [[ $want =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like 0.1.28"
+    if [[ $want == "$FREECAD_MCP_VERSION" ]]; then
+        note "freecad-mcp $FREECAD_MCP_VERSION is already installed (newest: $newest)"
+        return 0
+    fi
+    note "freecad-mcp $FREECAD_MCP_VERSION -> $want   (newest: $newest)"
+    note "what changed: https://github.com/neka-nat/freecad-mcp/compare/v$FREECAD_MCP_VERSION...v$want"
+    sed -i "s/^FREECAD_MCP_VERSION=\"[^\"]*\"/FREECAD_MCP_VERSION=\"$want\"/" "$here/lib/common.sh"
+    FREECAD_MCP_VERSION=$want
+    install
+    rpc_up && note "FreeCAD is running the old addon: restart it to finish the upgrade"
+    return 0
+}
+
+update() {
+    [[ -d $here/.git ]] || fail "$here is not a git checkout; use the one-line installer from the README"
+    say "Pulling the newest cadprompt"
+    git -C "$here" pull --ff-only
+    install
+}
+
+case ${1:-} in
+    install) install ;;
+    update)  update ;;
+    remove)  remove "${2:-}" ;;
+    upgrade) upgrade "${2:-}" ;;
+    *)       sed -n '2,18p' "$0" | sed 's/^# \?//'; exit 1 ;;
+esac

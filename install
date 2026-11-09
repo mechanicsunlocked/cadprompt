@@ -1,0 +1,24 @@
+#!/bin/bash
+# cadprompt -- one line to install, the same line to update:
+#
+#   curl -fsSL https://raw.githubusercontent.com/mechanicsunlocked/cadprompt/main/install | bash
+#
+# First run: clones into ~/Work/cadprompt and runs ./setup install.
+# Later runs: pulls the newest version into that folder and runs ./setup install again.
+# Set CADPROMPT_DIR to put it somewhere else. Needs git; setup checks the rest.
+set -euo pipefail
+
+repo="https://github.com/mechanicsunlocked/cadprompt"
+dest="${CADPROMPT_DIR:-$HOME/Work/cadprompt}"
+
+command -v git >/dev/null 2>&1 || { echo "git is needed first: sudo pacman -S git" >&2; exit 1; }
+
+if [[ -d $dest/.git ]]; then
+    printf '\n\033[1m==> Updating %s\033[0m\n' "$dest"
+    git -C "$dest" pull --ff-only
+else
+    printf '\n\033[1m==> Cloning into %s\033[0m\n' "$dest"
+    mkdir -p "$(dirname "$dest")"
+    git clone -q "$repo" "$dest"
+fi
+exec "$dest/setup" install
