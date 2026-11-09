@@ -10,6 +10,8 @@
 <p align="center"><b>Tell Claude what to build. Watch FreeCAD build it.</b><br>
 A hotkey and a bar menu for Omarchy. One line to install, the same line to update.</p>
 
+<p align="center"><img src="docs/demo.png" width="800" alt="Claude Code on the left building a machine foot in FreeCAD on the right"></p>
+
 ## Install
 
 ```bash
