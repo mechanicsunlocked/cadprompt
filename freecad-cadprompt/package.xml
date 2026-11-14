@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>CADprompt</name>
+  <description>A chat panel in FreeCAD: say what to build, and your own Claude Code builds it in the open document, parametric, with a teach mode for students and DIN drawings.</description>
+  <version>0.1.0</version>
+  <date>2026-11-14</date>
+  <maintainer email="noreply@example.invalid">mechanicsunlocked</maintainer>
+  <license file="LICENSE">MIT</license>
+  <url type="repository" branch="main">https://github.com/mechanicsunlocked/cadprompt</url>
+  <icon>icons/cadprompt.svg</icon>
+  <freecadmin>1.0.0</freecadmin>
+  <content>
+    <workbench>
+      <!-- No workbench of its own: InitGui.py adds a dock panel and a command.
+           Declared so FreeCAD 1.x runs InitGui.py at all. -->
+      <classname>CADpromptPanel</classname>
+      <name>CADprompt</name>
+      <subdirectory>./</subdirectory>
+    </workbench>
+  </content>
+</package>

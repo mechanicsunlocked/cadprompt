@@ -12,7 +12,7 @@
 #   ~/.local/bin/cadprompt, -grab, -tui, -send    symlinks into bin/
 #   ~/.config/hypr/cadprompt.lua                  symlink into hypr/
 #   ~/.config/hypr/hyprland.lua                   one appended line: require("hypr.cadprompt")
-#   <FreeCAD user dir>/Mod/FreeCADMCP, Hoischen   symlinks (copies for a Flatpak FreeCAD)
+#   <FreeCAD user dir>/Mod/FreeCADMCP, Hoischen, CADprompt   symlinks (copies for a Flatpak FreeCAD)
 #   <FreeCAD user dir>/freecad_mcp_settings.json  token, localhost only, auto-start
 #   ~/.config/cadprompt/token, tablet             the token; the tablet's tailnet name
 #   ~/.config/omarchy/shell.json                  one bar entry {id: "cadprompt", type: command}
@@ -76,7 +76,7 @@ install() {
     uad=$(fc_user_dir) || fail "could not ask FreeCAD for its user folder (does freecadcmd run?)"
     mod="$uad/Mod"
     mkdir -p "$mod"
-    for pair in "FreeCADMCP:$vendor/addon/FreeCADMCP" "Hoischen:$here/freecad-hoischen"; do
+    for pair in "FreeCADMCP:$vendor/addon/FreeCADMCP" "Hoischen:$here/freecad-hoischen" "CADprompt:$here/freecad-cadprompt"; do
         name=${pair%%:*}; src=${pair#*:}
         if [[ -e $mod/$name && ! -L $mod/$name && ! -f $mod/$name/$marker ]]; then
             fail "$mod/$name exists and was not put there by cadprompt; move it away first"
@@ -88,7 +88,7 @@ install() {
             ln -s "$src" "$mod/$name"
         fi
     done
-    note "$mod/FreeCADMCP, $mod/Hoischen"
+    note "$mod/FreeCADMCP, $mod/Hoischen, $mod/CADprompt"
 
     settings="$uad/freecad_mcp_settings.json"
     [[ -s $settings ]] || echo '{}' > "$settings"
@@ -172,7 +172,7 @@ remove() {
     note "commands, keys and window rule"
 
     if uad=$(fc_user_dir); then
-        for name in FreeCADMCP Hoischen; do
+        for name in FreeCADMCP Hoischen CADprompt; do
             p="$uad/Mod/$name"
             if [[ -L $p ]] || [[ -f $p/$marker ]]; then rm -rf "$p"; fi
         done
@@ -182,7 +182,7 @@ remove() {
         fi
         note "FreeCAD addons and MCP auto-start"
     else
-        warn "FreeCAD not reachable; its Mod/FreeCADMCP and Mod/Hoischen links were left in place"
+        warn "FreeCAD not reachable; its Mod/FreeCADMCP, Mod/Hoischen and Mod/CADprompt links were left in place"
     fi
     rm -rf "$STATE_DIR"
     if [[ $purge == --purge ]]; then
