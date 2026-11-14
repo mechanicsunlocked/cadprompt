@@ -108,12 +108,18 @@ class Panel(QtWidgets.QWidget):
         for label, tip, fn in (
             ("Add reference…", "Copy photos, PDFs or drawings into refs/ for Claude", self._add_refs),
             ("Check", "Review the model before it goes to the shop", lambda: self.send("/check")),
-            ("Drawing A3", "DIN workshop drawing, PDF in drawings/", lambda: self.send("/drawing A3")),
         ):
             b = QtWidgets.QPushButton(label)
             b.setToolTip(tip)
             b.clicked.connect(fn)
             row.addWidget(b)
+        drawing = QtWidgets.QPushButton("Drawing")
+        drawing.setToolTip("DIN workshop drawing, PDF in drawings/: pick the sheet size")
+        menu = QtWidgets.QMenu(drawing)
+        for size in ("A2", "A3", "A4", "A5"):
+            menu.addAction(size, lambda size=size: self.send(f"/drawing {size}"))
+        drawing.setMenu(menu)
+        row.addWidget(drawing)
         lay.addLayout(row)
 
         self.input = _Input()
