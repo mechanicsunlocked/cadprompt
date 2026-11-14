@@ -27,6 +27,12 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("AI", self.account)
         form.addRow("", self.custom)
 
+        self.web = QtWidgets.QCheckBox("Allow web search and reading web pages")
+        self.web.setToolTip("Claude may look up standards, catalogues and datasheets. Text on web pages "
+                            "is treated as data, never as instructions.")
+        self.web.setChecked(p.GetBool("AllowWeb", False))
+        form.addRow("Web", self.web)
+
         self.model_override = QtWidgets.QLineEdit(p.GetString("ModelOverride", ""))
         self.model_override.setPlaceholderText("empty = Claude Code's default; or opus, sonnet, haiku")
         form.addRow("Claude model", self.model_override)
@@ -63,6 +69,7 @@ class SettingsDialog(QtWidgets.QDialog):
         p = paths.params()
         p.SetString("ProjectsDir", self.projects.text().strip())
         p.SetString("Backend", "custom" if self.custom.isChecked() else "account")
+        p.SetBool("AllowWeb", self.web.isChecked())
         p.SetString("ModelOverride", self.model_override.text().strip())
         p.SetString("BaseUrl", self.url.text().strip())
         p.SetString("Model", self.model.text().strip())

@@ -107,3 +107,13 @@ def add_refs(project, files):
             index.write(f"- {when}  `{os.path.basename(dest)}`  (added in FreeCAD)\n")
             added.append(os.path.basename(dest))
     return added
+
+
+def add_link(project, url):
+    refs = os.path.join(project, "refs")
+    os.makedirs(refs, exist_ok=True)
+    when = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(os.path.join(refs, "links.md"), "a", encoding="utf-8") as f:
+        f.write(f"- {when}  <{url}>\n")
+    with open(os.path.join(refs, "INDEX.md"), "a", encoding="utf-8") as f:
+        f.write(f"- {when}  links.md  (link: {url})\n")

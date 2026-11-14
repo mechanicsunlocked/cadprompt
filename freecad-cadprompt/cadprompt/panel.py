@@ -29,6 +29,15 @@ def _os_key():
 
 class _Input(QtWidgets.QPlainTextEdit):
     send = QtCore.Signal()
+    take = None   # set by the panel: take(mime) -> True when it became a reference
+
+    def canInsertFromMimeData(self, mime):
+        return mime.hasUrls() or mime.hasImage() or super().canInsertFromMimeData(mime)
+
+    def insertFromMimeData(self, mime):
+        if self.take and self.take(mime):
+            return
+        super().insertFromMimeData(mime)
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not (e.modifiers() & QtCore.Qt.ShiftModifier):
@@ -48,6 +57,8 @@ class Panel(QtWidgets.QWidget):
         self.entries = []
         self.project = None
         self.claude = None
+        self.claude_projects = None   # Claude Code's transcript folder, from auth status
+        self.setAcceptDrops(True)
         self._last_prompt = None
         self._retried = False
         self._build_ui()
@@ -109,6 +120,7 @@ class Panel(QtWidgets.QWidget):
         self.input.setPlaceholderText("Say what to build or change. Enter sends, Shift+Enter new line.")
         self.input.setMaximumHeight(90)
         self.input.send.connect(lambda: self.send())
+        self.input.take = self.take_mime
         lay.addWidget(self.input)
 
         row = QtWidgets.QHBoxLayout()
@@ -191,6 +203,10 @@ class Panel(QtWidgets.QWidget):
         return True
 
     def _on_auth(self, st):
+        if st and st.get("projectsDirectory"):
+            self.claude_projects = st["projectsDirectory"]
+            if len(self.entries) <= 1:
+                self._load_history()
         if st is None:
             self._add("note", "Could not ask Claude Code whether you are signed in; trying anyway.")
         elif not st.get("loggedIn"):
@@ -236,11 +252,11 @@ class Panel(QtWidgets.QWidget):
             self.run.stop()
         self.project = projects.path_of(name)
         paths.params().SetString("LastProject", name)
-        mode = projects.get_mode(self.project)
-        (self.teach_btn if mode == "teach" else self.build_btn).setChecked(True)
+        runner.allow_web_in_project(self.project)
+        self._sync_mode()
         self.entries = []
-        self._add("note", f"Project **{name}**" +
-                  (", continuing the earlier conversation." if projects.get_session(self.project) else "."))
+        self._add("note", f"Project **{name}**.")
+        self._load_history()
         if open_model:
             model = projects.newest_model(self.project)
             if model:
@@ -248,6 +264,65 @@ class Panel(QtWidgets.QWidget):
                     projects.open_model(model)
                 except Exception as e:
                     self._add("error", f"Could not open {os.path.basename(model)}: {e}")
+
+    def _load_history(self):
+        sid = projects.get_session(self.project) if self.project else None
+        path = sid and runner.transcript_path(self.project, sid, self.claude_projects)
+        if not path:
+            return
+        old = runner.read_history(path)
+        if old:
+            self.entries = self.entries[:1] + old + [("note", "Continuing this conversation.")]
+            self._render()
+
+    def _sync_mode(self):
+        """The mode file decides; /teach or /build typed in the chat change it too."""
+        mode = projects.get_mode(self.project)
+        for b in (self.build_btn, self.teach_btn):
+            b.blockSignals(True)
+        (self.teach_btn if mode == "teach" else self.build_btn).setChecked(True)
+        for b in (self.build_btn, self.teach_btn):
+            b.blockSignals(False)
+
+    # ---- drag and drop, paste ---------------------------------------------
+    def dragEnterEvent(self, e):
+        m = e.mimeData()
+        if m.hasUrls() or m.hasImage():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        if self.take_mime(e.mimeData()):
+            e.acceptProposedAction()
+
+    def take_mime(self, mime):
+        """Files, images and links dropped or pasted become references in refs/."""
+        if not self.project:
+            return False
+        files, links = [], []
+        if mime.hasUrls():
+            for u in mime.urls():
+                if u.isLocalFile() and os.path.isfile(u.toLocalFile()):
+                    files.append(u.toLocalFile())
+                elif u.scheme() in ("http", "https"):
+                    links.append(u.toString())
+        elif mime.hasText():
+            t = mime.text().strip()
+            if t.startswith(("http://", "https://")) and " " not in t and "\n" not in t:
+                links.append(t)
+        if not files and not links and mime.hasImage():
+            import tempfile
+            img = mime.imageData()
+            tmp = os.path.join(tempfile.mkdtemp(prefix="cadprompt-"), "pasted.png")
+            if img is not None and QtGui.QImage(img).save(tmp, "PNG"):
+                files.append(tmp)
+        if not files and not links:
+            return False
+        names = projects.add_refs(self.project, files) if files else []
+        for url in links:
+            projects.add_link(self.project, url)
+        what = [f"`{n}`" for n in names] + [f"<{u}>" for u in links]
+        self._add("note", "In refs/: " + ", ".join(what) + ". Tell Claude what to do with them.")
+        return True
 
     def _on_mode(self, _checked):
         if self.project:
@@ -326,6 +401,18 @@ class Panel(QtWidgets.QWidget):
         sid = res.get("session_id")
         if sid:
             projects.set_session(self.project, sid)
+        self._sync_mode()
+        seen = set()
+        for d in res.get("permission_denials") or []:
+            name = runner._short_tool(d.get("tool_name", "tool"))
+            if name in seen:
+                continue
+            seen.add(name)
+            if name in runner.WEB_TOOLS:
+                self._add("error", f"`{name}` was blocked: web access is off. "
+                                   "Turn it on in Settings, then ask again.")
+            else:
+                self._add("error", f"`{name}` was blocked by this project's permission rules.")
         if not res.get("is_error"):
             return
         msg = str(res.get("result") or res.get("subtype") or "Claude Code stopped.")
