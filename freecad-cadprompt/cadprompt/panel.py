@@ -1,4 +1,9 @@
-"""The chat panel: a dock in FreeCAD that talks to the user's own Claude Code."""
+"""The chat panel: a dock in FreeCAD where the user says what to build.
+
+Who does the work is chosen in Settings (backends.py): Claude Code with the
+user's account, an API key or another endpoint, or the built-in engine with a
+local model. The panel looks and works the same for all of them.
+"""
 
 import os
 
@@ -6,7 +11,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtWidgets
 
-from . import bridge, paths, projects, runner
+from . import backends, bridge, paths, projects, runner
 
 NEW = "+ New project…"
 
@@ -46,14 +51,37 @@ class _Input(QtWidgets.QPlainTextEdit):
         super().keyPressEvent(e)
 
 
+class _Source(QtWidgets.QLabel):
+    """Which AI is active, on one line: a long model name is cut, not the dock widened."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.full = ""
+        self.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+
+    def show_text(self, text):
+        self.full = text
+        self.setToolTip("The AI that does the work: " + text + ". Change it in Settings.")
+        self._fit()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        self.setText(self.fontMetrics().elidedText(self.full, QtCore.Qt.ElideRight, self.width()))
+
+
 class Panel(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.run = runner.ClaudeRun(self)
-        self.run.text.connect(lambda t: self._add("claude", t))
-        self.run.tool.connect(self._on_tool)
-        self.run.tool_error.connect(lambda n: self._add("error", f"`{n}` failed, Claude is looking at why"))
-        self.run.finished.connect(self._on_finished)
+        self.run = runner.ClaudeRun(self)     # Claude Code: account, API key, other endpoint
+        self.local_run = None                 # the built-in engine, made when first needed
+        self._engine = self.run               # the one that got the last message
+        self._connect(self.run)
+        self._check = 0                       # counts check_setup runs: late answers are dropped
+        self._stop_asked = False
         self.entries = []
         self.project = None
         self.claude = None
@@ -62,8 +90,58 @@ class Panel(QtWidgets.QWidget):
         self._last_prompt = None
         self._retried = False
         self._build_ui()
+        self._show_source()
         self._fill_projects()
         QtCore.QTimer.singleShot(0, self.check_setup)
+
+    # ---- the two engines ----------------------------------------------------
+    def _connect(self, run):
+        run.text.connect(lambda t: self._add("claude", t))
+        run.tool.connect(self._on_tool)
+        run.tool_error.connect(self._on_tool_error)
+        run.finished.connect(lambda res, run=run: self._on_finished(res, run))
+
+    def _local_engine(self):
+        """The built-in engine, loaded on first use: the Claude Code sources never need it."""
+        from . import local_engine
+        return local_engine
+
+    def _local_run(self):
+        if self.local_run is None:
+            self.local_run = self._local_engine().LocalRun(self)
+            self._connect(self.local_run)
+        return self.local_run
+
+    def _running(self):
+        return self.run.running() or (self.local_run is not None and self.local_run.running())
+
+    def _stop(self):
+        if self.run.running():
+            self.run.stop()
+        if self.local_run is not None and self.local_run.running():
+            self.local_run.stop()
+
+    def _who(self, start=False):
+        """Who is working on the message that was sent."""
+        if self._engine is self.run:
+            return "Claude"
+        return "The local model" if start else "the local model"
+
+    def _ai(self, start=False):
+        """Who the next message goes to."""
+        if backends.uses_claude_code():
+            return "Claude"
+        return "The local model" if start else "the local model"
+
+    def _show_source(self):
+        """The label next to the mode buttons, and the tooltips that name the AI."""
+        b = backends.current()
+        p = paths.params()
+        model = {"local": p.GetString("LocalModel", "").strip() or "no model yet",
+                 "custom": p.GetString("Model", "").strip()}.get(b, p.GetString("ModelOverride", "").strip())
+        self.source.show_text(backends.label(b) + (" · " + model if model else ""))
+        self.build_btn.setToolTip(f"{self._ai(start=True)} builds the whole part")
+        self.refs_btn.setToolTip(f"Copy photos, PDFs or drawings into refs/ for {self._ai()}")
 
     # ---- UI -------------------------------------------------------------
     def _build_ui(self):
@@ -86,14 +164,14 @@ class Panel(QtWidgets.QWidget):
 
         row = QtWidgets.QHBoxLayout()
         self.build_btn = QtWidgets.QRadioButton("Build")
-        self.build_btn.setToolTip("Claude builds the whole part")
         self.teach_btn = QtWidgets.QRadioButton("Teach")
         self.teach_btn.setToolTip("One feature at a time: which tool, where, and why")
         self.build_btn.setChecked(True)
         self.build_btn.toggled.connect(self._on_mode)
         row.addWidget(self.build_btn)
         row.addWidget(self.teach_btn)
-        row.addStretch(1)
+        self.source = _Source()
+        row.addWidget(self.source, 1)
         newchat = QtWidgets.QToolButton(text="New chat")
         newchat.setToolTip("Start a fresh conversation in this project")
         newchat.clicked.connect(self._new_chat)
@@ -105,14 +183,13 @@ class Panel(QtWidgets.QWidget):
         lay.addWidget(self.view, 1)
 
         row = QtWidgets.QHBoxLayout()
-        for label, tip, fn in (
-            ("Add reference…", "Copy photos, PDFs or drawings into refs/ for Claude", self._add_refs),
-            ("Check", "Review the model before it goes to the shop", lambda: self.send("/check")),
-        ):
-            b = QtWidgets.QPushButton(label)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            row.addWidget(b)
+        self.refs_btn = QtWidgets.QPushButton("Add reference…")
+        self.refs_btn.clicked.connect(self._add_refs)
+        row.addWidget(self.refs_btn)
+        check = QtWidgets.QPushButton("Check")
+        check.setToolTip("Review the model before it goes to the shop")
+        check.clicked.connect(lambda: self.send("/check"))
+        row.addWidget(check)
         drawing = QtWidgets.QPushButton("Drawing")
         drawing.setToolTip("DIN workshop drawing, PDF in drawings/: pick the sheet size")
         menu = QtWidgets.QMenu(drawing)
@@ -151,7 +228,7 @@ class Panel(QtWidgets.QWidget):
                 parts.append(text)
             elif kind == "tool":
                 parts.append(f"<small>▸ {text}</small>")
-            elif kind == "error":
+            elif kind in ("error", "setup"):
                 parts.append(f"**⚠** {text}")
             else:
                 parts.append(f"*{text}*")
@@ -164,60 +241,103 @@ class Panel(QtWidgets.QWidget):
         self.status.setText(msg)
 
     # ---- setup checks -----------------------------------------------------
+    def _setup(self, text, note=False):
+        """A message of the setup check. The next check takes it away again."""
+        self._add("setup-note" if note else "setup", text)
+
     def check_setup(self):
         """Say what is missing, in words a student can follow. True when ready."""
+        self._check += 1
+        if any(kind.startswith("setup") for kind, _ in self.entries):
+            self.entries = [e for e in self.entries if not e[0].startswith("setup")]
+            self._render()
+        if backends.current() == "local":
+            return self._check_local()
+        return self._check_claude_code()
+
+    def _check_local(self):
+        """The built-in engine needs no Claude Code, no uv and no bridge: only a server and a model."""
+        if not paths.template_dir():
+            self._setup("The project template is missing: install the whole cadprompt repository.")
+            return False
+        cfg = backends.local_config()
+        if not cfg["url"]:
+            self._setup("No server address is set for the local model. Open Settings and enter it, "
+                        f"for example `{backends.LOCAL_URL}` for LM Studio.")
+            return False
+        if not cfg["model"]:
+            self._setup("No model is chosen yet. Open Settings, press Find models and pick one.")
+            return False
+        try:
+            self._local_engine()
+        except Exception as e:
+            self._setup(f"The part of CADprompt that talks to local models did not load: {e}")
+            return False
+        return True
+
+    def _check_claude_code(self):
         k = _os_key()
+        backend = backends.current()
         if paths.in_flatpak():
-            self._add("error", "This FreeCAD runs as a Flatpak and cannot start Claude Code from inside "
-                               "its sandbox. Use the FreeCAD package or AppImage, or the terminal launcher.")
+            self._setup("This FreeCAD runs as a Flatpak and cannot start Claude Code from inside "
+                        "its sandbox. Use the FreeCAD package or AppImage, or the terminal launcher, "
+                        "or choose a local model in Settings.")
             return False
         if not paths.template_dir():
-            self._add("error", "The project template is missing: install the whole cadprompt repository.")
+            self._setup("The project template is missing: install the whole cadprompt repository.")
             return False
         self.claude = paths.find_tool("claude")
         if not self.claude:
-            self._add("error", "Claude Code is not installed. " + INSTALL_CLAUDE[k] +
-                      " Then sign in once by running `claude` and restart FreeCAD.")
+            then = " Then restart FreeCAD." if backend == "apikey" else \
+                   " Then sign in once by running `claude` and restart FreeCAD."
+            self._setup("Claude Code is not installed. " + INSTALL_CLAUDE[k] + then)
             return False
         if not paths.find_tool("uvx"):
-            self._add("error", "uv is not installed (it runs the FreeCAD bridge). " + INSTALL_UV[k] +
-                      " Then restart FreeCAD.")
+            self._setup("uv is not installed (it runs the FreeCAD bridge). " + INSTALL_UV[k] +
+                        " Then restart FreeCAD.")
             return False
         try:
             _, msg = bridge.ensure()
             if "expected" in msg:
-                self._add("note", msg)
+                self._setup(msg, note=True)
         except LookupError:
             ans = QtWidgets.QMessageBox.question(
                 self, "CADprompt",
                 f"The FreeCAD MCP bridge (freecad-mcp {paths.FREECAD_MCP_VERSION}) is not installed.\n\n"
                 "Download it from GitHub (github.com/neka-nat/freecad-mcp) into FreeCAD's Mod folder now?")
             if ans != QtWidgets.QMessageBox.Yes:
-                self._add("error", "Without the bridge Claude cannot reach FreeCAD.")
+                self._setup("Without the bridge Claude cannot reach FreeCAD.")
                 return False
             try:
-                self._add("note", bridge.install())
+                self._setup(bridge.install(), note=True)
                 bridge.ensure()
             except Exception as e:
-                self._add("error", f"Could not install the bridge: {e}")
+                self._setup(f"Could not install the bridge: {e}")
                 return False
         except Exception as e:
-            self._add("error", f"The FreeCAD bridge did not start: {e}")
+            self._setup(f"The FreeCAD bridge did not start: {e}")
             return False
-        if not runner.backend_env():
-            runner.auth_status(self.claude, self._on_auth, self)
+        if backend == "apikey":
+            # the key signs in, so whether Claude Code has a login of its own does not matter
+            if not backends.api_key():
+                self._setup("No Anthropic API key is saved. Open Settings and paste your key.")
+                return False
+        elif not runner.backend_env():
+            runner.auth_status(self.claude, lambda st, n=self._check: self._on_auth(st, n), self)
         return True
 
-    def _on_auth(self, st):
+    def _on_auth(self, st, check=None):
+        if check is not None and check != self._check:
+            return      # the settings changed while Claude Code was answering
         if st and st.get("projectsDirectory"):
             self.claude_projects = st["projectsDirectory"]
             if len(self.entries) <= 1:
                 self._load_history()
         if st is None:
-            self._add("note", "Could not ask Claude Code whether you are signed in; trying anyway.")
+            self._setup("Could not ask Claude Code whether you are signed in; trying anyway.", note=True)
         elif not st.get("loggedIn"):
-            self._add("error", "Claude Code is not signed in. Open a terminal, run `claude`, sign in "
-                               "with your Claude account, then try again here.")
+            self._setup("Claude Code is not signed in. Open a terminal, run `claude`, sign in "
+                        "with your Claude account, then try again here.")
 
     # ---- projects ---------------------------------------------------------
     def _fill_projects(self):
@@ -254,8 +374,7 @@ class Panel(QtWidgets.QWidget):
         self._select(name, open_model=True)
 
     def _select(self, name, open_model):
-        if self.run.running():
-            self.run.stop()
+        self._stop()
         self.project = projects.path_of(name)
         paths.params().SetString("LastProject", name)
         runner.allow_web_in_project(self.project)
@@ -272,11 +391,21 @@ class Panel(QtWidgets.QWidget):
                     self._add("error", f"Could not open {os.path.basename(model)}: {e}")
 
     def _load_history(self):
-        sid = projects.get_session(self.project) if self.project else None
-        path = sid and runner.transcript_path(self.project, sid, self.claude_projects)
-        if not path:
+        """The earlier conversation of this project with the source chosen now."""
+        if not self.project:
             return
-        old = runner.read_history(path)
+        if backends.current() == "local":
+            try:
+                old = self._local_engine().history(self.project)
+            except Exception as e:
+                App.Console.PrintWarning(f"CADprompt: could not read the local conversation: {e}\n")
+                return
+        else:
+            sid = projects.get_session(self.project)
+            path = sid and runner.transcript_path(self.project, sid, self.claude_projects)
+            if not path:
+                return
+            old = runner.read_history(path)
         if old:
             self.entries = self.entries[:1] + old + [("note", "Continuing this conversation.")]
             self._render()
@@ -327,7 +456,7 @@ class Panel(QtWidgets.QWidget):
         for url in links:
             projects.add_link(self.project, url)
         what = [f"`{n}`" for n in names] + [f"<{u}>" for u in links]
-        self._add("note", "In refs/: " + ", ".join(what) + ". Tell Claude what to do with them.")
+        self._add("note", "In refs/: " + ", ".join(what) + f". Tell {self._ai()} what to do with them.")
         return True
 
     def _on_mode(self, _checked):
@@ -336,7 +465,17 @@ class Panel(QtWidgets.QWidget):
 
     def _new_chat(self):
         if self.project:
-            projects.set_session(self.project, None)
+            if backends.current() == "local":
+                # each source keeps its own conversation: this one is the engine's file
+                try:
+                    if self.local_run is not None and self.local_run.running():
+                        self.local_run.stop()     # or it would write the old conversation back
+                    self._local_engine().clear(self.project)
+                except Exception as e:
+                    self._add("error", f"Could not start a new conversation: {e}")
+                    return
+            else:
+                projects.set_session(self.project, None)
             self.entries = []
             self._add("note", "New conversation.")
 
@@ -353,22 +492,25 @@ class Panel(QtWidgets.QWidget):
         if files:
             added = projects.add_refs(self.project, files)
             self._add("note", "In refs/: " + ", ".join(f"`{a}`" for a in added) +
-                      ". Tell Claude what to do with them.")
+                      f". Tell {self._ai()} what to do with them.")
 
     def _settings(self):
         from .settings_dialog import SettingsDialog
         if SettingsDialog(self).exec():
-            self._fill_projects()
+            self._show_source()
+            self._fill_projects()     # also shows the conversation of the source chosen now
+            self.check_setup()
 
-    # ---- talking to Claude --------------------------------------------------
+    # ---- talking to the AI ---------------------------------------------------
     def _send_or_stop(self):
-        if self.run.running():
-            self.run.stop()
+        if self._running():
+            self._stop_asked = True
+            self._stop()
         else:
             self.send()
 
     def send(self, text=None):
-        if self.run.running():
+        if self._running():
             return
         typed = text is None
         text = (self.input.toPlainText() if typed else text).strip()
@@ -377,36 +519,74 @@ class Panel(QtWidgets.QWidget):
         if not self.project:
             self._add("error", "Pick or create a project first.")
             return
-        if not self.claude and not self.check_setup():
-            return
-        try:
-            token, _ = bridge.ensure()
-        except Exception as e:
-            self._add("error", f"FreeCAD bridge: {e}")
-            return
+        backend = backends.current()
+        token = None
+        if backend == "local":
+            if not self.check_setup():
+                return
+        else:
+            key_missing = backend == "apikey" and not backends.api_key()
+            if (not self.claude or key_missing) and not self.check_setup():
+                return
+            try:
+                token, _ = bridge.ensure()
+            except Exception as e:
+                self._add("error", f"FreeCAD bridge: {e}")
+                return
         if typed:
             self.input.clear()
         self._add("user", text)
         self._last_prompt, self._retried = text, False
-        self._start(text, token)
+        self._stop_asked = False
+        if backend == "local":
+            self._start_local(text)
+        else:
+            self._start(text, token)
 
     def _start(self, text, token):
+        # the source's own variables (key, endpoint) are added by the runner: backends.claude_env
         env = {"FREECAD_MCP_TOKEN": token,
                "CADPROMPT_FREECADCMD": paths.freecadcmd_string(),
                "FREECAD_MCP_VERSION": paths.FREECAD_MCP_VERSION}
-        env.update(runner.backend_env())
-        self._busy(True, "Claude is working…")
+        self._engine = self.run
+        self._busy(True, f"{self._who(start=True)} is working…")
         self.run.start(self.claude, self.project, text, projects.get_session(self.project), env)
+
+    def _start_local(self, text):
+        """No Claude Code, no bridge, no session id: the engine keeps its own conversation."""
+        try:
+            run = self._local_run()
+            self._engine = run
+            self._busy(True, f"{self._who(start=True)} is working…")
+            run.start(self.project, text, backends.local_config())
+        except Exception as e:
+            self._busy(False)
+            self._add("error", f"The local model could not be started: {e}")
 
     def _on_tool(self, name, detail):
         self._add("tool", f"`{name}` {detail}".strip())
-        self.status.setText(f"Claude is working… ({name})")
+        self.status.setText(f"{self._who(start=True)} is working… ({name})")
 
-    def _on_finished(self, res):
-        self._busy(False)
-        sid = res.get("session_id")
-        if sid:
-            projects.set_session(self.project, sid)
+    def _on_tool_error(self, name):
+        self._add("error", f"`{name}` failed, {self._who()} is looking at why")
+
+    def _on_finished(self, res, run=None):
+        run = run or self._engine
+        local = run is not self.run
+        if run is self._engine:      # a run that was stopped for a newer one must not end "working…"
+            self._busy(False)
+        if res.get("stopped"):
+            # stopped on purpose: by the Stop button, a project change or a new chat
+            if self._stop_asked:
+                self._add("note", "Stopped.")
+            self._stop_asked = False
+            self._sync_mode()
+            return
+        self._stop_asked = False
+        if not local:
+            sid = res.get("session_id")
+            if sid:
+                projects.set_session(self.project, sid)
         self._sync_mode()
         seen = set()
         for d in res.get("permission_denials") or []:
@@ -421,6 +601,9 @@ class Panel(QtWidgets.QWidget):
                 self._add("error", f"`{name}` was blocked by this project's permission rules.")
         if not res.get("is_error"):
             return
+        if local:
+            self._add("error", str(res.get("result") or "The local model stopped without an answer."))
+            return
         msg = str(res.get("result") or res.get("subtype") or "Claude Code stopped.")
         if (not self._retried and projects.get_session(self.project)
                 and "conversation" in msg.lower() and "found" in msg.lower()):
@@ -430,7 +613,10 @@ class Panel(QtWidgets.QWidget):
             self._start(self._last_prompt, bridge.ensure()[0])
             return
         if "login" in msg.lower() or "authenticat" in msg.lower():
-            msg += "\n\nSign in: open a terminal, run `claude`, and sign in with your Claude account."
+            if backends.current() == "apikey":
+                msg += "\n\nCheck the API key in Settings."
+            else:
+                msg += "\n\nSign in: open a terminal, run `claude`, and sign in with your Claude account."
         self._add("error", msg)
 
 

@@ -1,0 +1,345 @@
+"""The built-in engine for a local model: no Claude Code, no uvx, no MCP bridge.
+
+LocalRun has the same signals as runner.ClaudeRun, so the panel can use
+either. The chat loop (local_agent) talks HTTP in a worker thread. FreeCAD is
+not thread-safe, so every tool call is handed to the main thread and the
+worker waits for the result. The conversation is kept in the project, in
+.cadprompt/local-chat.json, and goes on with the next start().
+"""
+
+import json
+import os
+import re
+import threading
+import traceback
+
+import FreeCAD as App
+from PySide import QtCore
+
+from . import local_agent, local_prompt, local_tools, projects
+
+CHAT_FILE = "local-chat.json"
+MAX_STORED = 400                   # messages kept in the file; older requests are dropped whole
+STOPPED = {"role": "assistant", "content": "*Stopped.*"}
+CHANGING = ("run_python", "make_drawing")     # tools that can change the document
+
+_COMMAND = re.compile(r"^/([A-Za-z0-9_-]+)(?:\s+(.*))?$", re.S)
+
+
+# ---- the stored conversation -------------------------------------------------
+def _chat_path(project):
+    return os.path.join(project, ".cadprompt", CHAT_FILE)
+
+
+def _load(project):
+    try:
+        with open(_chat_path(project), encoding="utf-8") as f:
+            messages = json.load(f).get("messages")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(messages, list):
+        return []
+    return [m for m in messages if isinstance(m, dict) and m.get("role")]
+
+
+def _save(project, messages):
+    if len(messages) > MAX_STORED:
+        starts = [i for i, m in enumerate(messages) if m.get("role") == "user" and not m.get("auto")]
+        late = [i for i in starts if len(messages) - i <= MAX_STORED]
+        messages = messages[late[0] if late else starts[-1] if starts else 0:]
+    path = _chat_path(project)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "messages": messages}, f, indent=1)
+        f.write("\n")
+    os.replace(path + ".tmp", path)    # never a half-written conversation
+
+
+def _tool_detail(args):
+    """A few words about a tool call, for the chat view."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "sheet", "obj_name"):
+        v = args.get(key)
+        if isinstance(v, str) and v:
+            return v
+    code = args.get("code")
+    if isinstance(code, str) and code.strip():
+        first = code.strip().splitlines()[0]
+        return first[:60] + ("…" if len(first) > 60 else "")
+    return ""
+
+
+def history(project, limit=200):
+    """(kind, text) entries of the stored conversation: user, claude, tool."""
+    out = []
+    for m in _load(project):
+        role, content = m.get("role"), m.get("content")
+        content = content if isinstance(content, str) else ""
+        if role == "user" and not m.get("auto"):
+            out.append(("user", m.get("shown") or content))
+        elif role == "assistant":
+            if content.strip():
+                out.append(("claude", content))
+            for call in m.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                out.append(("tool", f"`{fn.get('name') or 'tool'}` {_tool_detail(args)}".strip()))
+    return out[-limit:]
+
+
+def clear(project):
+    """Start a new chat: forget the conversation and the variables of run_python."""
+    try:
+        os.remove(_chat_path(project))
+    except OSError:
+        pass
+    local_tools.reset()
+
+
+# ---- slash commands ----------------------------------------------------------
+def expand(project, prompt):
+    """A typed "/name args" becomes the text of .claude/commands/name.md.
+
+    Returns (text for the model, mode to set or None). An unknown command is
+    sent as it was typed.
+    """
+    m = _COMMAND.match(prompt.strip())
+    if not m:
+        return prompt, None
+    name, args = m.group(1), (m.group(2) or "").strip()
+    mode = name if name in ("build", "teach") else None
+    try:
+        with open(os.path.join(project, ".claude", "commands", name + ".md"), encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return prompt, mode
+    if text.startswith("---"):                      # YAML front matter is for Claude Code
+        end = re.search(r"^---\s*$", text[3:], re.M)
+        if end:
+            text = text[3 + end.end():]
+    if "$ARGUMENTS" in text:
+        text = text.replace("$ARGUMENTS", args)
+    elif args:
+        text += "\n" + args
+    hint = local_prompt.COMMAND_HINTS.get(name)
+    if hint:
+        text = text.rstrip() + "\n" + hint
+    return text.strip() or prompt, mode
+
+
+# ---- worker thread -----------------------------------------------------------
+class _Call:
+    """One tool request. The worker waits on `done`; the main thread fills `result`."""
+
+    def __init__(self, name, args):
+        self.name, self.args, self.result = name, args, ""
+        self.done = threading.Event()
+
+
+class _Worker(QtCore.QThread):
+    event = QtCore.Signal(int, str, object)     # run number, kind, data (see local_agent.Agent)
+    need_tool = QtCore.Signal(int, object)      # run number, _Call
+    done = QtCore.Signal(int, object)           # run number, the dict for LocalRun.finished
+
+    def __init__(self, number, config, system, messages, text, shown):
+        super().__init__()     # no parent: the thread must be able to outlive a closed panel
+        self.number, self.ask_text, self.shown = number, text, shown
+        extra = {k: config[k] for k in ("max_steps", "max_tokens", "temperature", "timeout", "context_chars")
+                 if config.get(k) is not None}
+        self.agent = local_agent.Agent(
+            config.get("url", ""), config.get("model", ""), self._tool, key=config.get("key", ""),
+            system=system, tools=local_prompt.TOOLS, messages=messages,
+            on_event=lambda kind, data: self.event.emit(self.number, kind, data), **extra)
+
+    def run(self):
+        try:
+            res = {"is_error": False, "result": self.agent.ask(self.ask_text, self.shown)}
+        except local_agent.Stopped:
+            return                               # stop() already told the panel
+        except local_agent.AgentError as exc:
+            res = {"is_error": True, "result": str(exc)}
+        except Exception:
+            res = {"is_error": True, "result": "The local engine failed:\n" + traceback.format_exc(limit=-4)}
+        if not self.agent.stopped():
+            self.done.emit(self.number, res)
+
+    def _tool(self, name, args):
+        """Called in this thread: let the main thread run the tool, wait for it.
+
+        The wait looks at the stop flag, so it cannot hang when the run was
+        stopped or the panel is gone and nobody will ever answer.
+        """
+        call = _Call(name, args)
+        self.need_tool.emit(self.number, call)
+        while not call.done.wait(0.05):
+            if self.agent.stopped():
+                raise local_agent.Stopped()
+        return call.result
+
+
+_threads = set()        # keeps running workers alive, also after their LocalRun is gone
+_quit_hooked = False
+
+
+def _reap():
+    for w in [w for w in _threads if w.isFinished()]:
+        _threads.discard(w)
+
+
+def _shutdown():
+    """FreeCAD is closing: end the workers, so no thread is destroyed while it runs."""
+    for w in list(_threads):
+        w.agent.stop()
+    for w in list(_threads):
+        w.wait(3000)
+    _reap()
+
+
+# ---- the engine --------------------------------------------------------------
+class LocalRun(QtCore.QObject):
+    text = QtCore.Signal(str)              # a block of the model's answer (markdown)
+    tool = QtCore.Signal(str, str)         # tool name, short detail
+    tool_error = QtCore.Signal(str)        # a tool result that failed
+    finished = QtCore.Signal(dict)         # {"is_error", "result"}, plus "stopped" after stop()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._number = 0          # counts runs; events of an older run are dropped
+        self._worker = None
+        self._project = None
+        self._safe = None         # the last consistent copy of the conversation
+        self._changed = False
+        self._in_tool = False
+        live = self._live = []    # the running worker, shared with the hook below
+        # the panel can be closed in the middle of a run: stop the worker then
+        self.destroyed.connect(lambda *_: [w.agent.stop() for w in live])
+
+    def running(self):
+        return self._worker is not None
+
+    def start(self, project, prompt, config):
+        global _quit_hooked
+        if self.running():
+            return
+        _reap()
+        app = QtCore.QCoreApplication.instance()
+        if app is not None and not _quit_hooked:
+            app.aboutToQuit.connect(_shutdown)
+            _quit_hooked = True
+
+        text, mode = expand(project, prompt)
+        if mode:
+            projects.set_mode(project, mode)
+        _open_model(project)
+        local_tools.begin_request()
+        messages = _load(project)
+        self._number += 1
+        self._project, self._changed = project, False
+        self._safe = messages + [local_agent.user_message(text, prompt)]
+        worker = _Worker(self._number, config, local_prompt.system_prompt(projects.get_mode(project)),
+                         messages, text, prompt)
+        queued = QtCore.Qt.QueuedConnection
+        worker.event.connect(self._on_event, queued)
+        worker.need_tool.connect(self._on_tool, queued)
+        worker.done.connect(self._on_done, queued)
+        self._worker = worker
+        self._live[:] = [worker]
+        _threads.add(worker)
+        worker.start()
+
+    def stop(self):
+        """Stop now. The worker ends on its own; whatever it still reports is dropped."""
+        if not self.running():
+            return
+        worker, self._worker = self._worker, None
+        self._live[:] = []
+        self._number += 1
+        worker.agent.stop()
+        try:
+            _save(self._project, self._safe + [STOPPED])
+        except OSError:
+            pass
+        self.finished.emit({"is_error": False, "result": "", "stopped": True})
+
+    # ---- from the worker, in the main thread ----------------------------------
+    def _on_event(self, number, kind, data):
+        if number != self._number:
+            return
+        if kind == "state":
+            self._safe = data
+            try:
+                _save(self._project, data)
+            except OSError:
+                pass
+        elif kind in ("text", "answer"):
+            self.text.emit(data)
+        elif kind == "note":
+            self.text.emit(f"*{data}*")
+        elif kind == "tool_call":
+            if data["name"] in CHANGING:
+                self._changed = True
+            self.tool.emit(data["name"], _tool_detail(data["args"]))
+        elif kind == "tool_result" and data["problem"]:
+            self.tool_error.emit(data["name"])
+
+    def _on_tool(self, number, call):
+        if number != self._number:
+            call.done.set()               # a stopped run: its worker is leaving anyway
+            return
+        if self._in_tool:
+            # a tool that opened a dialog lets events through; never run two tools at once
+            QtCore.QTimer.singleShot(50, lambda: self._on_tool(number, call))
+            return
+        self._in_tool = True
+        try:
+            call.result = local_tools.run_tool(self._project, call.name, call.args)
+        finally:
+            self._in_tool = False
+            call.done.set()
+
+    def _on_done(self, number, res):
+        if number != self._number:
+            return                        # the late result of a stopped run
+        self._worker = None
+        self._live[:] = []
+        if not res.get("is_error") and self._changed:
+            self._save_document()
+        self.finished.emit(res)
+
+    def _save_document(self):
+        """Save the model after a request that worked. Not left to the model."""
+        doc = App.ActiveDocument
+        if doc is None:
+            return
+        try:
+            if doc.FileName:
+                doc.save()
+                path = doc.FileName
+            else:
+                folder = os.path.join(self._project, "model")
+                os.makedirs(folder, exist_ok=True)
+                path, n = os.path.join(folder, doc.Name + ".FCStd"), 2
+                while os.path.exists(path):          # never overwrite another model
+                    path, n = os.path.join(folder, f"{doc.Name}-{n}.FCStd"), n + 1
+                doc.saveAs(path)
+        except Exception as exc:
+            self.text.emit(f"*The document could not be saved: {exc}*")
+            return
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(self._project))
+        self.tool.emit("save", os.path.basename(path) if rel.startswith("..") else rel.replace(os.sep, "/"))
+
+
+def _open_model(project):
+    """With no document open, go on with the project's newest model, as CLAUDE.md asks of Claude."""
+    if App.ActiveDocument is not None:
+        return
+    try:
+        model = projects.newest_model(project)
+        if model:
+            projects.open_model(model)
+    except Exception as exc:
+        App.Console.PrintWarning(f"CADprompt: could not open the project's model: {exc}\n")

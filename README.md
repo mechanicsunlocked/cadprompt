@@ -84,6 +84,39 @@ any PDF reader. If the tablet is asleep or off the tailnet, you get a
 "could not send" notification; send again when it is awake. Also:
 `cadprompt-send some.pdf other.pdf`.
 
+## In FreeCAD: the chat panel and its three AI sources
+
+The CADprompt addon puts a **CADprompt** button in FreeCAD's File toolbar and
+Tools menu. It opens a chat dock: pick a project, say what to build, press
+Enter. Build, Teach, Add reference, Check and Drawing are buttons there. The
+projects are the same folders. **Settings** in the panel chooses the AI:
+
+| Source | You need | Key | What leaves the machine |
+|---|---|---|---|
+| Claude account | Claude Code, signed in (run `claude` once), and `uv` | none | prompts, the project files Claude reads, FreeCAD screenshots: to Anthropic, on your subscription |
+| Anthropic API key | Claude Code, `uv`, a key from console.anthropic.com | file `cadprompt_api_key` | the same, to Anthropic, billed per use |
+| Local model | a server that speaks the OpenAI API: LM Studio, Ollama, llama.cpp | none (a provider's key: file `cadprompt_local_key`) | nothing, when the server runs on this computer |
+
+- **Claude account and API key** run your own Claude Code through the
+  freecad-mcp bridge; the panel offers to download the bridge if it is
+  missing. With the account, the panel takes `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` out of Claude Code's
+  environment, so a key in your shell cannot bill the API by mistake.
+- **Local model needs no Claude Code**, no `uv` and no bridge: the panel has
+  its own small engine. Enter the server address (LM Studio:
+  `http://127.0.0.1:1234/v1`, Ollama: `http://127.0.0.1:11434/v1`), press
+  Find models, pick one. The model gets your prompts, the list of objects with
+  their sizes, the results of the Python it runs in FreeCAD, and text files of
+  the project it asks for. No pictures, no PDFs. If the address is another
+  computer or a provider, all of that goes there. The conversation stays in
+  the project, in `.cadprompt/local-chat.json`. The drawing is made by fixed
+  rules, not by the model. A small model makes mistakes: check the part.
+- **Keys** are files only you can read (mode 600) in FreeCAD's user data
+  folder, next to `Mod/`. They are never written to FreeCAD's settings file,
+  and Remove in Settings deletes them.
+- Advanced, a fourth choice: Claude Code with another Anthropic-compatible
+  endpoint. Its token is still kept in FreeCAD's settings, in plain text.
+
 ## In depth
 
 ### What runs, what it can reach

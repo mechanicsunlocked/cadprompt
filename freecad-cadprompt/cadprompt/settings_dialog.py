@@ -1,8 +1,71 @@
-"""Settings: projects folder, which model, where claude and uvx are."""
+"""Settings: projects folder, which AI does the work, and what that AI needs."""
 
-from PySide import QtWidgets
+import threading
+import time
+import urllib.error
 
-from . import paths
+from PySide import QtCore, QtWidgets
+
+from . import backends, paths
+
+HINTS = {
+    "account": "Uses your Claude subscription. Sign in once: run `claude` in a terminal.",
+    "apikey": "Uses your key from console.anthropic.com; Anthropic bills what you use. "
+              "The key is kept in a file only you can read, not in FreeCAD's settings.",
+    "local": "A model on this computer or another server that speaks the OpenAI API. "
+             "Nothing else to install: start the server, press Find models, pick one.",
+    "custom": "Claude Code, sent to a server that speaks the Anthropic Messages API.",
+}
+
+
+def _why(exc):
+    """A failed 'Find models' in words a student can follow."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return "The server did not accept the key."
+        return f"The server answered with error {exc.code}. Check the address (it usually ends in /v1)."
+    if isinstance(exc, ValueError):
+        return "That address did not answer with a list of models. Check it (it usually ends in /v1)."
+    return "No answer from the server. Is it running, and is the address right?"
+
+
+class _KeyRow(QtWidgets.QWidget):
+    """A key field that never shows a saved key: 'saved', a new one, or Remove."""
+
+    def __init__(self, saved, empty_hint, parent=None):
+        super().__init__(parent)
+        self.remove = False
+        self._empty_hint = empty_hint
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.edit = QtWidgets.QLineEdit()
+        self.edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.edit.setPlaceholderText("saved" if saved else empty_hint)
+        self.edit.textEdited.connect(self._typed)
+        self.drop = QtWidgets.QPushButton("Remove")
+        self.drop.setToolTip("Delete the saved key when you press OK")
+        self.drop.setEnabled(bool(saved))
+        self.drop.clicked.connect(self._drop)
+        row.addWidget(self.edit, 1)
+        row.addWidget(self.drop)
+
+    def _typed(self, _text):
+        self.remove = False
+
+    def _drop(self):
+        self.remove = True
+        self.edit.clear()
+        self.edit.setPlaceholderText(self._empty_hint)
+        self.drop.setEnabled(False)
+
+    def typed(self):
+        return self.edit.text().strip()
+
+    def save(self, setter):
+        if self.typed():
+            setter(self.typed())
+        elif self.remove:
+            setter("")
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -10,8 +73,9 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("CADprompt settings")
         p = paths.params()
-        form = QtWidgets.QFormLayout(self)
+        lay = QtWidgets.QVBoxLayout(self)
 
+        form = QtWidgets.QFormLayout()
         row = QtWidgets.QHBoxLayout()
         self.projects = QtWidgets.QLineEdit(p.GetString("ProjectsDir", ""))
         self.projects.setPlaceholderText(paths.projects_root())
@@ -20,55 +84,204 @@ class SettingsDialog(QtWidgets.QDialog):
         row.addWidget(self.projects, 1)
         row.addWidget(browse)
         form.addRow("Projects folder", row)
+        lay.addLayout(form)
 
+        # ---- which AI ----
+        ai = QtWidgets.QGroupBox("AI")
+        box = QtWidgets.QVBoxLayout(ai)
         self.account = QtWidgets.QRadioButton("Claude account (signed in to Claude Code)")
-        self.custom = QtWidgets.QRadioButton("Other endpoint (local model, e.g. Ollama or LM Studio)")
-        (self.custom if p.GetString("Backend", "account") == "custom" else self.account).setChecked(True)
-        form.addRow("AI", self.account)
-        form.addRow("", self.custom)
+        self.apikey = QtWidgets.QRadioButton("Anthropic API key")
+        self.local = QtWidgets.QRadioButton("Local model or other server (LM Studio, Ollama, OpenAI-compatible)")
+        self.custom = QtWidgets.QRadioButton("Claude Code with another endpoint")
+        self.radios = {"account": self.account, "apikey": self.apikey,
+                       "local": self.local, "custom": self.custom}
+        for b in (self.account, self.apikey, self.local):
+            box.addWidget(b)
+        advanced = QtWidgets.QLabel("<small>Advanced</small>")
+        advanced.setEnabled(False)       # greyed like a hint, in the theme's own colour
+        box.addWidget(advanced)
+        box.addWidget(self.custom)
+        self.hint = QtWidgets.QLabel()
+        self.hint.setWordWrap(True)
+        box.addWidget(self.hint)
 
+        # Anthropic API key
+        self.apikey_box = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(self.apikey_box)
+        f.setContentsMargins(0, 0, 0, 0)
+        self.api_key = _KeyRow(bool(backends.api_key()), "sk-ant-…")
+        f.addRow("API key", self.api_key)
+        box.addWidget(self.apikey_box)
+
+        # local or other OpenAI-compatible server
+        self.local_box = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(self.local_box)
+        f.setContentsMargins(0, 0, 0, 0)
+        self.local_url = QtWidgets.QLineEdit(p.GetString("LocalUrl", backends.LOCAL_URL))
+        self.local_url.setPlaceholderText(backends.LOCAL_URL + "  (Ollama: http://127.0.0.1:11434/v1)")
+        f.addRow("Server address", self.local_url)
+        row = QtWidgets.QHBoxLayout()
+        self.local_model = QtWidgets.QComboBox()
+        self.local_model.setEditable(True)
+        self.local_model.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.local_model.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.local_model.setMinimumContentsLength(24)
+        self.local_model.setEditText(p.GetString("LocalModel", ""))
+        self.local_model.lineEdit().setPlaceholderText("model name on that server")
+        self.find = QtWidgets.QPushButton("Find models")
+        self.find.setToolTip("Ask the server which models it has")
+        self.find.clicked.connect(self.find_models)
+        row.addWidget(self.local_model, 1)
+        row.addWidget(self.find)
+        f.addRow("Model", row)
+        self.local_key = _KeyRow(bool(backends.local_key()), "empty for a server on this computer")
+        f.addRow("Key", self.local_key)
+        self.find_msg = QtWidgets.QLabel("")
+        self.find_msg.setWordWrap(True)
+        f.addRow("", self.find_msg)
+        box.addWidget(self.local_box)
+
+        # Claude Code on another endpoint
+        self.custom_box = QtWidgets.QWidget()
+        f = QtWidgets.QFormLayout(self.custom_box)
+        f.setContentsMargins(0, 0, 0, 0)
+        self.url = QtWidgets.QLineEdit(p.GetString("BaseUrl", ""))
+        self.url.setPlaceholderText("http://localhost:11434 (must speak the Anthropic Messages API)")
+        f.addRow("Endpoint URL", self.url)
+        self.model = QtWidgets.QLineEdit(p.GetString("Model", ""))
+        self.model.setPlaceholderText("model name on that endpoint")
+        f.addRow("Endpoint model", self.model)
+        self.token = QtWidgets.QLineEdit(p.GetString("AuthToken", ""))
+        self.token.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.token.setPlaceholderText("usually empty for a local model")
+        f.addRow("Endpoint token", self.token)
+        box.addWidget(self.custom_box)
+        lay.addWidget(ai)
+
+        # ---- only for the sources that run Claude Code ----
+        self.claude_box = QtWidgets.QGroupBox("Claude Code")
+        self.claude_form = f = QtWidgets.QFormLayout(self.claude_box)
         self.web = QtWidgets.QCheckBox("Allow web search and reading web pages")
         self.web.setToolTip("Claude may look up standards, catalogues and datasheets. Text on web pages "
                             "is treated as data, never as instructions.")
         self.web.setChecked(p.GetBool("AllowWeb", False))
-        form.addRow("Web", self.web)
-
+        f.addRow("Web", self.web)
         self.model_override = QtWidgets.QLineEdit(p.GetString("ModelOverride", ""))
         self.model_override.setPlaceholderText("empty = Claude Code's default; or opus, sonnet, haiku")
-        form.addRow("Claude model", self.model_override)
-
-        self.url = QtWidgets.QLineEdit(p.GetString("BaseUrl", ""))
-        self.url.setPlaceholderText("http://localhost:11434 (must speak the Anthropic Messages API)")
-        form.addRow("Endpoint URL", self.url)
-        self.model = QtWidgets.QLineEdit(p.GetString("Model", ""))
-        self.model.setPlaceholderText("model name on that endpoint")
-        form.addRow("Endpoint model", self.model)
-        self.token = QtWidgets.QLineEdit(p.GetString("AuthToken", ""))
-        self.token.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.token.setPlaceholderText("usually empty for a local model")
-        form.addRow("Endpoint token", self.token)
-
+        self.model_label = QtWidgets.QLabel("Claude model")
+        f.addRow(self.model_label, self.model_override)
         self.claude = QtWidgets.QLineEdit(p.GetString("claudePath", ""))
         self.claude.setPlaceholderText(paths.find_tool("claude") or "not found")
-        form.addRow("claude program", self.claude)
+        f.addRow("claude program", self.claude)
         self.uvx = QtWidgets.QLineEdit(p.GetString("uvxPath", ""))
         self.uvx.setPlaceholderText(paths.find_tool("uvx") or "not found")
-        form.addRow("uvx program", self.uvx)
+        f.addRow("uvx program", self.uvx)
+        lay.addWidget(self.claude_box)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        lay.addWidget(buttons)
+
+        # "Find models" asks in a thread; this timer picks the answer up in the GUI thread
+        self._asking = None
+        self._poll = QtCore.QTimer(self)
+        self._poll.setInterval(100)
+        self._poll.timeout.connect(self._find_poll)
+
+        self.radios[backends.current()].setChecked(True)
+        for b in self.radios.values():
+            b.toggled.connect(self._show_source)
+        self._show_source()
+
+    def backend(self):
+        for name, b in self.radios.items():
+            if b.isChecked():
+                return name
+        return "account"
+
+    def _show_source(self, *_):
+        """Show only what the chosen source needs."""
+        b = self.backend()
+        self.hint.setText(HINTS[b])
+        self.apikey_box.setVisible(b == "apikey")
+        self.local_box.setVisible(b == "local")
+        self.custom_box.setVisible(b == "custom")
+        self.claude_box.setVisible(backends.uses_claude_code(b))
+        # another endpoint has its own model field: the Claude model names mean nothing there
+        for w in (self.model_label, self.model_override):
+            w.setVisible(b in ("account", "apikey"))
+        self.adjustSize()
 
     def _browse(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Projects folder", paths.projects_root())
         if d:
             self.projects.setText(d)
 
+    # ---- Find models --------------------------------------------------------
+    def find_models(self):
+        if self._asking:
+            return
+        url = self.local_url.text().strip()
+        if not url:
+            self.find_msg.setText("Enter the server address first, for example " + backends.LOCAL_URL)
+            return
+        key = self.local_key.typed() or ("" if self.local_key.remove else backends.local_key())
+        box = {}
+
+        def ask():
+            try:
+                box["models"] = backends.list_models(url, key, timeout=5)
+            except Exception as e:
+                box["error"] = e
+
+        # the deadline is ours: a server that answers one byte at a time never trips the socket timeout
+        self._asking = (box, time.monotonic() + 6)
+        self.find.setEnabled(False)
+        self.find_msg.setText("Asking the server…")
+        threading.Thread(target=ask, daemon=True).start()
+        self._poll.start()
+
+    def _find_poll(self):
+        box, deadline = self._asking
+        if not box and time.monotonic() < deadline:
+            return
+        self._poll.stop()
+        self._asking = None
+        self.find.setEnabled(True)
+        if "models" not in box:
+            self.find_msg.setText(_why(box.get("error")))
+            return
+        models = box["models"]
+        if not models:
+            self.find_msg.setText("The server answered, but it has no models. Load one there first.")
+            return
+        keep = self.local_model.currentText().strip()
+        self.local_model.clear()
+        self.local_model.addItems(models)
+        if keep in models:
+            self.local_model.setCurrentIndex(models.index(keep))
+        elif keep:
+            self.local_model.setEditText(keep)
+        n = len(models)
+        self.find_msg.setText(f"Found {n} model{'' if n == 1 else 's'}. Pick one from the list.")
+
+    def done(self, result):
+        self._poll.stop()        # a late answer has nowhere to go once the dialog is closed
+        super().done(result)
+
     def _save(self):
+        try:
+            self.api_key.save(backends.set_api_key)
+            self.local_key.save(backends.set_local_key)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "CADprompt", f"Could not save the key: {e}")
+            return
         p = paths.params()
         p.SetString("ProjectsDir", self.projects.text().strip())
-        p.SetString("Backend", "custom" if self.custom.isChecked() else "account")
+        p.SetString("Backend", self.backend())
+        p.SetString("LocalUrl", self.local_url.text().strip())
+        p.SetString("LocalModel", self.local_model.currentText().strip())
         p.SetBool("AllowWeb", self.web.isChecked())
         p.SetString("ModelOverride", self.model_override.text().strip())
         p.SetString("BaseUrl", self.url.text().strip())

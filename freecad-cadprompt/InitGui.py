@@ -13,7 +13,7 @@ class _PanelCommand:
     def GetResources(self):
         from cadprompt import ICON
         return {"Pixmap": ICON, "MenuText": "CADprompt",
-                "ToolTip": "Show or hide the CADprompt chat: say what to build, Claude builds it here"}
+                "ToolTip": "Show or hide the CADprompt chat: say what to build, the AI builds it here"}
 
     def Activated(self):
         from cadprompt import panel

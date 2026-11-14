@@ -4,7 +4,8 @@ One `claude -p` process per message, in the project folder, prompt on stdin,
 `--output-format stream-json --verbose`. The conversation continues with
 `--resume <session_id>`. Claude Code reads the project's .mcp.json,
 .claude/settings.json and CLAUDE.md exactly as it does in a terminal, and
-signs in with the user's own login: this addon never sees credentials.
+signs in with the user's own login, or with the API key or endpoint chosen in
+Settings (backends.claude_env).
 """
 
 import json
@@ -12,7 +13,7 @@ import os
 
 from PySide import QtCore
 
-from . import paths
+from . import backends, paths
 
 
 HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the user did
@@ -37,21 +38,35 @@ def _tool_detail(inp):
 
 
 def backend_env():
-    """Extra environment for a custom (local) model endpoint, or {} for the Claude account."""
-    p = paths.params()
-    if p.GetString("Backend", "account") != "custom":
-        return {}
-    url = p.GetString("BaseUrl", "")
-    if not url:
-        return {}
-    env = {"ANTHROPIC_BASE_URL": url,
-           "ANTHROPIC_AUTH_TOKEN": p.GetString("AuthToken", "") or "local"}
-    model = p.GetString("Model", "")
-    if model:
-        for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                  "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
-            env[k] = model
-    return env
+    """Extra environment for a custom endpoint, or {} for every other source."""
+    return backends.custom_env()
+
+
+def _apply_backend(pe):
+    """Fit the environment to the source chosen in Settings.
+
+    Removing matters as much as setting: an ANTHROPIC_API_KEY left in the
+    user's shell must not bill the API when the Claude account is chosen.
+    """
+    add, drop = backends.claude_env()
+    for k in drop:
+        pe.remove(k)
+    for k, v in add.items():
+        pe.insert(k, v)
+
+
+def claude_environment(claude, env=None):
+    """The environment Claude Code starts with: the system's, our PATH, env, the source."""
+    pe = QtCore.QProcessEnvironment.systemEnvironment()
+    extra_path = [os.path.dirname(claude)]
+    uvx = paths.find_tool("uvx")
+    if uvx:
+        extra_path.append(os.path.dirname(uvx))
+    pe.insert("PATH", os.pathsep.join(extra_path + [pe.value("PATH", "")]))
+    for k, v in (env or {}).items():
+        pe.insert(k, v)
+    _apply_backend(pe)
+    return pe
 
 
 def _program(claude, args):
@@ -82,24 +97,15 @@ class ClaudeRun(QtCore.QObject):
         if session:
             args += ["--resume", session]
         model = paths.params().GetString("ModelOverride", "")
-        if model and paths.params().GetString("Backend", "account") == "account":
+        if model and backends.current() in ("account", "apikey"):
             args += ["--model", model]
         if paths.params().GetBool("AllowWeb", False):
             args += ["--allowedTools", "WebSearch", "WebFetch"]
 
-        pe = QtCore.QProcessEnvironment.systemEnvironment()
-        extra_path = [os.path.dirname(claude)]
-        uvx = paths.find_tool("uvx")
-        if uvx:
-            extra_path.append(os.path.dirname(uvx))
-        pe.insert("PATH", os.pathsep.join(extra_path + [pe.value("PATH", "")]))
-        for k, v in (env or {}).items():
-            pe.insert(k, v)
-
         self._buf, self._err, self._result, self._tools = b"", b"", None, {}
         self.proc = QtCore.QProcess(self)
         self.proc.setWorkingDirectory(project)
-        self.proc.setProcessEnvironment(pe)
+        self.proc.setProcessEnvironment(claude_environment(claude, env))
         self.proc.readyReadStandardOutput.connect(self._on_out)
         self.proc.readyReadStandardError.connect(self._on_err)
         self.proc.finished.connect(self._on_finished)
@@ -171,8 +177,7 @@ def auth_status(claude, callback, parent=None):
     """Ask `claude auth status` without blocking FreeCAD. callback(dict or None)."""
     proc = QtCore.QProcess(parent)
     pe = QtCore.QProcessEnvironment.systemEnvironment()
-    for k, v in backend_env().items():
-        pe.insert(k, v)
+    _apply_backend(pe)
     proc.setProcessEnvironment(pe)
 
     def done(_code, _status):

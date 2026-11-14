@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Root metadata for the FreeCAD Addon Manager: it clones this whole
+     repository into Mod/ and loads the two addons from their subfolders.
+     (The package.xml files inside the subfolders are for the ./setup
+     symlink install on Omarchy.) -->
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>CADprompt</name>
+  <description>A chat panel in FreeCAD: say what to build and the AI builds it in the open document, parametric, with a teach mode for students and DIN workshop drawings. Works with a Claude account, an Anthropic API key, or a local model (LM Studio, Ollama).</description>
+  <version>0.2.0</version>
+  <date>2026-11-14</date>
+  <maintainer email="noreply@example.invalid">mechanicsunlocked</maintainer>
+  <license file="LICENSE">MIT</license>
+  <url type="repository" branch="main">https://github.com/mechanicsunlocked/cadprompt</url>
+  <url type="readme">https://github.com/mechanicsunlocked/cadprompt/blob/main/README.md</url>
+  <icon>freecad-cadprompt/icons/cadprompt.svg</icon>
+  <freecadmin>1.0.0</freecadmin>
+  <content>
+    <workbench>
+      <!-- No workbench of its own: InitGui.py adds a dock panel and a command. -->
+      <classname>CADpromptPanel</classname>
+      <name>CADprompt</name>
+      <subdirectory>freecad-cadprompt</subdirectory>
+    </workbench>
+    <workbench>
+      <!-- No workbench of its own: InitGui.py adds a toolbar to TechDraw. -->
+      <classname>HoischenToolbar</classname>
+      <name>Hoischen</name>
+      <subdirectory>freecad-hoischen</subdirectory>
+    </workbench>
+  </content>
+</package>
