@@ -82,6 +82,18 @@ START_IN_OURS = """
         </FCParamGroup>"""
 
 
+
+def _branches():
+    """main, or the branch that is checked out (a test branch names itself)."""
+    names = {"main"}
+    try:
+        head = open(os.path.join(REPO, ".git", "HEAD"), encoding="utf-8").read().strip()
+        if head.startswith("ref: refs/heads/"):
+            names.add(head[len("ref: refs/heads/"):])
+    except OSError:
+        pass
+    return names
+
 def check(name, ok, detail=""):
     COUNT[0] += 1
     if not ok:
@@ -192,8 +204,9 @@ def static_checks():
           licences == {"MIT": "LICENSE", "LGPL-2.1-or-later": "hoischen/LICENSE"}
           and all(os.path.isfile(os.path.join(REPO, *f.split("/"))) for f in licences.values()), str(licences))
     repo = [e for e in pkg.findall(NS + "url") if e.get("type") == "repository"]
-    check("package.xml: the repository url names the branch main",
-          len(repo) == 1 and repo[0].get("branch") == "main" and (repo[0].text or "").startswith("https://"))
+    # the index rule: the branch attribute names the branch this package.xml lives on
+    check("package.xml: the repository url names the branch it lives on (%s)" % " or ".join(sorted(_branches())),
+          len(repo) == 1 and repo[0].get("branch") in _branches() and (repo[0].text or "").startswith("https://"))
     icons = texts("^icon") + texts("^content/workbench/icon")
     check("package.xml: the icons it names exist",
           len(icons) == 2 and all(os.path.isfile(os.path.join(REPO, *i.split("/"))) for i in icons), str(icons))
