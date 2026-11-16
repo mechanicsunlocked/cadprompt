@@ -952,6 +952,24 @@ def _parse_sheet(sheet):
     return text, force, None
 
 
+TECHDRAW_GROUPS = ("debug", "General", "HLR", "Decorations", "Dimensions", "Colors", "Files", "PAT",
+                   "Standards", "Labels")
+
+
+def _make_techdraw_groups():
+    """Make TechDraw's settings groups now, in the main thread.
+
+    TechDraw works out each view in a thread of its own, and each thread reads
+    settings (the first one is "debug"). In a new FreeCAD profile the groups
+    do not exist yet, and FreeCAD makes a group when it is first asked for:
+    two threads that do that at the same moment crash FreeCAD 1.1 (seen in
+    the tests: a segmentation fault in ParameterGrp, about one first drawing
+    in ten). A group that exists is only read.
+    """
+    for name in TECHDRAW_GROUPS:
+        App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/" + name)
+
+
 def _make(doc, project, sheet, obj_name):
     if doc is None:
         return ("ERROR: no document is open. Open or build a model first, "
@@ -992,6 +1010,7 @@ def _make(doc, project, sheet, obj_name):
     s = scale[0] / float(scale[1])
 
     notes = [sheet_note] if sheet_note else []
+    _make_techdraw_groups()
     preset, arrange = _hoischen()
     if preset is not None:
         try:

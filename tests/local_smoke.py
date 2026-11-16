@@ -1,3 +1,4 @@
+# RUN: manual
 """One run of the local engine with a real model, in a FreeCAD GUI without a display:
 
     FREECAD_USER_HOME=<fresh folder> QT_QPA_PLATFORM=offscreen freecad tests/local_smoke.py
@@ -40,16 +41,16 @@ PROMPT = os.environ.get("CADPROMPT_SMOKE_PROMPT", "Make a plate 100 x 50 x 10 mm
 LIMIT = float(os.environ.get("CADPROMPT_SMOKE_SECONDS", "240"))
 HOME = os.environ["FREECAD_USER_HOME"]
 LOG = os.path.join(HOME, "local_smoke.log")
-open(LOG, "w").close()
+open(LOG, "w", encoding="utf-8").close()
 T0 = time.time()
 
 
 def say(line):
     line = "[%5.1f s] %s" % (time.time() - T0, line)
-    with open(LOG, "a") as f:
+    with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     try:
-        os.write(1, (line + "\n").encode())
+        os.write(1, (line + "\n").encode("utf-8"))
     except OSError:
         pass
 

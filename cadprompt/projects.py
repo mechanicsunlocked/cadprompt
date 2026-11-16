@@ -42,30 +42,31 @@ def path_of(name):
 
 def get_mode(project):
     try:
-        with open(os.path.join(project, ".cadprompt", "mode")) as f:
+        with open(os.path.join(project, ".cadprompt", "mode"), encoding="utf-8") as f:
             return f.read().strip() or "build"
-    except OSError:
+    except (OSError, ValueError):
         return "build"
 
 
 def set_mode(project, mode):
     os.makedirs(os.path.join(project, ".cadprompt"), exist_ok=True)
-    with open(os.path.join(project, ".cadprompt", "mode"), "w") as f:
+    with open(os.path.join(project, ".cadprompt", "mode"), "w", encoding="utf-8") as f:
         f.write(mode + "\n")
 
 
 def get_session(project):
     try:
-        with open(os.path.join(project, ".cadprompt", "session")) as f:
+        with open(os.path.join(project, ".cadprompt", "session"), encoding="utf-8") as f:
             return f.read().strip() or None
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
 def set_session(project, sid):
     p = os.path.join(project, ".cadprompt", "session")
     if sid:
-        with open(p, "w") as f:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
             f.write(sid + "\n")
     elif os.path.exists(p):
         os.remove(p)
@@ -82,9 +83,12 @@ def newest_model(project):
 
 def open_model(path):
     """Open a model in this FreeCAD unless it is open already."""
-    real = os.path.realpath(path)
+    def same(p):                 # Windows: FreeCAD writes C:/..., and upper and lower case are one file
+        return os.path.normcase(os.path.realpath(p))
+
+    real = same(path)
     for doc in App.listDocuments().values():
-        if os.path.realpath(doc.FileName or "") == real:
+        if doc.FileName and same(doc.FileName) == real:
             return doc
     return App.openDocument(path)
 

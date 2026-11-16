@@ -7,8 +7,13 @@ tool and against FreeCAD 1.1.3):
   * a dimension's X/Y properties place its text label, paper mm around the
     view centre with Y pointing up.
 The text sits beside its dimension line (above it, or left of it for vertical
-dimensions), so the label goes to the line position plus that offset (see
-text_offset). verify() reads back where TechDraw drew each line, for tests.
+dimensions), so the label goes to the line position plus that offset. The
+offset depends on the height of the text box, and that depends on the font
+and on how the system measures it (Linux, Windows and FreeCAD versions give
+different numbers for the same font). So it is read from the drawing as
+TechDraw has it on screen (measured_offsets), and worked out from a fixed
+factor only where nothing is drawn yet (text_offset).
+verify() reads back where TechDraw drew each line, for tests.
 """
 
 import FreeCAD as App
@@ -54,20 +59,22 @@ def outline(view):
     return bb.XMin, bb.XMax, -bb.YMax, -bb.YMin
 
 
-def text_offset(dim):
-    """Distance from the dimension line to the centre of its text, paper mm."""
+def _text_style(dim):
+    """(style, font, font size, gap between line and text box) of a dimension."""
     vo = getattr(dim, "ViewObject", None) if App.GuiUp else None
     p = App.ParamGet(TD_DIMS)
     if vo is not None:
-        style = str(vo.StandardAndStyle)
-        height = _value(vo.Fontsize)
-        gap = float(vo.LineSpacingFactorISO) * _value(vo.LineWidth)
-    else:
-        style = ["ISO Oriented", "ISO Referencing", "ASME Inlined", "ASME Referencing"][p.GetInt("StandardAndStyle", 0)]
-        height = p.GetFloat("FontSize", 5.0)
-        from .preset import GROUPS  # no GUI: take the narrow line of the chosen group
-        narrow = GROUPS.get(App.ParamGet(OWN).GetString("LineGroup", "0.7"), GROUPS["0.7"])["narrow"]
-        gap = p.GetFloat("LineSpacingFactorISO", 2.0) * narrow
+        return (str(vo.StandardAndStyle), str(getattr(vo, "Font", "")), _value(vo.Fontsize),
+                float(vo.LineSpacingFactorISO) * _value(vo.LineWidth))
+    style = ["ISO Oriented", "ISO Referencing", "ASME Inlined", "ASME Referencing"][p.GetInt("StandardAndStyle", 0)]
+    from .preset import GROUPS  # no GUI: take the narrow line of the chosen group
+    narrow = GROUPS.get(App.ParamGet(OWN).GetString("LineGroup", "0.7"), GROUPS["0.7"])["narrow"]
+    return style, "", p.GetFloat("FontSize", 5.0), p.GetFloat("LineSpacingFactorISO", 2.0) * narrow
+
+
+def text_offset(dim):
+    """Distance from the dimension line to the centre of its text, paper mm, from a fixed factor."""
+    style, _font, height, gap = _text_style(dim)
     if "Inlined" in style:
         return 0.0
     # TechDraw puts the line half a text box plus the gap away from the label
@@ -77,6 +84,44 @@ def text_offset(dim):
     # factor: set TextBoxFactor under Mod/Hoischen.
     factor = App.ParamGet(OWN).GetFloat("TextBoxFactor", 0.838)
     return gap + factor * height
+
+
+def measured_offsets(dims):
+    """{dimension name: text offset} as TechDraw draws it now, for the dimensions where that is known.
+
+    A dimension that is on screen shows its own offset: the label position
+    minus the position of the line. It is not the same for all: "Ø30" has a
+    taller box than "30". Half a text box is between 0.4 and 1.0 times the
+    font size with every font we have seen. A number outside that, or far
+    from the others with the same text style, is a drawing that is not up to
+    date; such a dimension, and one that is not drawn yet, gets the middle
+    value of its style. With a set TextBoxFactor the user's number is used
+    and nothing is measured.
+    """
+    if not App.GuiUp or App.ParamGet(OWN).GetFloat("TextBoxFactor", 0.0) > 0:
+        return {}
+    own, seen = {}, {}                       # name -> offset; text style -> the offsets read from the screen
+    for d in dims:
+        style, _font, height, gap = key = _text_style(d)
+        if "Inlined" in style or height <= 0:
+            continue
+        axis = "x" if d.Type == "DistanceX" else "y"
+        line = drawn_line(d, axis)
+        if line is None:
+            continue
+        offset = (_value(d.Y) - line) if axis == "x" else (line - _value(d.X))
+        if 0.4 * height <= offset - gap <= 1.0 * height:
+            own[d.Name] = offset
+            seen.setdefault(key, []).append(offset)
+    out = {}
+    for d in dims:
+        key = _text_style(d)
+        if key not in seen:
+            continue
+        middle = sorted(seen[key])[len(seen[key]) // 2]
+        mine = own.get(d.Name)
+        out[d.Name] = mine if mine is not None and abs(mine - middle) <= 0.1 * key[2] else middle
+    return out
 
 
 def plan(dims, first=None, pitch=None):
@@ -92,6 +137,11 @@ def plan(dims, first=None, pitch=None):
         pitch = p if pitch is None else pitch
 
     by_view, skipped = {}, []
+    measured = measured_offsets([d for d in dims if is_linear(d)])
+
+    def offset(d):
+        return measured[d.Name] if d.Name in measured else text_offset(d)
+
     for d in dims:
         if not is_linear(d):
             continue
@@ -131,10 +181,10 @@ def plan(dims, first=None, pitch=None):
 
         for name, (line, middle, _row) in L.layout(horiz, y_lo, y_hi, first, pitch).items():
             d = owner[name]
-            result[name] = (d, middle, line + text_offset(d), "x", line)
+            result[name] = (d, middle, line + offset(d), "x", line)
         for name, (line, middle, _row) in L.layout(vert, x_lo, x_hi, first, pitch).items():
             d = owner[name]
-            result[name] = (d, line - text_offset(d), middle, "y", line)
+            result[name] = (d, line - offset(d), middle, "y", line)
     return result, skipped
 
 
@@ -159,7 +209,12 @@ def drawn_line(dim, axis):
     if a.Length < 1e-9 and b.Length < 1e-9:
         return None
     view = parent_view(dim)
-    scale = _value(view.Scale) if view is not None else 1.0
+    scale = 1.0
+    if view is not None:
+        try:
+            scale = float(view.getScale())       # the scale in use: a view can take it from its page or group
+        except Exception:
+            scale = _value(view.Scale)
     return (a.y if axis == "x" else a.x) * scale
 
 

@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """End-to-end check inside a running FreeCAD GUI (works offscreen too).
 
   QT_QPA_PLATFORM=offscreen freecad tests/gui_check.py      # writes the report to $HOISCHEN_REPORT
@@ -13,7 +14,7 @@ import FreeCAD as App, FreeCADGui as Gui
 report = {"ok": False, "checks": [], "errors": []}
 out_path = os.environ.get("HOISCHEN_REPORT", os.path.join(App.getUserAppDataDir(), "hoischen_gui_check.json"))
 
-_trace = open(out_path + ".steps", "w")
+_trace = open(out_path + ".steps", "w", encoding="utf-8")
 def step(msg):
     _trace.write(msg + "\n"); _trace.flush()
 
@@ -139,7 +140,7 @@ except Exception:
     report["errors"].append(traceback.format_exc())
 
 _trace.close()
-with open(out_path, "w") as f:
+with open(out_path, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, default=str)
 if os.environ.get("HOISCHEN_EXIT"):
     os._exit(0 if report["ok"] else 1)

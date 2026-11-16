@@ -6,8 +6,10 @@ One command runs all tests. It works the same on Linux, macOS and Windows:
 
 On Windows the command is `python tests\run_all.py`.
 
-You need Python 3 and FreeCAD 1.0 or newer. You do not need a display, a model
-server, an API key or the `claude` program. Nothing is installed.
+You need Python 3 and FreeCAD 1.0 or newer. You do not need a model server, an
+API key or the `claude` program. Nothing is installed. On Linux and Windows you
+do not need a display. On macOS the window tests show their windows on your
+screen: FreeCAD on macOS cannot open a document without a display (see below).
 
 **The rule for all tests: a test never touches your own FreeCAD settings.**
 `run_all.py` makes a new, empty settings folder for each test and gives it to
@@ -47,11 +49,12 @@ your FreeCAD by hand without this variable.
 | `--list` | Shows the tests and how each one is started. Runs nothing. |
 | `--no-gui` | Skips the tests that need the FreeCAD window. |
 | `--gui-only` | Runs only the tests that need the FreeCAD window. |
-| `--display` | Shows the FreeCAD window on your screen. Without this option no window appears. |
+| `--display` | Shows the FreeCAD window on your screen. Without this option no window appears (macOS: always on). |
 | `--timeout S` | Stops a test after S seconds (default 300). The test and all programs it started are stopped. |
 | `--keep` | Keeps the temporary folders of all tests, not only of the failed ones. |
 | `--out FOLDER` | Puts the test folders into FOLDER (in a new `run-<date>-<time>` folder) and keeps them. |
 | `--junit FILE` | Also writes the results as a JUnit XML file. |
+| `--summary FILE` | Also adds the results to FILE as a Markdown table. `--title TEXT` sets its heading. |
 
 ## How run_all.py finds FreeCAD
 
@@ -95,6 +98,9 @@ Two things to know about the AppImage:
 ### macOS
 
 With FreeCAD in `/Applications`, `python3 tests/run_all.py` is enough.
+The window tests show the FreeCAD window on the screen for some seconds each.
+The reason: Qt's "offscreen" platform has no OpenGL on macOS, and FreeCAD 1.1.4
+ends with a segmentation fault when a document gets its 3D view there.
 For a FreeCAD in a different place:
 
     FREECAD=~/Downloads/FreeCAD.app python3 tests/run_all.py
@@ -115,7 +121,8 @@ For the unpacked `.7z` archive, in PowerShell:
 |---|---|---|
 | `hoischen/test_layout` | python | Only Python. The rules for dimension lines. |
 | `test_local_agent` | python | Only Python. The agent loop against a scripted server. |
-| `test_workbench` | python | Starts `freecadcmd` and `freecad` itself (`FREECADCMD`, `FREECAD` or `PATH`). FreeCAD loads the addon from a new profile. |
+| `test_time_limit` | python | Only Python. The time limit that stops code which does not end. |
+| `test_workbench` | python | Starts `freecadcmd` and `freecad` itself (found the same way as above). FreeCAD loads a copy of the addon from a new profile. |
 | `test_backends` | freecadcmd | The AI sources and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
@@ -145,7 +152,7 @@ Not run by `run_all.py`:
 
        # RUN: python          plain Python, no FreeCAD
        # RUN: freecadcmd      FreeCAD without a window
-       # RUN: freecad-gui     FreeCAD with its window (run_all.py gives it no display)
+       # RUN: freecad-gui     FreeCAD with its window (no display on Linux and Windows)
        # RUN: manual          needs a real model or the real claude: run_all.py never runs it
 
    Without this line `run_all.py` guesses from the imports and tells you so.
@@ -156,10 +163,14 @@ Not run by `run_all.py`:
    also writes its report to `<FREECAD_USER_HOME>/<name of the test>.log`,
    because the output of the FreeCAD window is not reliable. `run_all.py` shows
    the last lines of this file when the test fails.
-5. A plain Python test that starts FreeCAD itself uses the programs in the
-   variables `FREECAD` and `FREECADCMD` when they are set. `run_all.py` sets
-   them to the FreeCAD that it found.
-6. Use a scripted server (`local_fake_server.py`) in place of a model. A run
+5. A plain Python test that starts FreeCAD itself asks `run_all.find_freecad()`
+   for the programs and starts them with `run_all.run()`. Do not call shell
+   tools such as `timeout`: they are different programs on Windows.
+6. Compare folders with `os.path.realpath` and `os.path.normcase`, not as text.
+   Windows mixes `\` and `/` and upper and lower case, and the temporary folder
+   of macOS has two names. Call `utf8_output()` from `utf8_output.py` first and
+   give every `open()` of a text file `encoding="utf-8"`.
+7. Use a scripted server (`local_fake_server.py`) in place of a model. A run
    with a real model is switched on with a variable that has `_REAL_` in its
    name, and is off by default.
 
@@ -170,7 +181,11 @@ Not run by `run_all.py`:
   notification area off. Without a display, FreeCAD 1.1 stops at the first one
   and locks up at the second one.
 - It sets `QT_QPA_PLATFORM=offscreen` (and `FREECAD_QT_QPA_PLATFORM=offscreen`
-  for the AppImage), so no window appears. `--display` switches this off.
+  for the AppImage), so no window appears. `--display` switches this off, and
+  so does macOS.
+- It sets `PYTHONIOENCODING=utf-8` and `PYTHONFAULTHANDLER=1` (a crash then
+  shows the Python line), and `CADPROMPT_TEST_PYTHON` to the Python that runs
+  `run_all.py`, for a test that needs a plain Python next to FreeCAD.
 - It starts the test from the repository folder: `python <file>`,
   `freecadcmd <file>` or `freecad <file>`.
 - For `freecadcmd` it adds a second small script after the test. If the test
@@ -182,8 +197,7 @@ Not run by `run_all.py`:
   the test fails after some seconds and does not wait for the timeout.
 - After the timeout it stops the test and every program that the test started.
 
-The built-in list in `run_all.py` (`BUILT_IN`) is for the test files that have
-no `# RUN:` line yet. `SPECIAL` holds what `hoischen/gui_check.py` needs in
+`SPECIAL` in `run_all.py` holds what `hoischen/gui_check.py` needs in
 addition: the addon loaded by FreeCAD, the setting `ShowInTechDraw` on (its
 drawing buttons in TechDraw), `HOISCHEN_EXIT=1` and the place for its report.
 

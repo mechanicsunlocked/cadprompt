@@ -8,10 +8,13 @@ from PySide import QtCore, QtWidgets
 
 from . import backends, paths
 
+# Linux and macOS: the key file has mode 0600. Windows has no such modes; there the
+# folder of the user's own profile keeps other users out (backends.py).
+KEY_PLACE = "a file only you can read" if backends.POSIX else "a file in your own user folder"
 HINTS = {
     "account": "Uses your Claude subscription. Sign in once: run `claude` in a terminal.",
     "apikey": "Uses your key from console.anthropic.com; Anthropic bills what you use. "
-              "The key is kept in a file only you can read, not in FreeCAD's settings.",
+              "The key is kept in %s, not in FreeCAD's settings." % KEY_PLACE,
     "local": "A model on this computer or another server that speaks the OpenAI API. "
              "Nothing else to install: start the server, press Find models, pick one.",
     "custom": "Claude Code, sent to a server that speaks the Anthropic Messages API.",

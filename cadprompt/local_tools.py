@@ -12,10 +12,11 @@ import math
 import os
 import sys
 import textwrap
-import time
 import traceback
 
 import FreeCAD as App
+
+from . import time_limit
 
 MAX_OUTPUT = 3000        # characters of a tool result; a small model has a short context
 MAX_FILE = 6000          # characters of a project file
@@ -32,8 +33,9 @@ HINTS = (
                     'obj.setExpression("Length", "Params.Length").'),
     ("'NoneType' object has no attribute 'addObject'", "HINT: that variable is not a document. "
                                                        "Use doc, the active document."),
-    ("'App.Document' is not a container", 'HINT: to find an object use doc.getObject("Name"). '
-                                          "It gives None when there is no such object."),
+    # Python up to 3.13: "... is not iterable"; from 3.14: "... is not a container or iterable"
+    ("argument of type 'App.Document' is not ", 'HINT: to find an object use doc.getObject("Name"). '
+                                                "It gives None when there is no such object."),
     ("TypeError: argument 1 must be str", "HINT: this function takes the name of the object, not the "
                                           "object: for example doc.removeObject(obj.Name)."),
     ("Unit mismatch", 'HINT: a size and a plain number cannot be added. Give the number its unit in '
@@ -118,7 +120,7 @@ def _not_allowed(code):
         elif isinstance(node, ast.Name) and node.id in BLOCKED_NAMES:
             return node.id
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if any(k in node.value for k in KEY_FILES):
+            if any(k in node.value.lower() for k in KEY_FILES):     # Windows and macOS: any case names the file
                 return "the key file"
     return ""
 
@@ -304,23 +306,9 @@ def _traceback(code):
 class TooLong(BaseException):
     """Not an Exception: `except Exception` in the model's code must not swallow it."""
 
-
-def _time_limit(seconds):
-    """A trace function that ends the model's code when it runs too long.
-
-    The code runs in the GUI thread. A loop that does not end would freeze
-    FreeCAD for good, and the Stop button with it. The check is made between
-    Python lines: one long FreeCAD call is not cut short, and a bare `except:`
-    around the loop can still catch it.
-    """
-    end = time.monotonic() + seconds
-
-    def trace(frame, event, arg):
-        if time.monotonic() > end:
-            raise TooLong("the code ran longer than %d seconds and was stopped. "
-                          "Look for a loop that does not end." % seconds)
-        return trace
-    return trace
+    def __str__(self):
+        return ("the code ran longer than %d seconds and was stopped. "
+                "Look for a loop that does not end." % RUN_SECONDS)
 
 
 def _open(name):
@@ -362,15 +350,13 @@ def run_python(code, project=""):
     made_name = made.Name if made is not None else ""
     out = io.StringIO()
     error = ""
-    old_trace = sys.gettrace()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             compiled = compile(code, "<ai>", "exec")
-            sys.settrace(_time_limit(RUN_SECONDS))
-            try:
+            # The code runs in the GUI thread: a loop that does not end would freeze
+            # FreeCAD for good, and the Stop button with it.
+            with time_limit.Limit(RUN_SECONDS, TooLong):
                 exec(compiled, ns)
-            finally:
-                sys.settrace(old_trace)
     except BaseException:
         error = _traceback(code)
     failed = bool(error)

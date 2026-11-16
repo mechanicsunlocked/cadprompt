@@ -45,6 +45,11 @@ def check(name, ok, detail=""):
     say(("ok    " if ok else "FAIL  ") + name + (f"   [{detail}]" if detail and not ok else ""))
 
 
+def same(a, b):
+    """The same folder or file, however the system spells it (\\ or /, upper or lower case, a link)."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
 def main():
     import FreeCAD as App
     import FreeCADGui as Gui
@@ -112,11 +117,10 @@ def main():
                 if n.startswith("TechDraw") and any(c in OURS for c in cmds)}
 
     check("(setup) FreeCAD uses the throw-away profile and loaded the addon from its Mod folder",
-          os.path.realpath(App.getUserAppDataDir()) == os.path.realpath(HOME)
-          and os.path.realpath(mod) == os.path.realpath(REPO)
-          and os.path.dirname(os.path.abspath(cadprompt.__file__)) == os.path.join(os.path.abspath(mod), "cadprompt")
-          and REPO not in sys.path,
-          f"{App.getUserAppDataDir()} {cadprompt.__file__}")
+          same(App.getUserAppDataDir(), HOME) and os.path.isfile(os.path.join(mod, "package.xml"))
+          and same(os.path.dirname(cadprompt.__file__), os.path.join(mod, "cadprompt"))
+          and not [d for d in sys.path if os.path.isabs(d) and same(d, REPO)],
+          f"{App.getUserAppDataDir()} {cadprompt.__file__} {[d for d in sys.path if os.path.isabs(d) and same(d, REPO)]}")
     opt_in = CASE in ("optin", "notechdraw")
     if CASE == "autoload":
         check("FreeCAD started in the workbench, so the panel and hoischen are loaded; the engine and the drawing code are not",
@@ -144,7 +148,7 @@ def main():
         return
     check("it is called CADprompt, has a tooltip and the icon icons/cadprompt.svg",
           wb.MenuText == "CADprompt" and len(wb.ToolTip) > 20 and os.path.isfile(wb.Icon)
-          and os.path.realpath(wb.Icon) == os.path.join(os.path.realpath(REPO), "icons", "cadprompt.svg"),
+          and same(wb.Icon, os.path.join(mod, "icons", "cadprompt.svg")),
           f"{wb.MenuText!r} {wb.Icon!r}")
     registered = [c for c in OURS if Gui.Command.get(c) is not None]
     first = type(Gui.activeWorkbench()).__name__
@@ -208,6 +212,22 @@ def main():
     check("(setup) the panel made no connection: it waits for a server address",
           [k for k, _ in dock.widget().entries] == ["setup"] and dock.widget().claude is None
           and not dock.widget()._running(), str(dock.widget().entries))
+    panel.show()
+    pump()
+    check("panel.show() with the dock on screen: the same dock, still on screen", dock_shown() and panel._dock is dock)
+    dock.hide()
+    pump()
+    hidden = not dock.isVisible()
+    panel.show()
+    pump()
+    check("panel.show() brings a closed dock back, and no second one", hidden and dock_shown() and panel._dock is dock)
+    panel.toggle()
+    pump()
+    hidden = not dock.isVisible()
+    W.show_panel()
+    pump()
+    check("the command hides the dock, show_panel() of the workbench brings it back",
+          hidden and dock_shown() and len(docks()) == 1)
 
     # ---- 4. other workbenches ----
     say("\n-- other workbenches --")
@@ -309,7 +329,7 @@ def _hook(kind, value, tb):
 
 if not HOME:
     os._exit(2)      # this test must not touch the user's FreeCAD settings
-open(LOG, "w").close()
+open(LOG, "w", encoding="utf-8").close()
 sys.excepthook = _hook
 try:
     main()

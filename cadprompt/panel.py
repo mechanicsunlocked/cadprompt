@@ -623,15 +623,29 @@ class Panel(QtWidgets.QWidget):
 _dock = None
 
 
-def toggle():
+def _make_dock():
+    """True when the dock was made by this call (it is on screen then)."""
     global _dock
+    if _dock is not None:
+        return False
     mw = Gui.getMainWindow()
-    if _dock is None:
-        _dock = QtWidgets.QDockWidget("CADprompt", mw)
-        _dock.setObjectName("CADpromptDock")
-        _dock.setWidget(Panel(_dock))
-        mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock)
+    _dock = QtWidgets.QDockWidget("CADprompt", mw)
+    _dock.setObjectName("CADpromptDock")
+    _dock.setWidget(Panel(_dock))
+    mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock)
+    _dock.show()
+    return True
+
+
+def show():
+    """Open the chat dock, or bring it back when it was closed. Never hides it."""
+    if not _make_dock():
         _dock.show()
+        _dock.raise_()
+
+
+def toggle():
+    if _make_dock():
         return
     _dock.setVisible(not _dock.isVisible())
     if _dock.isVisible():

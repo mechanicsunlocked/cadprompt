@@ -20,6 +20,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+
+import run_all                                              # noqa: E402
 
 # With the offscreen platform FreeCAD 1.1 locks up as soon as it shows a
 # notification (the popup's raise() logs a warning, which wants to show a
@@ -56,15 +59,16 @@ def fresh_home(root, name):
 
 
 def run(cmd, env, seconds=300):
-    """(exit code, output). 124 when it ran out of time."""
-    if shutil.which("timeout"):
-        cmd = ["timeout", str(seconds)] + cmd
+    """(exit code, output). 124 when it ran out of time. No shell tool: the same on every system."""
+    fd, out_path = tempfile.mkstemp(prefix="cadprompt-drawing-", suffix=".txt")
+    os.close(fd)
     try:
-        p = subprocess.run(cmd, env=env, cwd=ADDON, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=seconds + 30)
-    except subprocess.TimeoutExpired:
-        return 124, ""
-    return p.returncode, p.stdout.decode("utf-8", "replace")
+        code, _ = run_all.run(cmd, env, out_path, seconds)
+        with open(out_path, encoding="utf-8", errors="replace") as f:
+            out = f.read()
+    finally:
+        os.remove(out_path)
+    return (124 if code is None else code), out
 
 
 def main():
@@ -75,7 +79,8 @@ def main():
 
     print("== 1. headless: freecadcmd tests/test_drawing_headless.py")
     env = dict(os.environ, FREECAD_USER_HOME=fresh_home(root, "home-headless"))
-    code, out = run(["freecadcmd", os.path.join("tests", "test_drawing_headless.py")], env)
+    found = run_all.find_freecad()       # FREECAD, FREECADCMD, PATH, the usual install folders
+    code, out = run((found["cmd"] or ["freecadcmd"]) + [os.path.join("tests", "test_drawing_headless.py")], env)
     for line in out.splitlines():
         if line.startswith(("test_", "Ran ", "OK", "FAILED", "FAIL", "ERROR", "Traceback", "  File", "Assertion", "---", "===")):
             print(line)
@@ -85,9 +90,10 @@ def main():
     print("== 2. with the window: QT_QPA_PLATFORM=offscreen freecad tests/test_drawing_gui.py")
     report = os.path.join(root, "test_drawing_gui.txt")
     projects = os.path.join(root, "projects")
-    env = dict(os.environ, FREECAD_USER_HOME=fresh_home(root, "home-gui"), QT_QPA_PLATFORM="offscreen",
-               DRAWING_REPORT=report, DRAWING_OUT=projects)
-    code, out = run(["freecad", os.path.join("tests", "test_drawing_gui.py")], env)
+    env = dict(os.environ, FREECAD_USER_HOME=fresh_home(root, "home-gui"), DRAWING_REPORT=report, DRAWING_OUT=projects)
+    if sys.platform != "darwin":         # macOS: FreeCAD cannot open a document without a display
+        run_all.offscreen(env)
+    code, out = run((found["gui"] or ["freecad"]) + [os.path.join("tests", "test_drawing_gui.py")], env)
     if os.path.isfile(report):
         with open(report, encoding="utf-8") as f:
             print(f.read().rstrip())

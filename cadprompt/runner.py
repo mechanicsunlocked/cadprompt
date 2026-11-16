@@ -55,9 +55,26 @@ def _apply_backend(pe):
         pe.insert(k, v)
 
 
+def system_environment():
+    """The environment of this FreeCAD, without what FreeCAD's own start script put in.
+
+    An AppImage, the macOS app and other bundles export PYTHONHOME and more for
+    their own Python. Handed on, no other Python would start: not Claude Code's
+    tools, not uvx. See paths.child_environment.
+    """
+    pe = QtCore.QProcessEnvironment.systemEnvironment()
+    ours = paths.child_environment({k: pe.value(k) for k in pe.keys()})
+    for k in pe.keys():
+        if k not in ours:
+            pe.remove(k)
+        elif ours[k] != pe.value(k):
+            pe.insert(k, ours[k])
+    return pe
+
+
 def claude_environment(claude, env=None):
     """The environment Claude Code starts with: the system's, our PATH, env, the source."""
-    pe = QtCore.QProcessEnvironment.systemEnvironment()
+    pe = system_environment()
     extra_path = [os.path.dirname(claude)]
     uvx = paths.find_tool("uvx")
     if uvx:
@@ -69,10 +86,52 @@ def claude_environment(claude, env=None):
     return pe
 
 
-def _program(claude, args):
-    if paths.WIN and claude.lower().endswith((".cmd", ".bat")):
-        return "cmd.exe", ["/c", claude] + args
-    return claude, args
+def _is_script(claude):
+    """A .cmd file (Claude Code from npm on Windows): only cmd.exe can run it."""
+    return paths.WIN and claude.lower().endswith((".cmd", ".bat"))
+
+
+def _cmd_line(claude, args):
+    """The text for `cmd.exe /d /s /c "<text>"`.
+
+    With /s, cmd.exe takes everything between the first and the last quote as
+    it is. Without it, a path with a space (C:\\Users\\Ann Lee\\...) plus one more
+    quoted argument makes cmd.exe cut the line at the wrong quotes.
+    Every word is in quotes, so a space, & or ( in it stays text.
+    """
+    return '/d /s /c "%s"' % " ".join('"%s"' % word.replace('"', "") for word in [claude] + args)
+
+
+def _start(proc, claude, args):
+    if not _is_script(claude):
+        proc.start(claude, args)
+    elif hasattr(proc, "setNativeArguments"):
+        proc.setNativeArguments(_cmd_line(claude, args))
+        proc.start(os.environ.get("ComSpec") or "cmd.exe", [])
+    else:
+        proc.start(os.environ.get("ComSpec") or "cmd.exe", ["/d", "/c", claude] + args)
+
+
+def _kill(proc):
+    """End the program, and on Windows what it started.
+
+    Behind a .cmd file the real program is a child of cmd.exe. Ending cmd.exe
+    alone would leave it running, and working on the model, after Stop.
+    taskkill is a part of Windows; /T takes the child processes too. It needs
+    the first process alive to find the others, so that one is ended last.
+    """
+    pid = proc.processId() if paths.WIN else 0
+    if not pid:
+        proc.kill()
+        return
+    killer = QtCore.QProcess(proc)       # a child of proc: gone when proc is
+
+    def after(*_):
+        if proc.state() != QtCore.QProcess.NotRunning:
+            proc.kill()
+    killer.finished.connect(after)
+    killer.errorOccurred.connect(after)
+    killer.start("taskkill", ["/PID", str(pid), "/T", "/F"])
 
 
 class ClaudeRun(QtCore.QObject):
@@ -88,6 +147,7 @@ class ClaudeRun(QtCore.QObject):
         self._err = b""
         self._result = None
         self._tools = {}
+        self._stopped = False
 
     def running(self):
         return self.proc is not None and self.proc.state() != QtCore.QProcess.NotRunning
@@ -103,6 +163,7 @@ class ClaudeRun(QtCore.QObject):
             args += ["--allowedTools", "WebSearch", "WebFetch"]
 
         self._buf, self._err, self._result, self._tools = b"", b"", None, {}
+        self._stopped = False
         self.proc = QtCore.QProcess(self)
         self.proc.setWorkingDirectory(project)
         self.proc.setProcessEnvironment(claude_environment(claude, env))
@@ -110,14 +171,14 @@ class ClaudeRun(QtCore.QObject):
         self.proc.readyReadStandardError.connect(self._on_err)
         self.proc.finished.connect(self._on_finished)
         self.proc.errorOccurred.connect(self._on_error)
-        program, argv = _program(claude, args)
-        self.proc.start(program, argv)
+        _start(self.proc, claude, args)
         self.proc.write(prompt.encode("utf-8"))
         self.proc.closeWriteChannel()
 
     def stop(self):
         if self.running():
-            self.proc.kill()
+            self._stopped = True
+            _kill(self.proc)
 
     # ---- stream ---------------------------------------------------------
     def _on_err(self):
@@ -164,6 +225,9 @@ class ClaudeRun(QtCore.QObject):
             except ValueError:
                 pass
         res = self._result
+        if res is None and self._stopped:
+            # ended by stop(): not an error. The same answer as the built-in engine gives.
+            res = {"is_error": False, "stopped": True, "result": ""}
         if res is None:
             stderr = self._err.decode("utf-8", "replace").strip()
             res = {"is_error": True, "kind": "crash",
@@ -179,7 +243,7 @@ class ClaudeRun(QtCore.QObject):
 def auth_status(claude, callback, parent=None):
     """Ask `claude auth status` without blocking FreeCAD. callback(dict or None)."""
     proc = QtCore.QProcess(parent)
-    pe = QtCore.QProcessEnvironment.systemEnvironment()
+    pe = system_environment()
     _apply_backend(pe)
     proc.setProcessEnvironment(pe)
 
@@ -192,8 +256,7 @@ def auth_status(claude, callback, parent=None):
         proc.deleteLater()
 
     proc.finished.connect(done)
-    program, argv = _program(claude, ["auth", "status"])
-    proc.start(program, argv)
+    _start(proc, claude, ["auth", "status"])
     return proc
 
 

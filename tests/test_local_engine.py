@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """End-to-end test of cadprompt/local_engine.py in a FreeCAD GUI without a display:
 
     FREECAD_USER_HOME=<fresh folder> QT_QPA_PLATFORM=offscreen freecad tests/test_local_engine.py
@@ -41,15 +42,15 @@ from local_fake_server import FakeServer, answer, call, error, slow       # noqa
 
 HOME = os.environ["FREECAD_USER_HOME"]
 LOG = os.path.join(HOME, "test_local_engine.log")
-open(LOG, "w").close()
+open(LOG, "w", encoding="utf-8").close()
 passed, failed = [], []
 
 
 def say(line):
-    with open(LOG, "a") as f:
+    with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     try:
-        os.write(1, (line + "\n").encode())
+        os.write(1, (line + "\n").encode("utf-8"))
     except OSError:
         pass
 

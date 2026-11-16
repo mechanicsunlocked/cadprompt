@@ -1,3 +1,4 @@
+# RUN: python
 """Tests of cadprompt/local_agent.py against a fake OpenAI server. Plain python3:
 
     python3 tests/test_local_agent.py
@@ -15,6 +16,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
 
 from cadprompt import local_agent                      # noqa: E402
 from cadprompt.local_agent import Agent, AgentError, Stopped   # noqa: E402

@@ -24,6 +24,10 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # A push to a branch that has a pull request starts this file two times
+    # (push and pull_request). The second one runs only for a pull request
+    # from another repository, which has no push run here.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
     # The weekly build shows what the next FreeCAD will break. That job may fail
     # without making the whole run red; its own mark still shows the failure.
     continue-on-error: ${{ matrix.may_fail }}
@@ -193,16 +197,20 @@ jobs:
           echo "FREECAD=$app/Contents/MacOS/FreeCAD" >> "$GITHUB_ENV"
           echo "FREECADCMD=$app/Contents/Resources/bin/freecadcmd" >> "$GITHUB_ENV"
 
-      # run_all.py prints the FreeCAD version first, gives each test a new
-      # FreeCAD settings folder and starts the window tests without a display.
+      # run_all.py prints the FreeCAD version first and gives each test a new
+      # FreeCAD settings folder. The results also go to the page of the run.
       - name: Tests without the FreeCAD window
+        id: plain
         shell: bash
         run: >-
           python tests/run_all.py --no-gui
           --out "$RUNNER_TEMP/cadprompt-tests"
           --junit "$RUNNER_TEMP/cadprompt-tests/junit-no-window.xml"
+          --summary "$GITHUB_STEP_SUMMARY" --title "${{ matrix.name }}: without the FreeCAD window"
 
-      - name: Tests with the FreeCAD window, no display${{ matrix.window_may_fail && ' (not proven on this system, allowed to fail)' || '' }}
+      # Linux and Windows: no display (Qt's "offscreen"). macOS: FreeCAD cannot
+      # open a document that way, so run_all.py uses the screen of the runner.
+      - name: Tests with the FreeCAD window${{ matrix.window_may_fail && ' (allowed to fail on this system)' || '' }}
         id: window
         if: ${{ !cancelled() && env.FREECAD != '' }}
         continue-on-error: ${{ matrix.window_may_fail }}
@@ -211,9 +219,29 @@ jobs:
           python tests/run_all.py --gui-only
           --out "$RUNNER_TEMP/cadprompt-tests"
           --junit "$RUNNER_TEMP/cadprompt-tests/junit-window.xml"
+          --summary "$GITHUB_STEP_SUMMARY" --title "${{ matrix.name }}: with the FreeCAD window"
+
+      # A job that is allowed to fail does not make the run red. This line puts
+      # its failure on the page of the run all the same.
+      - name: Say what failed
+        if: ${{ !cancelled() && (steps.plain.outcome == 'failure' || steps.window.outcome == 'failure') }}
+        shell: bash
+        run: |
+          echo "::warning title=Tests failed (${{ matrix.id }})::${{ matrix.name }}: tests failed (without the window ${{ steps.plain.outcome }}; with the window ${{ steps.window.outcome }}). The table on the page of this run names them."
+
+      - name: Keep the crash reports (macOS)
+        if: ${{ !cancelled() && runner.os == 'macOS' && (steps.plain.outcome == 'failure' || steps.window.outcome == 'failure') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cadprompt-tests/crash-reports"
+          # macOS writes them a moment after the crash
+          sleep 20
+          cp -R "$HOME/Library/Logs/DiagnosticReports/." "$RUNNER_TEMP/cadprompt-tests/crash-reports/" 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/cadprompt-tests/crash-reports"
 
       - name: Keep the logs of the failed tests
-        if: ${{ failure() || steps.window.outcome == 'failure' }}
+        if: ${{ !cancelled() && (steps.plain.outcome == 'failure' || steps.window.outcome == 'failure') }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:

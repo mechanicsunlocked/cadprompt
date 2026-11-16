@@ -51,9 +51,7 @@ def register_drawing_commands():
 def show_panel():
     """Open the chat dock, or bring it back when it was closed. Never hides it."""
     from . import panel
-    dock = panel._dock
-    if dock is None or not dock.isVisible():
-        panel.toggle()
+    panel.show()
 
 
 # ---- the drawing buttons in TechDraw: only when the user asks -----------------

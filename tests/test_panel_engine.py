@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """The panel together with the real built-in engine (cadprompt/local_engine.py).
 
 test_panel.py tests the panel alone, with a stub engine. This one checks that
@@ -23,15 +24,26 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(HERE), HERE]
 
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
+
 OUT = sys.__stdout__
+LOG = os.path.join(os.environ.get("FREECAD_USER_HOME") or ".", "test_panel_engine.log")
 FAILED = []
 COUNT = [0]
 SLOT_ERRORS = []
 
 
 def say(text):
-    OUT.write(text + "\n")
-    OUT.flush()
+    try:                         # FreeCAD's window program can be without any output (Windows)
+        OUT.write(text + "\n")
+        OUT.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+    if os.environ.get("FREECAD_USER_HOME"):
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
 
 
 def check(name, ok, detail=""):

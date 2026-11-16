@@ -1,3 +1,4 @@
+# RUN: freecadcmd
 """Tests of cadprompt/drawing.py that need no window: the rules, and a headless call.
 
     FREECAD_USER_HOME=<fresh folder> freecadcmd tests/test_drawing_headless.py
@@ -21,6 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() els
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
 
 import FreeCAD as App                    # noqa: E402
 import Part                              # noqa: E402

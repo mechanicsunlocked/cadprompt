@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """Tests for the panel and the settings dialog with all four AI sources.
 
 Run in the real FreeCAD GUI without a display, with a throw-away profile so no
@@ -13,6 +14,7 @@ import faulthandler
 import http.server
 import json
 import os
+import shutil
 import stat
 import sys
 import threading
@@ -23,15 +25,26 @@ sys.dont_write_bytecode = True       # no __pycache__ in the repository
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.dirname(HERE), HERE]
 
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
+
 OUT = sys.__stdout__             # FreeCAD's own sys.stdout goes to its report view
+LOG = os.path.join(os.environ.get("FREECAD_USER_HOME") or ".", "test_panel.log")
 FAILED = []
 COUNT = [0]
 SLOT_ERRORS = []                 # exceptions inside Qt slots do not reach us any other way
 
 
 def say(text):
-    OUT.write(text + "\n")
-    OUT.flush()
+    try:                         # FreeCAD's window program can be without any output (Windows)
+        OUT.write(text + "\n")
+        OUT.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+    if os.environ.get("FREECAD_USER_HOME"):
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
 
 
 def check(name, ok, detail=""):
@@ -106,14 +119,36 @@ def main():
     say("FreeCAD user data: " + App.getUserAppDataDir())
 
     # ---- a pretend claude, a pretend uvx, the stub engine, a pretend bridge ----
-    bindir = os.path.join(home, "bin")
-    os.makedirs(bindir)
-    fake_claude = os.path.join(bindir, "claude")
-    with open(fake_claude, "w") as f:
-        f.write('#!/bin/sh\nexec python3 "%s" "$@"\n' % os.path.join(HERE, "panel_fake_claude.py"))
-    os.chmod(fake_claude, 0o755)
+    # In a folder with a space and a letter that is not ASCII, as in C:\\Users\\Zoë Müller.
+    bindir = os.path.join(home, "bin of Zoë")
+    try:
+        os.makedirs(bindir)
+    except (OSError, ValueError) as exc:
+        check("(setup) a folder name with a space and a letter that is not ASCII can be made", False, repr(exc))
+        bindir = os.path.join(home, "bin of Zoe")
+        os.makedirs(bindir)
+    python = os.environ.get("CADPROMPT_TEST_PYTHON") or shutil.which("python3") or shutil.which("python") or "python3"
+    script = os.path.join(HERE, "panel_fake_claude.py")
+    if os.name == "nt":
+        # what `npm install -g` makes on Windows: a .cmd file, which only cmd.exe can run
+        fake_claude = os.path.join(bindir, "claude.cmd")
+        with open(fake_claude, "w") as f:
+            f.write('@echo off\n"%s" "%s" %%*\n' % (python, script))
+    else:
+        fake_claude = os.path.join(bindir, "claude")
+        with open(fake_claude, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (python, script))
+        os.chmod(fake_claude, 0o755)
     fake_uvx = os.path.join(bindir, "uvx")
     open(fake_uvx, "w").close()
+    # What the start script of a FreeCAD bundle (AppImage, macOS app) leaves in the
+    # environment. Nothing of it may reach a program that the addon starts.
+    bundle = os.path.join(home, "pretend bundle")
+    os.makedirs(os.path.join(bundle, "usr", "bin"))
+    os.environ["PYTHONPATH"] = os.path.join(bundle, "usr", "lib")
+    os.environ["PANEL_BUNDLE_CERT"] = os.path.join(bundle, "usr", "ssl", "cacert.pem")
+    os.environ["PANEL_BUNDLE_OTHER"] = "kept"
+    os.environ["PATH"] = os.pathsep.join([os.path.join(bundle, "usr", "bin"), os.environ.get("PATH", "")])
     claude_log = os.path.join(home, "fake-claude.jsonl")
     os.environ["PANEL_FAKE_CLAUDE_LOG"] = claude_log
     os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(home, "claude-config")
@@ -135,6 +170,10 @@ def main():
     cadprompt.local_engine = stub
     from cadprompt import backends, bridge, panel, paths, projects, runner, settings_dialog
     from cadprompt.settings_dialog import SettingsDialog
+
+    real_roots = paths.bundle_roots()
+    say("FreeCAD's own bundle: " + (", ".join(real_roots) or "none (a FreeCAD of the system)"))
+    paths.bundle_roots = lambda: real_roots + [bundle]
 
     bridge_calls = []
     bridge_ok = [True]
@@ -230,9 +269,9 @@ def main():
           p.GetString("uvxPath")) == (True, "sonnet", "http://localhost:11434", "endpoint-model",
                                       "endpoint-token", fake_claude, fake_uvx))
     key_file = os.path.join(App.getUserAppDataDir(), "cadprompt_api_key")
-    check("OK saves both keys in their own files, mode 0600",
+    check("OK saves both keys in their own files" + (", mode 0600" if os.name == "posix" else ""),
           backends.api_key() == "sk-ant-made-up-1" and backends.local_key() == "made-up-local-key"
-          and stat.S_IMODE(os.stat(key_file).st_mode) == 0o600)
+          and (os.name != "posix" or stat.S_IMODE(os.stat(key_file).st_mode) == 0o600))
     check("no key went into FreeCAD's parameters",
           not [v for (_k, _n, v) in p.GetContents() if "made-up" in str(v)])
     check("OK closed the dialog as accepted", dlg.result() == QtWidgets.QDialog.Accepted)
@@ -663,8 +702,14 @@ def main():
     check("account: the process environment has ANTHROPIC_API_KEY, _AUTH_TOKEN and _BASE_URL removed",
           not [k for k in shell if pe.contains(k)] and pe.value("FREECAD_MCP_TOKEN") == "test-token",
           str([k for k in shell if pe.contains(k)]))
-    check("account: the user's other variables are still there", pe.value("HOME") == os.environ.get("HOME")
-          and pe.value("PATH").split(os.pathsep)[0] == bindir)
+    check("account: the user's other variables are still there",
+          pe.value("HOME") == (os.environ.get("HOME") or "") and pe.value("PANEL_BUNDLE_OTHER") == "kept"
+          and pe.value("PATH").split(os.pathsep)[0] == bindir, pe.value("PATH")[:300])
+    inside = [k for k in pe.keys() if bundle in pe.value(k)]
+    check("account: nothing that points into the FreeCAD bundle is handed on (PYTHONPATH, a certificate file, PATH)",
+          not inside and not pe.contains("PYTHONPATH") and not pe.contains("PANEL_BUNDLE_CERT"), str(inside))
+    check("account: FreeCAD's own PYTHONHOME is not handed on",
+          not pe.contains("PYTHONHOME") or not real_roots, pe.value("PYTHONHOME"))
 
     args, pe = send_recorded("apikey", "make a shaft")
     check("apikey: also goes to ClaudeRun.start", args is not None and args[:3] == (fake_claude, project, "make a shaft"))
@@ -739,12 +784,19 @@ def main():
         pan.send(text)
         wait_for(lambda: pan.send_btn.text() == "Send" and len(claude_calls()) > n, 15)
         runs = [c for c in claude_calls()[n:] if c["argv"][:1] == ["-p"]]
-        return runs[-1] if runs else {"argv": [], "env": {}, "stdin": "", "cwd": "", "path0": ""}
+        return runs[-1] if runs else {"argv": [], "env": {}, "stdin": "", "cwd": "", "path0": "", "path": []}
 
     p.SetBool("AllowWeb", True)
     rec = run_fake("account", "make a bracket")
     check("account: the program gets the prompt on stdin, in the project folder",
           rec["stdin"] == "make a bracket" and os.path.realpath(rec["cwd"]) == os.path.realpath(project), str(rec))
+    check("account: the program is found in a folder with a space and a letter that is not ASCII",
+          rec["path0"] == bindir and " " in bindir, f"{rec['path0']!r} {bindir!r}")
+    check("account: the started program got nothing that points into the FreeCAD bundle",
+          not [k for k, v in rec["env"].items() if bundle in v] and "PYTHONPATH" not in rec["env"]
+          and "PYTHONHOME" not in rec["env"] and not [d for d in rec["path"] if d.startswith(bundle)]
+          and rec["env"].get("PANEL_BUNDLE_OTHER") == "kept",
+          str({k: v for k, v in rec["env"].items() if k.startswith(("PYTHON", "PANEL_"))}) + str(rec["path"][:3]))
     check("account: arguments as before (stream-json, model, web tools)",
           rec["argv"] == ["-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
                           "--allowedTools", "WebSearch", "WebFetch"], str(rec["argv"]))
@@ -785,6 +837,41 @@ def main():
           pan.send_btn.text() == "Send" and pan.status.text() == "" and not pan.run.running()
           and projects.get_session(project) == "fake-session-1",
           str((pan.send_btn.text(), pan.status.text(), projects.get_session(project))))
+
+    # a prompt with letters that are not ASCII arrives as it was typed
+    rec = run_fake("account", "make a Ø80 flange, 4 × M8, größer")
+    check("account: a prompt with Ø, × and ö arrives as typed, and so does the answer",
+          rec["stdin"] == "make a Ø80 flange, 4 × M8, größer"
+          and ("claude", "fake answer to: make a Ø80 flange, 4 × M8, größer") in pan.entries,
+          repr(rec["stdin"]) + str(pan.entries[-2:]))
+
+    # Stop ends the program, and what the program started (Windows: the program behind claude.cmd)
+    def alive(pid):
+        if os.name == "nt":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)     # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return code.value == 259                                             # STILL_ACTIVE
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    n = len(claude_calls())
+    pan.send("slow: make a housing")
+    started = wait_for(lambda: [c for c in claude_calls()[n:] if c["stdin"].startswith("slow")], 15)
+    pid = ([c["pid"] for c in claude_calls()[n:] if c["stdin"].startswith("slow")] or [0])[0]
+    check("account: (setup) a run that takes long is under way, the button says Stop",
+          bool(started) and pid and alive(pid) and pan.send_btn.text() == "Stop", f"{pid} {pan.send_btn.text()}")
+    pan.send_btn.click()                     # Stop
+    stopped = wait_for(lambda: pan.send_btn.text() == "Send" and not alive(pid), 15)
+    check("account: Stop ends the program that does the work, and the panel says 'Stopped.'",
+          stopped and pan.entries[-1] == ("note", "Stopped."), f"alive={alive(pid) if pid else None} {pan.entries[-2:]}")
 
     # the two engines side by side
     p.SetString("Backend", "local")

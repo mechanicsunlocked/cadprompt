@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """The whole addon together, as a user meets it. Nothing is replaced by a stub.
 
 FreeCAD loads the addon (package.xml, InitGui.py), the CADprompt command opens
@@ -29,6 +30,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON = os.path.dirname(HERE)
 REPO = ADDON
 sys.path[:0] = [ADDON, HERE]
+
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
 
 OUT = sys.__stdout__             # FreeCAD's own sys.stdout goes to its report view
 LOG = os.path.join(os.environ.get("FREECAD_USER_HOME") or ".", "test_integration_gui.log")
@@ -410,7 +415,7 @@ def _hook(kind, value, tb):
 if not os.environ.get("FREECAD_USER_HOME"):
     say("Set FREECAD_USER_HOME to an empty folder first: this test must not touch your FreeCAD settings.")
     os._exit(2)
-open(LOG, "w").close()
+open(LOG, "w", encoding="utf-8").close()
 sys.excepthook = _hook
 faulthandler.dump_traceback_later(295, exit=True, file=OUT)
 try:

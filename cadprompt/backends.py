@@ -11,6 +11,7 @@ No Qt in here, so the settings and the tests can use it anywhere.
 
 import json
 import os
+import stat
 import urllib.parse
 import urllib.request
 
@@ -38,8 +39,15 @@ def label(backend=None):
 
 
 # ---- keys -------------------------------------------------------------------
-# Keys live in their own files that only the user can read. FreeCAD's parameter
-# file (user.cfg) is plain text that people share when they ask for help.
+# Keys live in their own files, not in FreeCAD's parameter file (user.cfg):
+# that one is plain text that people share when they ask for help.
+# Linux and macOS: the file has mode 0600, only the user can read it.
+# Windows has no such modes. There the file is in FreeCAD's folder inside the
+# user's own profile (AppData), and the permissions of that folder keep other
+# users out. That is the same protection as for the user's other files.
+
+POSIX = os.name == "posix"
+
 
 def _key_file(name):
     return os.path.join(App.getUserAppDataDir(), name)
@@ -50,15 +58,24 @@ def _read_key(name):
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read().strip()
-    except OSError:
+    except (OSError, ValueError):        # no file, or not text
         return ""
     try:
         # made by hand or brought back by a sync tool: close it for other users
-        if os.name == "posix" and os.stat(path).st_mode & 0o077:
+        if POSIX and os.stat(path).st_mode & 0o077:
             os.chmod(path, 0o600)
     except OSError:
         pass
     return text
+
+
+def _writable(path):
+    """Windows refuses to replace or delete a file that is marked read-only."""
+    if not POSIX:
+        try:
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        except OSError:
+            pass
 
 
 def _write_key(name, text):
@@ -66,17 +83,32 @@ def _write_key(name, text):
     text = (text or "").strip()
     if not text:
         if os.path.exists(path):
+            _writable(path)
             os.remove(path)
         return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     # A new file, then swap: an old file that others could read never holds the
     # new key, and a program that has the old file open does not see it either.
     new = path + ".new"
     if os.path.lexists(new):
+        _writable(new)
         os.remove(new)
     fd = os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text + "\n")
-    os.replace(new, path)
+    _writable(path)
+    try:
+        os.replace(new, path)
+    except PermissionError:
+        if POSIX:
+            raise
+        # Windows does not swap a file that a program has open (a virus scanner,
+        # a sync tool). Writing into the old file is allowed, and no mode is lost.
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+        finally:
+            os.remove(new)
 
 
 def api_key():

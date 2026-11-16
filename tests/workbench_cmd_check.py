@@ -31,21 +31,28 @@ def check(name, ok, detail=""):
     say(("ok    " if ok else "FAIL  ") + name + (f"   [{detail}]" if detail and not ok else ""))
 
 
+def same(a, b):
+    """The same folder or file, however the system spells it (\\ or /, upper or lower case, a link)."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
 def main():
     import FreeCAD as App
 
     say("-- freecadcmd --")
     mod = os.path.join(HOME, "Mod", "CADprompt")
-    dirs = [d for d in App.__ModDirs__ if os.path.realpath(d) == os.path.realpath(REPO)]
+    dirs = [d for d in App.__ModDirs__ if same(d, mod)]
     check("(setup) no GUI, the throw-away profile is in use and FreeCAD found the addon in its Mod folder",
-          not App.GuiUp and os.path.realpath(App.getUserAppDataDir()) == os.path.realpath(HOME)
-          and len(dirs) == 1 and os.path.abspath(dirs[0]) == os.path.abspath(mod), f"{App.GuiUp} {dirs}")
+          not App.GuiUp and same(App.getUserAppDataDir(), HOME) and len(dirs) == 1
+          and not [d for d in list(App.__ModDirs__) + sys.path if os.path.isabs(d) and same(d, REPO)],
+          f"{App.GuiUp} {App.getUserAppDataDir()} {dirs} {App.__ModDirs__}")
     check("FreeCAD does not count the addon as failed",
           "cadprompt" not in getattr(App, "__failed_mods__", []), str(getattr(App, "__failed_mods__", [])))
     check("Init.py loaded nothing of the addon", EARLY == [], str(EARLY))
     try:
         import cadprompt
-        ok = os.path.isfile(cadprompt.ICON) and sorted(m for m in sys.modules if m.startswith("cadprompt")) == ["cadprompt"]
+        ok = (os.path.isfile(cadprompt.ICON) and same(os.path.dirname(cadprompt.__file__), os.path.join(mod, "cadprompt"))
+              and sorted(m for m in sys.modules if m.startswith("cadprompt")) == ["cadprompt"])
         detail = cadprompt.__file__
     except Exception:
         ok, detail = False, traceback.format_exc()
@@ -54,7 +61,7 @@ def main():
 
 if not HOME:
     os._exit(2)      # this test must not touch the user's FreeCAD settings
-open(LOG, "w").close()
+open(LOG, "w", encoding="utf-8").close()
 try:
     main()
 except Exception:

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MIT
+# RUN: python
 """Tests of the CADprompt workbench, with the addon loaded by FreeCAD itself.
 
     python3 tests/test_workbench.py [folder for the results]
 
 Without a folder the results go to a temporary one, which is removed again
-when every check passed.
+when every check passed. Started by run_all.py, they go into the folder that
+run_all.py made for this test.
 
-Every run gets a fresh FREECAD_USER_HOME whose Mod folder holds a link to this
+Every run gets a fresh FREECAD_USER_HOME whose Mod folder holds a copy of this
 repository, so FreeCAD finds and starts the addon the way it does after an
 Addon Manager install. The user's own FreeCAD settings are never read or changed.
 
@@ -18,11 +20,11 @@ Addon Manager install. The user's own FreeCAD settings are never read or changed
 6. the same with CADprompt as the workbench that FreeCAD starts in,
 7. the time the addon adds to FreeCAD's start                      (workbench_startup_time.py)
 
-FREECAD and FREECADCMD name the programs when they are not in PATH.
+FreeCAD is found the way run_all.py finds it (FREECAD, FREECADCMD, PATH, the
+usual install folders).
 No model, no server and no `claude` are called: the profile chooses the local
 model without a server address, so the chat panel only shows its setup message.
 """
-# RUN: python
 
 import ast
 import os
@@ -38,12 +40,16 @@ REPO = os.path.dirname(HERE)
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 
-from drawing_run import run                                 # noqa: E402
+import run_all                                              # noqa: E402
 
 NS = "{https://wiki.freecad.org/Package_Metadata}"
-FREECAD = os.environ.get("FREECAD") or "freecad"
-FREECADCMD = os.environ.get("FREECADCMD") or "freecadcmd"
-STARTUP_LIMIT_MS = 100       # the measured value is far below; this only catches a heavy import
+FOUND = run_all.find_freecad()
+FREECAD = FOUND["gui"] or ["freecad"]            # the start of a command line: an AppImage needs two words
+FREECADCMD = FOUND["cmd"] or ["freecadcmd"]
+# The time of the addon's start against the start of a workbench that does
+# nothing, measured in the same FreeCAD: a slow computer is slow for both.
+# This only catches a heavy import; the list of loaded modules is the exact check.
+STARTUP_TIMES, STARTUP_EXTRA_MS = 5, 25
 FAILED = []
 COUNT = [0]
 
@@ -98,7 +104,18 @@ def check(name, ok, detail=""):
     COUNT[0] += 1
     if not ok:
         FAILED.append(name)
-    print(("ok    " if ok else "FAIL  ") + name + (f"   [{detail}]" if detail and not ok else ""))
+    print(("ok    " if ok else "FAIL  ") + name + (f"   [{detail}]" if detail and not ok else ""), flush=True)
+
+
+def run(cmd, env, out_path, seconds=300):
+    """(exit code, output). 124 when it ran out of time. No shell tool: the same on every system."""
+    code, _ = run_all.run(cmd, env, out_path, seconds)
+    try:
+        with open(out_path, encoding="utf-8", errors="replace") as f:
+            out = f.read()
+    except OSError:
+        out = ""
+    return (124 if code is None else code), out
 
 
 def fresh_home(root, name, addon=True, opt_in=False, start_in_ours=False):
@@ -109,16 +126,18 @@ def fresh_home(root, name, addon=True, opt_in=False, start_in_ours=False):
         f.write(USER_CFG.format(projects=os.path.join(home, "projects"), more=OPT_IN if opt_in else "",
                                 general=START_IN_OURS if start_in_ours else ""))
     if addon:
-        link = os.path.join(home, "Mod", "CADprompt")
-        try:
-            os.symlink(REPO, link, target_is_directory=True)
-        except OSError:      # Windows without the right to make links: a copy is loaded the same way
-            shutil.copytree(REPO, link, ignore=shutil.ignore_patterns(".git", "__pycache__", "vendor"))
+        # A copy, as the Addon Manager makes one. A link would be cheaper, but Windows
+        # needs a special right to make one, and a FreeCAD that follows the link
+        # (27 does) loads the addon from the repository, which is not what is tested.
+        shutil.copytree(REPO, os.path.join(home, "Mod", "CADprompt"),
+                        ignore=shutil.ignore_patterns(".git", ".github", "__pycache__", "vendor", "tests"))
     return home
 
 
 def environment(home, **more):
-    return dict(os.environ, FREECAD_USER_HOME=home, PYTHONDONTWRITEBYTECODE="1", **more)
+    env = dict(os.environ, FREECAD_USER_HOME=home, PYTHONDONTWRITEBYTECODE="1", **more)
+    run_all.offscreen(env)       # these checks open no document, so they need no display on any system
+    return env
 
 
 def show(path, out):
@@ -153,13 +172,17 @@ def check_log(what, path, home, inits):
     """No error from our addon in FreeCAD's log of the whole run, and its init files ran."""
     recs = records(path)
     mod = os.path.join(home, "Mod", "CADprompt")
-    done = [t for k, t in recs if "Initializing" in t and mod in t and t.rstrip().endswith("done")]
+
+    def plain(text):             # Windows mixes the two slashes, macOS has two names for its temporary folder
+        return text.replace("\\", "/").replace("/private/var/", "/var/").lower()
+
+    done = [t for k, t in recs if "Initializing" in t and plain(mod) in plain(t) and t.rstrip().endswith("done")]
     check(f"{what}: FreeCAD's log says it ran the addon's init file" + ("s (Init.py, InitGui.py)" if inits == 2 else " (Init.py)"),
           len(done) == inits, f"{len(done)} of {inits} in {path}")
 
     def ours(text):
         # the folder names of this run must not count as a mention of the addon
-        rest = text.replace(mod, "<ADDON>").replace(home, "").replace(REPO, "").lower()
+        rest = plain(text).replace(plain(mod), "<addon>").replace(plain(home), "").replace(plain(REPO), "")
         return "<addon>" in rest or "cadprompt" in rest or "hoischen" in rest
 
     def bad(kind, text):
@@ -222,17 +245,28 @@ def static_checks():
 
 
 def main():
-    temporary = None if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="cadprompt-workbench-")
-    root = os.path.join(os.path.abspath(temporary or sys.argv[1]), time.strftime("run-%Y%m%d-%H%M%S"))
+    for stream in (sys.stdout, sys.stderr):              # the same text on every system and console
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    given = sys.argv[1] if len(sys.argv) > 1 else None
+    if not given and os.path.isfile(os.path.join(os.environ.get("FREECAD_USER_HOME") or "", "user.cfg")):
+        # started by run_all.py: its folder for this test is kept when the test fails, with all logs
+        given = os.path.join(os.environ["FREECAD_USER_HOME"], "workbench")
+    temporary = None if given else tempfile.mkdtemp(prefix="cadprompt-workbench-")
+    # the real path: macOS and Windows give a temporary folder under a second, shorter name
+    root = os.path.join(os.path.realpath(temporary or given), time.strftime("run-%Y%m%d-%H%M%S"))
     os.makedirs(root)
-    print(f"results in {root}\n")
+    print(f"results in {root}\n", flush=True)
+    if not FOUND["gui"] or not FOUND["cmd"]:
+        print("FreeCAD was not found the way run_all.py looks for it; trying 'freecad' and 'freecadcmd'.")
 
     static_checks()
 
     print("== 2. freecadcmd")
     home = fresh_home(root, "home-cmd")
     log = os.path.join(home, "FreeCAD.log")
-    code, out = run([FREECADCMD, "--log-file", log, os.path.join(HERE, "workbench_cmd_check.py")], environment(home))
+    code, out = run(FREECADCMD + ["--log-file", log, os.path.join(HERE, "workbench_cmd_check.py")],
+                    environment(home), os.path.join(root, "output-cmd.txt"))
     shown = show(os.path.join(home, "workbench_cmd_check.log"), out)
     check("freecadcmd: the run ended well", shown and code == 0, f"exit code {code}")
     check_log("freecadcmd", log, home, 1)
@@ -247,8 +281,8 @@ def main():
         print(f"== {title}")
         home = fresh_home(root, "home-" + case, opt_in=opt_in, start_in_ours=case == "autoload")
         log = os.path.join(home, "FreeCAD.log")
-        code, out = run([FREECAD] + args + ["--log-file", log, os.path.join(HERE, "workbench_gui_check.py")],
-                        environment(home, QT_QPA_PLATFORM="offscreen", WORKBENCH_CASE=case))
+        code, out = run(FREECAD + args + ["--log-file", log, os.path.join(HERE, "workbench_gui_check.py")],
+                        environment(home, WORKBENCH_CASE=case), os.path.join(root, f"output-{case}.txt"))
         shown = show(os.path.join(home, "workbench_gui_check.log"), out)
         check(f"{case}: the run ended well", shown and code == 0, f"exit code {code}")
         check_log(case, log, home, 2)
@@ -260,18 +294,21 @@ def main():
                                                                  "hoischen.arrange", "hoischen.commands",
                                                                  "hoischen.layout", "hoischen.preset"])):
         home = fresh_home(root, "home-time-" + ("optin" if opt_in else "default"), addon=False, opt_in=opt_in)
-        code, out = run([FREECAD, os.path.join(HERE, "workbench_startup_time.py")],
-                        environment(home, QT_QPA_PLATFORM="offscreen"))
+        code, out = run(FREECAD + [os.path.join(HERE, "workbench_startup_time.py")], environment(home),
+                        os.path.join(root, "output-time-" + ("optin" if opt_in else "default") + ".txt"))
         report = os.path.join(home, "workbench_startup_time.log")
         text = open(report, encoding="utf-8").read() if os.path.isfile(report) else out[-2000:]
         ms = re.search(r"^startup_ms ([0-9.]+)$", text, re.M)
+        base = re.search(r"^baseline_ms ([0-9.]+)$", text, re.M)
         mods = re.search(r"^modules ?(.*)$", text, re.M)
         loaded = mods.group(1).split() if mods else []
-        if ms:
+        limit = None
+        if ms and base:
+            limit = STARTUP_TIMES * float(base.group(1)) + STARTUP_EXTRA_MS
             print(f"      {name}: Init.py + InitGui.py took {float(ms.group(1)):.1f} ms and loaded {len(loaded)} modules: "
-                  + " ".join(loaded))
-        check(f"start, {name}: under {STARTUP_LIMIT_MS} ms",
-              code == 0 and ms is not None and float(ms.group(1)) < STARTUP_LIMIT_MS, text[-1500:])
+                  + " ".join(loaded) + f"; a workbench that does nothing took {float(base.group(1)):.1f} ms")
+        check(f"start, {name}: not slower than {STARTUP_TIMES} times a workbench that does nothing, plus {STARTUP_EXTRA_MS} ms",
+              code == 0 and limit is not None and float(ms.group(1)) < limit, text[-1500:])
         check(f"start, {name}: loads only " + ", ".join(allowed) + " (no Qt import of ours, no network module)",
               code == 0 and loaded == allowed, " ".join(loaded))
 

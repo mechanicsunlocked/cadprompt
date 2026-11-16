@@ -1,3 +1,4 @@
+# RUN: freecad-gui
 """Tests of cadprompt/drawing.py in FreeCAD with its window (no display needed):
 
     FREECAD_USER_HOME=<fresh folder> QT_QPA_PLATFORM=offscreen freecad tests/test_drawing_gui.py
@@ -160,9 +161,16 @@ class Case(unittest.TestCase):
                 # 10 mm from the part itself (not from the ends of the centre lines) to the dimension line
                 r = rects[view.Type]
                 if d.Type == "DistanceX":       # above the view
-                    self.assertAlmostEqual(float(d.Y), r[3] - cy + 10 + arrange.text_offset(d), delta=0.01, msg=d.Name)
+                    line, axis = r[3] - cy + 10, "x"
+                    offset = float(d.Y) - line
                 else:                            # left of the view
-                    self.assertAlmostEqual(float(d.X), r[0] - cx - 10 - arrange.text_offset(d), delta=0.01, msg=d.Name)
+                    line, axis = r[0] - cx - 10, "y"
+                    offset = line - float(d.X)
+                # The number sits beside its line by half a text box plus the gap. How tall the box is
+                # depends on the font and the system, so the line itself is what is checked.
+                height, gap = float(d.ViewObject.Fontsize), 0.5
+                self.assertTrue(gap + 0.4 * height <= offset <= gap + 1.0 * height, f"{d.Name}: number {offset} from its line")
+                self.assertAlmostEqual(arrange.drawn_line(d, axis), line, delta=0.05, msg=d.Name)
                 self.assertAlmostEqual(float(d.ViewObject.Fontsize), 2.5 if sheet not in ("A1", "A0") else 3.5)
         if hoischen:
             self.assertIn("Style: Hoischen / DIN preset", out)

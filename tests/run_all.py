@@ -5,8 +5,8 @@
     python3 tests/run_all.py --list          show the tests, run nothing
     python3 tests/run_all.py --no-gui        skip the tests that need the FreeCAD window
 
-A test file says how it must be started with one comment line in its first
-30 lines:
+A test is a .py file in tests/ (or a folder in it) that says how it must be
+started, with one comment line in its first 30 lines:
 
     # RUN: python          plain Python, no FreeCAD
     # RUN: freecadcmd      FreeCAD without a window
@@ -37,22 +37,6 @@ REPO = os.path.dirname(HERE)
 KINDS = ("python", "freecadcmd", "freecad-gui", "manual")
 MARKER = re.compile(r"^\s*#\s*RUN:\s*(\S+)")
 MARKER_LINES = 30
-
-# The test files that existed before the '# RUN:' line was agreed. A marker in
-# the file wins; an entry here can go when its file has the marker.
-BUILT_IN = {
-    "test_backends": "freecadcmd",
-    "test_drawing_headless": "freecadcmd",
-    "test_local_tools": "freecadcmd",
-    "test_local_agent": "python",
-    "hoischen/test_layout": "python",
-    "test_drawing_gui": "freecad-gui",
-    "test_integration_gui": "freecad-gui",
-    "test_local_engine": "freecad-gui",
-    "test_panel": "freecad-gui",
-    "test_panel_engine": "freecad-gui",
-    "hoischen/gui_check": "freecad-gui",
-}
 
 # What one file needs beyond its kind. {home} is the test's FREECAD_USER_HOME.
 # gui_check.py is written for a FreeCAD that has the addon installed and its
@@ -250,17 +234,19 @@ def guess_kind(path):
 
 
 def discover():
-    """[{'name', 'path', 'kind', 'origin', 'problem'}]: every tests/**/test_*.py and the built-in list."""
+    """[{'name', 'path', 'kind', 'origin', 'problem'}]: every .py file in tests/ with a '# RUN:' line.
+
+    A test_*.py file without the line is a test too; how to start it is then guessed.
+    """
     paths = set()
     for folder, subs, files in os.walk(HERE):
         subs[:] = [s for s in subs if s != "__pycache__" and not s.startswith(".")]
         for f in files:
-            if f.startswith("test_") and f.endswith(".py"):
-                paths.add(os.path.join(folder, f))
-    for name in BUILT_IN:
-        path = os.path.join(HERE, *name.split("/")) + ".py"
-        if os.path.isfile(path):
-            paths.add(path)
+            path = os.path.join(folder, f)
+            if not f.endswith(".py") or os.path.abspath(path) == os.path.abspath(__file__):
+                continue                                 # this file shows the line in its own text
+            if f.startswith("test_") or read_marker(path):
+                paths.add(path)
     tests = []
     for path in sorted(paths):
         name = os.path.relpath(path, HERE)[:-3].replace(os.sep, "/")
@@ -271,8 +257,6 @@ def discover():
                         problem="'# RUN: %s' is not one of: %s" % (marker[1], ", ".join(KINDS)))
         elif marker:
             test.update(kind=marker, origin="marker")
-        elif name in BUILT_IN:
-            test.update(kind=BUILT_IN[name], origin="built-in list")
         else:
             test.update(kind=guess_kind(path), origin="guessed: add a '# RUN:' line")
         tests.append(test)
@@ -291,6 +275,9 @@ def base_env():
             del env[name]
     env["PYTHONDONTWRITEBYTECODE"] = "1"                 # no __pycache__ in the repository
     env["PYTHONUNBUFFERED"] = "1"                        # keep the output of a test that is killed
+    env["PYTHONIOENCODING"] = "utf-8"                    # the same text on every system
+    env["PYTHONFAULTHANDLER"] = "1"                      # a crash says in which Python line it was
+    env["CADPROMPT_TEST_PYTHON"] = sys.executable        # for a test that needs a plain Python next to FreeCAD
     return env
 
 
@@ -539,6 +526,24 @@ def write_junit(path, results, total, version):
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
 
 
+def write_summary(path, results, total, version, title):
+    """Add the results as a Markdown table to a file (GitHub shows such a file on the page of a run)."""
+    marks = {"PASS": "passed", "FAIL": "**FAILED**", "TIMEOUT": "**TIMED OUT**", "SKIP": "skipped"}
+    lines = ["### %s" % (title or "Tests"), "", version, "", "| Test | Started with | Result | Seconds | Why |",
+             "|---|---|---|---|---|"]
+    for test, r in results:
+        lines.append("| %s | %s | %s | %s | %s |" % (
+            test["name"], test["kind"], marks[r["status"]], "%.1f" % r["seconds"] if r["folder"] else "",
+            r["why"].replace("|", "/")))
+    lines += ["", "%d passed, %d failed, %d timed out, %d skipped, in %.0f s" % (
+        count(results, "PASS"), count(results, "FAIL"), count(results, "TIMEOUT"), count(results, "SKIP"), total), ""]
+    for test, r in results:
+        if r["status"] in ("FAIL", "TIMEOUT") and r["lines"]:
+            lines += ["<details><summary>%s</summary>" % test["name"], "", "```"] + r["lines"][-40:] + ["```", "</details>", ""]
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run the CADprompt tests. See tests/README.md.")
     ap.add_argument("-k", action="append", default=[], metavar="TEXT",
@@ -546,15 +551,21 @@ def main():
     ap.add_argument("--list", action="store_true", help="show the tests and how each one is started, run nothing")
     ap.add_argument("--no-gui", action="store_true", help="skip the tests that need the FreeCAD window")
     ap.add_argument("--gui-only", action="store_true", help="only the tests that need the FreeCAD window")
-    ap.add_argument("--display", action="store_true", help="show the FreeCAD window on the screen (default: no display)")
+    ap.add_argument("--display", action="store_true",
+                    help="show the FreeCAD window on the screen (default: no display; on macOS always on)")
     ap.add_argument("--timeout", type=int, default=300, metavar="S", help="seconds for one test (default 300)")
     ap.add_argument("--keep", action="store_true", help="keep the temporary folders of all tests")
     ap.add_argument("--out", metavar="FOLDER", help="put the test folders into FOLDER and keep them")
     ap.add_argument("--junit", metavar="FILE", help="also write the results as JUnit XML")
+    ap.add_argument("--summary", metavar="FILE", help="also add the results to FILE as a Markdown table")
+    ap.add_argument("--title", metavar="TEXT", help="the heading of that table")
     args = ap.parse_args()
-    for stream in (sys.stdout, sys.stderr):              # a Windows console cannot print every character
+    for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="replace")
+            if stream.isatty():                          # a Windows console cannot print every character
+                stream.reconfigure(errors="replace")
+            else:                                        # a file or a pipe: the same text on every system
+                stream.reconfigure(encoding="utf-8", errors="replace")
 
     tests = [t for t in discover() if not args.k or any(k in t["name"] for k in args.k)]
     if not tests:
@@ -576,6 +587,14 @@ def main():
     else:
         root = tempfile.mkdtemp(prefix="cadprompt-tests-")
     env = base_env()
+    mac_note = None
+    if sys.platform == "darwin" and not args.display:
+        # Measured with FreeCAD 1.1.4 on macOS: with Qt's "offscreen" platform there is no
+        # OpenGL ("This plugin does not support createPlatformOpenGLContext!"), and FreeCAD
+        # ends with a segmentation fault as soon as a document gets its 3D view.
+        args.display = True
+        mac_note = ("macOS: FreeCAD cannot open a document without a display here (no OpenGL), "
+                    "so the window tests show their windows on the screen.")
     if not args.display:
         offscreen(env)           # for every test: a plain Python test can start the FreeCAD window too
     freecad = find_freecad()
@@ -592,6 +611,8 @@ def main():
             say("  " + freecad["error"])
         if warning:
             say("  WARNING: " + warning)
+        if mac_note and "freecad-gui" in wanted:
+            say("  NOTE: " + mac_note)
         if "freecad-gui" in wanted and not args.display and appimage_ignores_offscreen(freecad, root, env):
             say("  NOTE: this AppImage always uses the X display (xcb). The window tests need a display, "
                 "for example xvfb-run. tests/README.md says how to run them without one.")
@@ -625,6 +646,8 @@ def main():
         say("No '# RUN:' line, so the way to start it was guessed: " + ", ".join(unmarked))
     if args.junit:
         write_junit(args.junit, results, total, version)
+    if args.summary:
+        write_summary(args.summary, results, total, version, args.title)
 
     if not (args.keep or args.out):
         for t, r in results:                             # keep only what helps to find a failure

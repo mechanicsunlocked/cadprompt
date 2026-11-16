@@ -75,8 +75,11 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 - **A small local model makes mistakes.** It can build a wrong part and say that
   it is right. The panel finds broken objects and takes such a step back, but it
   cannot see a hole in the wrong place. Check the part.
-- **Keys** are files that only you can read, in FreeCAD's user data folder
-  (`cadprompt_api_key`, `cadprompt_local_key`). A key is sent only to the server
+- **Keys** are files in FreeCAD's user data folder (`cadprompt_api_key`,
+  `cadprompt_local_key`), not in FreeCAD's settings. On Linux and macOS only you
+  can read them (mode 0600). Windows has no such modes: there the files are in
+  your own user folder, which other users of the computer cannot open. A key is
+  sent only to the server
   it was saved for, and only over https unless the server is this computer.
 - **Nothing is sent to an AI service until you send a message or press Find models.**
   With the Claude account source, the panel asks the Claude Code program on this

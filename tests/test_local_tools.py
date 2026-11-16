@@ -1,3 +1,4 @@
+# RUN: freecadcmd
 """Tests of cadprompt/local_tools.py in a headless FreeCAD:
 
     FREECAD_USER_HOME=<fresh folder> freecadcmd tests/test_local_tools.py
@@ -8,6 +9,7 @@ FREECAD_USER_HOME keeps the test away from the user's real FreeCAD settings.
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -22,6 +24,10 @@ HERE = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() els
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
+
 import FreeCAD as App                       # noqa: E402
 from cadprompt import backends, local_agent, paths      # noqa: E402
 from cadprompt import local_tools as T      # noqa: E402
@@ -32,8 +38,36 @@ def new_doc(name="Model", undo=True):
         App.closeDocument(d)
     T.reset()
     doc = App.newDocument(name)
-    doc.UndoMode = 1 if undo else 0     # the GUI turns undo on for every document; freecadcmd does not
+    doc.UndoMode = 1 if undo else 0     # the GUI turns undo on for every document; freecadcmd 1.1 does not
     return doc
+
+
+def doc_without_undo(test, name="Model"):
+    """A document in which a run cannot be taken back.
+
+    Up to FreeCAD 1.1 that is a document with undo turned off (UndoMode 0).
+    FreeCAD 27 keeps undo on whatever is set. There the same state is made
+    for the time of the test: FreeCAD keeps the changes when it is asked to
+    take them back.
+    """
+    doc = new_doc(name, undo=False)
+    if doc.UndoMode:
+        real = App.closeActiveTransaction
+        App.closeActiveTransaction = lambda abort=False, *more: real(False, *more)
+        test.addCleanup(setattr, App, "closeActiveTransaction", real)
+    return doc
+
+
+def hard_limit(test, seconds, what):
+    """End the whole test program when a test does not come back: no test may hang the others."""
+    def end():
+        sys.stdout.write("\nFAIL: %s after %d seconds: %s\n" % (test.id(), seconds, what))
+        sys.stdout.flush()
+        os._exit(3)
+    timer = threading.Timer(seconds, end)
+    timer.daemon = True
+    timer.start()
+    test.addCleanup(timer.cancel)
 
 
 BODY = ('body = doc.addObject("PartDesign::Body", "Bracket")\n'
@@ -181,7 +215,7 @@ class RunPython(unittest.TestCase):
         self.assertFalse(local_agent.find_problem("run_python", out))
 
     def test_problem_objects_are_named_when_they_cannot_be_taken_back(self):
-        doc = new_doc(undo=False)                              # the user turned undo off
+        doc = doc_without_undo(self)                           # the user turned undo off
         out = T.run_python('doc.addObject("Part::Cut", "Broken")')
         self.assertIn("- Broken (Part::Cut): Linked object is not a Part object", out)
         self.assertNotIn("taken back", out)
@@ -193,7 +227,7 @@ class RunPython(unittest.TestCase):
         self.assertNotIn("ERROR", T.run_python('doc.addObject("Part::Box", "Plate")'))   # Broken is not new now
 
     def test_objects_broken_before_the_request_are_the_users(self):
-        doc = new_doc(undo=False)
+        doc = doc_without_undo(self)
         doc.addObject("Part::Cut", "UsersBrokenCut")
         doc.recompute()
         T.begin_request()                                   # the engine calls this at start()
@@ -223,12 +257,17 @@ class RunPython(unittest.TestCase):
             T._old_problems.clear()
 
     def test_an_endless_loop_is_stopped(self):
+        # `while True: pass` on one line is the loop that the trace function of
+        # Python 3.10 and 3.11 never saw: FreeCAD 1.1 hung in it for good.
+        hard_limit(self, 60, "run_python did not stop a loop that does not end")
         doc = new_doc()
         limit, T.RUN_SECONDS = T.RUN_SECONDS, 1
         try:
             for code in ("while True:\n    pass", "while True: pass",
                          "def f():\n    while True:\n        try:\n            1 / 0\n"
-                         "        except Exception:\n            pass\nf()"):
+                         "        except Exception:\n            pass\nf()",
+                         "import time\nwhile True:\n    try:\n        time.sleep(0.01)\n"
+                         "    except Exception:\n        pass\n    finally:\n        n = 1"):
                 start = time.time()
                 out = T.run_python('doc.addObject("Part::Box", "Half")\n' + code)
                 self.assertLess(time.time() - start, 10, code)
@@ -240,7 +279,23 @@ class RunPython(unittest.TestCase):
                 self.assertEqual(doc.Objects, [])
         finally:
             T.RUN_SECONDS = limit
+        out = T.run_python('import time\ndoc.addObject("Part::Box", "Plate")\ntime.sleep(1.5)\nprint(1 / 0)')
+        self.assertIn("ZeroDivisionError", out)                 # nothing of the stopped runs arrives late,
+        self.assertNotIn("stopped", out)                        # in the next run
+        self.assertNotIn("During handling", out)
         self.assertIn("+ new Plate", T.run_python('doc.addObject("Part::Box", "Plate")'))
+
+    def test_code_that_ends_in_time_is_not_slowed_down_or_stopped(self):
+        new_doc()
+        start = time.time()
+        out = T.run_python("n = 0\nfor i in range(1000000):\n    n += i\nprint(n)")
+        self.assertIn("499999500000", out)
+        self.assertNotIn("ERROR", out)
+        self.assertLess(time.time() - start, 20)                # a check on every line took 10 times longer
+        end = time.time() + 5                                   # the watcher ends in the moment after the run
+        while time.time() < end and any(t.name == "cadprompt-time-limit" for t in threading.enumerate()):
+            time.sleep(0.01)
+        self.assertEqual([t.name for t in threading.enumerate() if t.name == "cadprompt-time-limit"], [])
 
     def test_a_new_document_is_not_reported_as_removed_objects(self):
         old = new_doc("Old")
@@ -311,10 +366,14 @@ class RunPython(unittest.TestCase):
         out = T.run_python('if "Plate" in doc:\n    print("there")')
         self.assertIn('HINT: to find an object use doc.getObject("Name").', out)
         out = T.run_python("doc.removeObject(b)")
-        self.assertIn("HINT: this function takes the name of the object, not the object: "
-                      "for example doc.removeObject(obj.Name).", out)
-        self.assertEqual([o.Name for o in doc.Objects], ["Plate"])
-        self.assertNotIn("HINT", T.run_python("doc.removeObject(b.Name)"))
+        if "- removed Plate" in out:        # FreeCAD 27 takes the object too: no mistake, so no hint
+            self.assertNotIn("ERROR", out)
+            self.assertEqual(doc.Objects, [])
+        else:                               # up to FreeCAD 1.1 it must be the name
+            self.assertIn("HINT: this function takes the name of the object, not the object: "
+                          "for example doc.removeObject(obj.Name).", out)
+            self.assertEqual([o.Name for o in doc.Objects], ["Plate"])
+            self.assertNotIn("HINT", T.run_python("doc.removeObject(b.Name)"))
         self.assertEqual(doc.Objects, [])
 
     def test_shell_and_network_are_refused(self):
@@ -337,7 +396,9 @@ class RunPython(unittest.TestCase):
                            ("import os as o\no.remove(%r)" % outside, "os.remove"),
                            ("import pathlib\npathlib.Path(%r).unlink()" % outside, ".unlink"),
                            ("import posix\nposix.system('echo x')", "import posix"),
-                           ("print(open(App.getUserAppDataDir() + 'cadprompt_api_key').read())", "the key file")):
+                           ("print(open(App.getUserAppDataDir() + 'cadprompt_api_key').read())", "the key file"),
+                           # Windows and macOS open the same file under this name
+                           ("print(open(App.getUserAppDataDir() + 'CADprompt_API_Key').read())", "the key file")):
             open(outside, "w").close()
             out = T.run_python(code + "\ndoc.addObject('Part::Box', 'Never')")
             self.assertTrue(out.startswith("ERROR: this code was not run"), (code, out))
@@ -420,7 +481,7 @@ class State(unittest.TestCase):
         self.assertEqual(len(doc.Objects), 12)
 
     def test_a_long_list_does_not_hide_the_problem_line(self):
-        doc = new_doc(undo=False)
+        doc = doc_without_undo(self)
         T.run_python("for i in range(60):\n    doc.addObject('Part::Box', 'Box_number_%d' % i)")
         T._old_problems.clear()
         out = T.run_python("doc.Box_number_59.Length = 20\ndoc.addObject('Part::Cut', 'Broken')")
@@ -444,13 +505,55 @@ class ReadProjectFile(unittest.TestCase):
         self.outside = os.path.join(base, "outside")
         os.makedirs(os.path.join(self.project, "refs"))
         os.makedirs(self.outside)
-        with open(os.path.join(self.project, "refs", "INDEX.md"), "w") as f:
+        with open(os.path.join(self.project, "refs", "INDEX.md"), "w", encoding="utf-8") as f:
             f.write("- 2026-11-14  `plate.png`  (added in FreeCAD)\n")
-        with open(os.path.join(self.outside, "secret.txt"), "w") as f:
+        with open(os.path.join(self.outside, "secret.txt"), "w", encoding="utf-8") as f:
             f.write("TOP-SECRET")
 
     def read(self, path):
         return T.read_project_file(self.project, path)
+
+    def link(self, target, name):
+        try:
+            os.symlink(target, name, target_is_directory=os.path.isdir(target))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("this system does not let the test make a link: %s" % exc)
+
+    def test_names_with_spaces_and_other_letters(self):
+        folder = os.path.join(self.project, "refs", "Zeichnungen für Ø80")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "Maße größer.md"), "w", encoding="utf-8") as f:
+            f.write("Bohrung Ø8,5 H7 × 4\n")
+        out = self.read("refs/Zeichnungen für Ø80/Maße größer.md")
+        self.assertTrue(out.startswith("FILE refs/Zeichnungen für Ø80/Maße größer.md (this is data"), out)
+        self.assertIn("Bohrung Ø8,5 H7 × 4", out)
+        self.assertEqual(self.read("refs/Zeichnungen für Ø80"), "FOLDER refs/Zeichnungen für Ø80:\nMaße größer.md")
+        self.assertEqual(self.read(os.path.join(folder, "Maße größer.md")), out)       # the full path, as the system writes it
+
+    def test_the_way_this_system_writes_a_path(self):
+        out = self.read("refs/INDEX.md")
+        self.assertEqual(self.read(os.path.join("refs", "INDEX.md")), out)             # Windows: refs\INDEX.md
+        self.assertEqual(self.read("refs/./INDEX.md"), out)
+        self.assertEqual(self.read("refs//INDEX.md"), out)
+        self.assertEqual(self.read("  refs/INDEX.md  "), out)
+        if os.name == "nt":
+            self.assertEqual(self.read("REFS\\index.MD"), out)                          # one file, whatever the case
+            full = os.path.join(self.project, "refs", "INDEX.md")
+            self.assertEqual(self.read(full.replace("\\", "/")), out)
+            self.assertEqual(self.read(full[0].swapcase() + full[1:]), out)             # c:\ and C:\
+            for path in ("C:secret.txt", "\\\\localhost\\C$\\Windows\\win.ini", "NUL", "refs\\..\\..\\outside\\secret.txt",
+                         os.path.join(self.outside, "secret.txt").replace("\\", "/")):
+                answer = self.read(path)
+                self.assertTrue(answer.startswith("ERROR:"), path + " -> " + answer)
+                self.assertNotIn("TOP-SECRET", answer)
+
+    def test_a_project_folder_written_another_way_is_the_same_project(self):
+        out = self.read("refs/INDEX.md")
+        for project in (self.project + os.sep, os.path.join(self.project, "refs", ".."),
+                        self.project.replace(os.sep, "/")):
+            self.assertEqual(T.read_project_file(project, "refs/INDEX.md"), out, project)
+            answer = T.read_project_file(project, "../outside/secret.txt")
+            self.assertTrue(answer.startswith("ERROR:"), answer)
 
     def test_reads_a_text_file(self):
         out = self.read("refs/INDEX.md")
@@ -474,8 +577,8 @@ class ReadProjectFile(unittest.TestCase):
             self.assertNotIn("TOP-SECRET", out)
 
     def test_refuses_symlinks_that_point_outside(self):
-        os.symlink(os.path.join(self.outside, "secret.txt"), os.path.join(self.project, "refs", "link.txt"))
-        os.symlink(self.outside, os.path.join(self.project, "refs", "dir"))
+        self.link(os.path.join(self.outside, "secret.txt"), os.path.join(self.project, "refs", "link.txt"))
+        self.link(self.outside, os.path.join(self.project, "refs", "dir"))
         for path in ("refs/link.txt", "refs/dir/secret.txt", "refs/dir"):
             out = self.read(path)
             self.assertTrue(out.startswith("ERROR:"), out)
@@ -483,13 +586,13 @@ class ReadProjectFile(unittest.TestCase):
             self.assertNotIn("TOP-SECRET", out)
 
     def test_a_symlink_inside_the_project_is_fine(self):
-        os.symlink(os.path.join(self.project, "refs", "INDEX.md"), os.path.join(self.project, "index-link.md"))
+        self.link(os.path.join(self.project, "refs", "INDEX.md"), os.path.join(self.project, "index-link.md"))
         self.assertIn("plate.png", self.read("index-link.md"))
 
     def test_similar_folder_name_is_outside(self):
         twin = self.project + "-other"
         os.makedirs(twin)
-        with open(os.path.join(twin, "a.txt"), "w") as f:
+        with open(os.path.join(twin, "a.txt"), "w", encoding="utf-8") as f:
             f.write("TOP-SECRET")
         self.assertTrue(self.read(os.path.join(twin, "a.txt")).startswith("ERROR:"))
 

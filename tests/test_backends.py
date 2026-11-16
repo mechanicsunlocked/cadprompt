@@ -1,3 +1,4 @@
+# RUN: freecadcmd
 """Tests for cadprompt/backends.py and the Claude Code environment in runner.py.
 
 Run headless, with a throw-away FreeCAD profile so no real setting is touched:
@@ -24,9 +25,15 @@ if not os.environ.get("FREECAD_USER_HOME"):
 sys.dont_write_bytecode = True       # no __pycache__ in the repository
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+
+from utf8_output import utf8_output            # noqa: E402
+
+utf8_output()
 
 FAILED = []
 COUNT = [0]
+POSIX = os.name == "posix"
 
 
 def check(name, ok, detail=""):
@@ -80,6 +87,16 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def inside(path, folder):
+    """True when path is the folder or in it. Not a comparison of two texts: Windows mixes \\ and /
+    and upper and lower case, macOS has two names for its temporary folder."""
+    path, folder = (os.path.normcase(os.path.realpath(x)) for x in (path, folder))
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:           # two drives
+        return False
+
+
 def raises(kinds, fn):
     try:
         fn()
@@ -97,7 +114,7 @@ def main():
     home = os.environ["FREECAD_USER_HOME"]
     data = App.getUserAppDataDir()
     print("FreeCAD user data:", data)
-    if not os.path.realpath(data).startswith(os.path.realpath(home)):
+    if not inside(data, home):
         # a FreeCAD that does not follow the variable: stop before any real key file is touched
         check("FreeCAD's user data folder is inside FREECAD_USER_HOME", False, data)
         return
@@ -120,53 +137,84 @@ def main():
     check("backends.py imports no Qt", "PySide" not in src and "QtCore" not in src)
 
     # ---- key files ----
+    # Linux and macOS: mode 0600. Windows has no such modes: there the tests are
+    # what is true there (the swap works, also for a read-only or an open file).
+    def mode(path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
     for name, get, put in (("cadprompt_api_key", backends.api_key, backends.set_api_key),
                            ("cadprompt_local_key", backends.local_key, backends.set_local_key)):
         path = os.path.join(data, name)
         check(f"{name}: no key at first", get() == "" and not os.path.exists(path))
         put("  made-up-key-" + name + "\n")
         check(f"{name}: file is written", os.path.isfile(path))
-        check(f"{name}: mode is 0600", stat.S_IMODE(os.stat(path).st_mode) == 0o600,
-              oct(stat.S_IMODE(os.stat(path).st_mode)))
+        if POSIX:
+            check(f"{name}: mode is 0600", mode(path) == 0o600, oct(mode(path)))
         check(f"{name}: read back without spaces", get() == "made-up-key-" + name, repr(get()))
-        os.chmod(path, 0o644)
-        put("second-key-" + name)
-        check(f"{name}: an old file that others could read is closed again",
-              stat.S_IMODE(os.stat(path).st_mode) == 0o600 and get() == "second-key-" + name)
-        os.chmod(path, 0o644)                # made by hand, or brought back by a sync tool
-        check(f"{name}: a read closes a file that others could read",
-              get() == "second-key-" + name and stat.S_IMODE(os.stat(path).st_mode) == 0o600,
-              oct(stat.S_IMODE(os.stat(path).st_mode)))
-        os.chmod(path, 0o644)
-        modes = []
+        if POSIX:
+            os.chmod(path, 0o644)
+            put("second-key-" + name)
+            check(f"{name}: an old file that others could read is closed again",
+                  mode(path) == 0o600 and get() == "second-key-" + name)
+            os.chmod(path, 0o644)                # made by hand, or brought back by a sync tool
+            check(f"{name}: a read closes a file that others could read",
+                  get() == "second-key-" + name and mode(path) == 0o600, oct(mode(path)))
+            os.chmod(path, 0o644)
+        else:
+            put("between-key-" + name)
+            check(f"{name}: a new key takes the place of the old one", get() == "between-key-" + name, repr(get()))
+        os.chmod(path, stat.S_IREAD)             # Windows: the read-only mark, which blocks a plain swap
+        try:
+            put("second-key-" + name)
+            error = ""
+        except OSError as exc:
+            error = repr(exc)
+        check(f"{name}: a file marked read-only gets the new key all the same",
+              not error and get() == "second-key-" + name, error or repr(get()))
+        if POSIX:
+            os.chmod(path, 0o644)
+        seen = []
         real_replace = os.replace
 
         def watched_replace(src, dst):       # the moment the new key is on disk
-            modes.append((stat.S_IMODE(os.stat(src).st_mode), open(path).read().strip()))
+            seen.append((mode(src), open(path).read().strip()))
             real_replace(src, dst)
         os.replace = watched_replace
         with open(path) as already_open:
             try:
                 put("third-key-" + name)
+                error = ""
+            except OSError as exc:
+                error = repr(exc)
             finally:
                 os.replace = real_replace
-            check(f"{name}: the new key is never in a file that others can read",
-                  modes == [(0o600, "second-key-" + name)] and get() == "third-key-" + name
-                  and stat.S_IMODE(os.stat(path).st_mode) == 0o600, str(modes))
-            check(f"{name}: a program that had the old file open does not see the new key",
-                  already_open.read().strip() == "second-key-" + name)
+            if POSIX:
+                check(f"{name}: the new key is never in a file that others can read",
+                      seen == [(0o600, "second-key-" + name)] and get() == "third-key-" + name
+                      and mode(path) == 0o600, str(seen) + error)
+                check(f"{name}: a program that had the old file open does not see the new key",
+                      already_open.read().strip() == "second-key-" + name)
+            else:
+                # Windows does not swap a file that is open: the key is written into the old file
+                check(f"{name}: the key is saved while another program has the file open",
+                      not error and len(seen) == 1 and get() == "third-key-" + name, str(seen) + error + repr(get()))
         check(f"{name}: no half-written file is left", sorted(n for n in os.listdir(data) if n.startswith(name))
               == [name], str(os.listdir(data)))
+        os.chmod(path, stat.S_IREAD)
         put("")
-        check(f"{name}: empty text deletes the file", not os.path.exists(path) and get() == "")
+        check(f"{name}: empty text deletes the file, also one marked read-only", not os.path.exists(path) and get() == "")
         put("")
         check(f"{name}: deleting twice is fine", not os.path.exists(path))
         put("   ")
         check(f"{name}: only spaces also means no key", not os.path.exists(path))
+        with open(path, "wb") as f:              # not text: a broken file must not stop the settings
+            f.write(b"\xff\xfe\x00key")
+        check(f"{name}: a file that is not text counts as no key", get() == "")
+        put("")
     check("the two keys do not mix", (backends.set_api_key("AAA-made-up"), backends.set_local_key("BBB-made-up"))
           and backends.api_key() == "AAA-made-up" and backends.local_key() == "BBB-made-up")
     check("the key files are in FreeCAD's user data folder, inside the test profile",
-          os.path.isfile(os.path.join(data, "cadprompt_api_key")) and data.startswith(home))
+          os.path.isfile(os.path.join(data, "cadprompt_api_key")) and inside(data, home), f"{data} {home}")
 
     # ---- nothing about keys in FreeCAD's parameters ----
     p.SetString("LocalUrl", "http://127.0.0.1:1234/v1")
@@ -248,6 +296,104 @@ def main():
           and not pe.contains("ANTHROPIC_BASE_URL"))
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
         del os.environ[k]
+
+    # ---- a started program gets nothing that belongs to the FreeCAD bundle ----
+    # An AppImage, the macOS app and a Windows install bring their own Python. Their start
+    # scripts export PYTHONHOME and more; with that, no other Python starts.
+    roots = paths.bundle_roots()
+    print("FreeCAD's own bundle:", roots or "none (a FreeCAD of the system)")
+    check("bundle_roots: none, or the one folder that holds this FreeCAD",
+          roots == [] or (len(roots) == 1 and os.path.isdir(roots[0])
+                          and inside(App.getHomePath(), roots[0])), str(roots))
+    bundle = os.path.join(home, "My FreeCAD Büro", "FreeCAD.AppDir")    # a space and a letter that is not ASCII
+    os.makedirs(os.path.join(bundle, "usr", "bin"))
+    sep, usr = os.pathsep, os.path.join(bundle, "usr")
+    system_bin = os.path.dirname(os.path.abspath(sys.executable))
+    shell = {"PYTHONHOME": usr, "PYTHONPATH": sep.join([os.path.join(usr, "lib"), os.path.join(home, "my-modules")]),
+             "LD_LIBRARY_PATH": os.path.join(usr, "lib"), "SSL_CERT_FILE": os.path.join(usr, "ssl", "cacert.pem"),
+             "GIT_SSL_CAINFO": os.path.join(usr, "ssl", "cacert.pem"), "PREFIX": usr + os.sep,
+             "PATH": sep.join([os.path.join(usr, "bin"), system_bin, usr, os.path.join(home, "bin")]),
+             "XCURSOR_PATH": sep.join(["~/.icons", os.path.join(usr, "share", "icons")]),
+             "FONTCONFIG_PATH": "/etc/fonts", "QT_QPA_PLATFORM": "xcb", "HOME_PAGE": "https://example.invalid/a:b",
+             "NEIGHBOUR": bundle + "-other", "EMPTY": "", "LANG": "de_LU.UTF-8"}
+    got = paths.child_environment(shell, roots=[bundle])
+    check("child_environment: PYTHONHOME, the library path, the certificate files and PREFIX of the bundle are gone",
+          not [k for k in ("PYTHONHOME", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "GIT_SSL_CAINFO", "PREFIX") if k in got],
+          str(sorted(got)))
+    check("child_environment: a list loses only its entries inside the bundle",
+          got.get("PATH") == sep.join([system_bin, os.path.join(home, "bin")])
+          and got.get("PYTHONPATH") == os.path.join(home, "my-modules")
+          and got.get("XCURSOR_PATH") == "~/.icons", str({k: got.get(k) for k in ("PATH", "PYTHONPATH", "XCURSOR_PATH")}))
+    check("child_environment: everything else stays as it was, also a folder with a similar name",
+          {k: got.get(k) for k in ("FONTCONFIG_PATH", "QT_QPA_PLATFORM", "HOME_PAGE", "NEIGHBOUR", "EMPTY", "LANG")}
+          == {k: shell[k] for k in ("FONTCONFIG_PATH", "QT_QPA_PLATFORM", "HOME_PAGE", "NEIGHBOUR", "EMPTY", "LANG")},
+          str(got))
+    check("child_environment: the dict that was handed in is not changed", shell["PYTHONHOME"] == usr and "PATH" in shell)
+    check("child_environment: without a bundle (a FreeCAD of the system) nothing is taken out",
+          paths.child_environment(shell, roots=[]) == shell)
+    if os.name == "nt":
+        mixed = {"Path": sep.join([os.path.join(usr.upper(), "bin"), usr.replace(os.sep, "/") + "/bin", system_bin])}
+        check("child_environment, Windows: upper or lower case and / or \\ name the same folder",
+              paths.child_environment(mixed, roots=[bundle]) == {"Path": system_bin},
+              str(paths.child_environment(mixed, roots=[bundle])))
+    with open(os.path.join(bundle, "AppRun"), "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n")
+    appimage = dict(shell, APPDIR=bundle, APPIMAGE=os.path.join(home, "FreeCAD.AppImage"), ARGV0="FreeCAD.AppImage",
+                    OWD=home)
+    got = paths.child_environment(appimage, roots=[bundle])
+    check("child_environment, AppImage: APPDIR, APPIMAGE, ARGV0 and OWD describe FreeCAD and are gone too",
+          not [k for k in ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "PYTHONHOME") if k in got] and got.get("LANG") == shell["LANG"],
+          str(sorted(got)))
+    # the same through the real function, with the real environment of this FreeCAD
+    real_roots, paths.bundle_roots = paths.bundle_roots, lambda: roots + [bundle]
+    os.environ["PYTHONPATH"] = os.path.join(usr, "lib")
+    os.environ["CADPROMPT_TEST_BUNDLE_FILE"] = os.path.join(usr, "ssl", "cacert.pem")
+    os.environ["CADPROMPT_TEST_KEPT"] = "kept"
+    try:
+        pe = runner.system_environment()
+        names = [k for k in pe.keys() if bundle in pe.value(k)]
+        check("runner.system_environment: nothing in it points into the bundle, the rest is there",
+              not names and not pe.contains("PYTHONPATH") and not pe.contains("CADPROMPT_TEST_BUNDLE_FILE")
+              and pe.value("CADPROMPT_TEST_KEPT") == "kept" and pe.contains("PATH"), str(names))
+        check("runner.system_environment: FreeCAD's own PYTHONHOME is not handed on",
+              not roots or not pe.contains("PYTHONHOME"), pe.value("PYTHONHOME"))
+        pe = runner.claude_environment(os.path.join(home, "bin", "claude"), {"FREECAD_MCP_TOKEN": "t"})
+        check("claude process: the same clean environment, with claude's folder first in PATH",
+              not [k for k in pe.keys() if bundle in pe.value(k)] and not pe.contains("PYTHONPATH")
+              and pe.value("PATH").split(os.pathsep)[0] == os.path.join(home, "bin")
+              and pe.value("FREECAD_MCP_TOKEN") == "t", pe.value("PATH")[:200])
+    finally:
+        paths.bundle_roots = real_roots
+        for k in ("PYTHONPATH", "CADPROMPT_TEST_BUNDLE_FILE", "CADPROMPT_TEST_KEPT"):
+            del os.environ[k]
+
+    # ---- claude.cmd on Windows: the command line for cmd.exe ----
+    line = runner._cmd_line(r"C:\Users\Zoë Müller\AppData\Roaming\npm\claude.cmd", ["-p", "--model", "a b", "x&y"])
+    check("a .cmd file: one pair of quotes around the whole line, every word in quotes of its own",
+          line == '/d /s /c ""C:\\Users\\Zoë Müller\\AppData\\Roaming\\npm\\claude.cmd" "-p" "--model" "a b" "x&y""', line)
+    check("only a .cmd or .bat file on Windows goes through cmd.exe",
+          runner._is_script("C:/x/claude.CMD") == paths.WIN and not runner._is_script("C:/x/claude.exe")
+          and not runner._is_script("/usr/bin/claude"))
+
+    # ---- project files: the same text on every system ----
+    from cadprompt import projects
+    proj = os.path.join(home, "Projekt Größe Ø80")
+    os.makedirs(proj)
+    check("mode and session: nothing saved yet", projects.get_mode(proj) == "build" and projects.get_session(proj) is None)
+    projects.set_mode(proj, "teach")
+    projects.set_session(proj, "session-ü-1")
+    check("mode and session are saved and read back, in a folder with a space and letters that are not ASCII",
+          projects.get_mode(proj) == "teach" and projects.get_session(proj) == "session-ü-1")
+    with open(os.path.join(proj, ".cadprompt", "session"), "rb") as f:
+        check("the session file is UTF-8 on every system", f.read().rstrip() == "session-ü-1".encode("utf-8"))
+    with open(os.path.join(proj, ".cadprompt", "mode"), "wb") as f:
+        f.write(b"teach\r\n")                  # a file that Windows git or an editor gave CRLF line ends
+    check("a mode file with Windows line ends reads the same", projects.get_mode(proj) == "teach")
+    projects.set_session(proj, None)
+    check("an empty session id removes the file", projects.get_session(proj) is None)
+    check("slug: a folder name that every system takes",
+          projects.slug("Flansch Ø80 / größer") == "flansch-80-gr-er" and projects.slug("///") == "untitled",
+          projects.slug("Flansch Ø80 / größer"))
 
     # ---- list_models ----
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Fake)

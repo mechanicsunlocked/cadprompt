@@ -1,3 +1,4 @@
+# RUN: python
 """Tests for the pure layout rules. Run with any Python: python -m unittest discover tests"""
 
 import os
