@@ -1,0 +1,223 @@
+# Runs the tests (tests/run_all.py) with FreeCAD builds from the official
+# FreeCAD releases, so a FreeCAD update that breaks the addon shows up here
+# first. tests/README.md says how to run the same tests on your own computer.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Thursday morning (UTC). FreeCAD publishes its weekly development build on
+    # Wednesday. GitHub runs a schedule only from the default branch.
+    - cron: "23 4 * * 4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # The weekly build shows what the next FreeCAD will break. That job may fail
+    # without making the whole run red; its own mark still shows the failure.
+    continue-on-error: ${{ matrix.may_fail }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # asset: a pattern for the file name in the release. No version is
+          # written here; the release list says what the newest file is called.
+          - id: linux-stable
+            name: Linux, FreeCAD stable
+            os: ubuntu-latest
+            channel: stable
+            asset: 'Linux-x86_64.*\.AppImage$'
+            may_fail: false
+            window_may_fail: false
+          - id: linux-weekly
+            name: Linux, FreeCAD weekly development build (allowed to fail)
+            os: ubuntu-latest
+            channel: weekly
+            asset: 'Linux-x86_64.*\.AppImage$'
+            may_fail: true
+            window_may_fail: false
+          - id: windows-stable
+            name: Windows, FreeCAD stable
+            os: windows-latest
+            channel: stable
+            asset: 'Windows-x86_64.*\.7z$'
+            may_fail: false
+            window_may_fail: true
+          - id: macos-stable
+            name: macOS, FreeCAD stable
+            os: macos-latest
+            channel: stable
+            asset: 'macOS.*-arm64.*\.dmg$'
+            may_fail: false
+            window_may_fail: true
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Find the FreeCAD download
+        id: find
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
+          PATTERN: ${{ matrix.asset }}
+        run: |
+          # one release -> "tag file checksum" of the first file that fits the pattern
+          one='.tag_name as $t | [.assets[] | select(.name | test(env.PATTERN))] | sort_by(.name) | .[0] // empty | "\($t) \(.name) \(.digest // "")"'
+          if [ "$CHANNEL" = stable ]; then
+            # "latest" is the newest release that is not a pre-release
+            found=$(gh api repos/FreeCAD/FreeCAD/releases/latest --jq "$one")
+          else
+            # the newest weekly build that has the file already (the upload of a new build takes hours)
+            found=$(gh api "repos/FreeCAD/FreeCAD/releases?per_page=30" \
+              --jq "[.[] | select(.draft | not) | select(.tag_name | startswith(\"weekly-\")) | $one] | .[0] // empty")
+          fi
+          read -r tag asset digest <<< "$found"
+          if [ -z "$asset" ]; then
+            echo "::error::No file that fits '$PATTERN' in the FreeCAD $CHANNEL release."
+            exit 1
+          fi
+          echo "FreeCAD $tag: $asset"
+          {
+            echo "tag=$tag"
+            echo "asset=$asset"
+            echo "sha256=${digest#sha256:}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Keep the download for the next run
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/freecad-download
+          key: freecad-${{ steps.find.outputs.asset }}-${{ steps.find.outputs.sha256 }}
+
+      - name: Download FreeCAD ${{ steps.find.outputs.tag }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.find.outputs.tag }}
+          ASSET: ${{ steps.find.outputs.asset }}
+        run: gh release download "$TAG" --repo FreeCAD/FreeCAD --pattern "$ASSET" --dir "$RUNNER_TEMP/freecad-download"
+
+      - name: Check the download
+        shell: bash
+        env:
+          ASSET: ${{ steps.find.outputs.asset }}
+          SHA256: ${{ steps.find.outputs.sha256 }}
+        run: |
+          python - <<'EOF'
+          import hashlib, os, sys
+          path = os.path.join(os.environ["RUNNER_TEMP"], "freecad-download", os.environ["ASSET"])
+          want = os.environ.get("SHA256", "")
+          found = hashlib.sha256()
+          with open(path, "rb") as f:
+              for block in iter(lambda: f.read(1 << 20), b""):
+                  found.update(block)
+          print("%s: %d bytes, sha256 %s" % (path, os.path.getsize(path), found.hexdigest()))
+          if want and found.hexdigest() != want:
+              sys.exit("This is not the checksum that GitHub lists for the file: " + want)
+          EOF
+
+      - name: Unpack FreeCAD (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ASSET: ${{ steps.find.outputs.asset }}
+        run: |
+          # Qt needs these from the system, also when there is no display
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+          cd "$RUNNER_TEMP"
+          chmod +x "freecad-download/$ASSET"
+          # unpack it: the runner has no FUSE, which an AppImage needs to start as one file
+          "freecad-download/$ASSET" --appimage-extract > /dev/null
+          app="$RUNNER_TEMP/squashfs-root"
+          # The start script of FreeCAD 1.1 always uses the X display (xcb). Later
+          # versions read FREECAD_QT_QPA_PLATFORM; the old script gets the same switch.
+          sed -i 's|^export QT_QPA_PLATFORM=xcb$|export QT_QPA_PLATFORM="${FREECAD_QT_QPA_PLATFORM:-xcb}"|' "$app/AppRun"
+          if ! grep -q FREECAD_QT_QPA_PLATFORM "$app/AppRun"; then
+            echo "::error::The start script of this AppImage has changed: it does not read FREECAD_QT_QPA_PLATFORM."
+            exit 1
+          fi
+          # 'freecad' and 'freecadcmd' as two programs: the start script runs the
+          # program in its usr/bin that the first word names
+          mkdir -p "$RUNNER_TEMP/freecad-bin"
+          for name in freecad freecadcmd; do
+            printf '#!/bin/sh\nexec "%s/AppRun" %s "$@"\n' "$app" "$name" > "$RUNNER_TEMP/freecad-bin/$name"
+            chmod +x "$RUNNER_TEMP/freecad-bin/$name"
+          done
+          echo "$RUNNER_TEMP/freecad-bin" >> "$GITHUB_PATH"
+          echo "FREECAD=$RUNNER_TEMP/freecad-bin/freecad" >> "$GITHUB_ENV"
+          echo "FREECADCMD=$RUNNER_TEMP/freecad-bin/freecadcmd" >> "$GITHUB_ENV"
+
+      - name: Unpack FreeCAD (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ASSET: ${{ steps.find.outputs.asset }}
+        run: |
+          7z x "$env:RUNNER_TEMP\freecad-download\$env:ASSET" "-o$env:RUNNER_TEMP\freecad" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z could not unpack $env:ASSET" }
+          # the programs are in <folder of the archive>\bin
+          $cmd = Get-ChildItem "$env:RUNNER_TEMP\freecad" -Recurse -Depth 2 -Filter freecadcmd.exe |
+            Where-Object { $_.Directory.Name -eq "bin" } | Select-Object -First 1
+          if (-not $cmd) { throw "freecadcmd.exe is not in $env:ASSET" }
+          $bin = $cmd.DirectoryName
+          "FREECAD=$bin\freecad.exe" >> $env:GITHUB_ENV
+          "FREECADCMD=$bin\freecadcmd.exe" >> $env:GITHUB_ENV
+
+      - name: Open FreeCAD (macOS)
+        if: runner.os == 'macOS'
+        env:
+          ASSET: ${{ steps.find.outputs.asset }}
+        run: |
+          # FreeCAD runs from the opened disk image: no install, nothing is copied
+          hdiutil attach "$RUNNER_TEMP/freecad-download/$ASSET" -nobrowse -readonly -mountpoint "$RUNNER_TEMP/freecad-dmg"
+          app=$(ls -d "$RUNNER_TEMP"/freecad-dmg/*.app | head -n 1)
+          test -x "$app/Contents/Resources/bin/freecadcmd"
+          echo "FREECAD=$app/Contents/MacOS/FreeCAD" >> "$GITHUB_ENV"
+          echo "FREECADCMD=$app/Contents/Resources/bin/freecadcmd" >> "$GITHUB_ENV"
+
+      # run_all.py prints the FreeCAD version first, gives each test a new
+      # FreeCAD settings folder and starts the window tests without a display.
+      - name: Tests without the FreeCAD window
+        shell: bash
+        run: >-
+          python tests/run_all.py --no-gui
+          --out "$RUNNER_TEMP/cadprompt-tests"
+          --junit "$RUNNER_TEMP/cadprompt-tests/junit-no-window.xml"
+
+      - name: Tests with the FreeCAD window, no display${{ matrix.window_may_fail && ' (not proven on this system, allowed to fail)' || '' }}
+        id: window
+        if: ${{ !cancelled() && env.FREECAD != '' }}
+        continue-on-error: ${{ matrix.window_may_fail }}
+        shell: bash
+        run: >-
+          python tests/run_all.py --gui-only
+          --out "$RUNNER_TEMP/cadprompt-tests"
+          --junit "$RUNNER_TEMP/cadprompt-tests/junit-window.xml"
+
+      - name: Keep the logs of the failed tests
+        if: ${{ failure() || steps.window.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-logs-${{ matrix.id }}
+          path: ${{ runner.temp }}/cadprompt-tests
+          if-no-files-found: ignore
+          retention-days: 14
