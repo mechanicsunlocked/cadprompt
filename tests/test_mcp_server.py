@@ -529,11 +529,15 @@ class LifeCycle(Base):
         """Clients that go away before their request is read. Returns what the server printed."""
         def client(sent, reset):
             conn = socket.create_connection(("127.0.0.1", self.srv.port), timeout=5)
-            if sent:
-                conn.sendall(sent)
-                time.sleep(0.05)
-            if reset:                # close with a reset, as a program that was killed
-                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh" if os.name == "nt" else "ii", 1, 0))
+            try:
+                if sent:
+                    conn.sendall(sent)
+                    time.sleep(0.05)
+                if reset:            # close with a reset, as a program that was killed
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack("hh" if os.name == "nt" else "ii", 1, 0))
+            except OSError:
+                pass                 # the server closed first (macOS then refuses the option): gone is gone
             conn.close()
 
         printed, real = io.StringIO(), sys.stderr
