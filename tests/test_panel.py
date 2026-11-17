@@ -114,9 +114,15 @@ def main():
     QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
     def spin(ms=50):
-        loop = QtCore.QEventLoop()
-        QtCore.QTimer.singleShot(ms, loop.quit)
-        loop.exec()
+        # No event loop of our own: on macOS a QEventLoop that is started here never
+        # came back once a document had its 3D view (the bridge had answered and the
+        # object was made). processEvents() is what the other window tests use.
+        end = time.monotonic() + ms / 1000.0
+        while True:
+            QtWidgets.QApplication.processEvents()
+            if time.monotonic() >= end:
+                return
+            time.sleep(0.002)
 
     def wait_for(cond, seconds=10):
         end = time.time() + seconds

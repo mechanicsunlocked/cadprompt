@@ -20,6 +20,7 @@ import base64
 import hmac
 import http.server
 import json
+import re
 import secrets
 import socket
 import socketserver
@@ -30,6 +31,7 @@ from . import main_thread
 PATH = "/mcp"
 VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")    # protocol versions, the newest first
 MAX_BODY = 4 * 1024 * 1024       # bytes of one request; the code of a run_python call is far smaller
+MAX_DEPTH = 64                   # brackets inside brackets in one request; a real one has fewer than ten
 READ_SECONDS = 30                # a client that sends its request slower than this is dropped
 DRAIN = 1024 * 1024              # bytes of a refused request that are still taken off the line
 
@@ -75,6 +77,29 @@ class _Listener(http.server.ThreadingHTTPServer):
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
 
+_STRINGS = re.compile(rb'"(?:\\.|[^"\\])*"', re.S)
+_BRACKETS = re.compile(rb"[\[\]{}]")
+
+
+def _too_deep(raw):
+    """True when the brackets of this JSON text are nested deeper than MAX_DEPTH.
+
+    Python's reader has no fixed limit: some versions give an error at a
+    thousand levels, newer ones read 100,000 levels into a list that later
+    code cannot walk. The limit is ours, so each version answers the same.
+    Brackets inside a text (the code of run_python) do not count.
+    """
+    depth = 0
+    for m in _BRACKETS.finditer(_STRINGS.sub(b"", raw)):
+        if m.group() in b"[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                return True
+        else:
+            depth -= 1
+    return False
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "CADprompt"
@@ -86,6 +111,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def setup(self):
         main_thread.quiet_pipe()     # a client that went away must not end FreeCAD
+        main_thread.quiet_socket(self.request)
         super().setup()
         self.server.owner._opened(self.connection)
 
@@ -189,9 +215,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if len(raw) != length:
             raise _Http(400, "The request ended early.")
+        if _too_deep(raw):
+            return _Unreadable
         try:
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, RecursionError):     # not JSON, or brackets nested a thousand deep
+        except (ValueError, RecursionError):     # not JSON
             return _Unreadable
 
 

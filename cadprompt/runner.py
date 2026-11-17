@@ -304,7 +304,8 @@ def allow_web_in_project(project):
     s["permissions"]["ask"] = [t for t in ask if t not in WEB_TOOLS]
     if not s["permissions"]["ask"]:
         del s["permissions"]["ask"]
-    with open(path, "w", encoding="utf-8") as f:
+    # newline: the template has LF on every system; Windows would write CRLF here
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(s, f, indent=2)
         f.write("\n")
 

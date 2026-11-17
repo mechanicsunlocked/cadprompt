@@ -263,6 +263,14 @@ class Protocol(Base):
         status, _, body = self.send(b"[" * 100000 + b"]" * 100000, raw=True)
         self.assertEqual((status, body["error"]["code"]), (400, -32700))
 
+    def test_the_limit_for_brackets_is_ours_and_the_same_on_every_python(self):
+        deep = mcp_server.MAX_DEPTH
+        status, _, body = self.send(b"[" * (deep + 1) + b"]" * (deep + 1), raw=True)
+        self.assertEqual((status, body["error"]["code"]), (400, -32700))
+        # brackets in a text are code of the user, not structure
+        status, _, body = self.rpc("ping", {"note": "[" * 500 + "\\\" {" + "{" * 500})
+        self.assertEqual((status, body.get("result")), (200, {}))
+
     def test_every_answer_closes_its_connection(self):
         for status, head, _ in (self.rpc("ping"), self.send({"jsonrpc": "2.0", "method": "notifications/initialized"}),
                                 self.send(None, method="GET")):

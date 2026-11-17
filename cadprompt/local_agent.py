@@ -130,6 +130,7 @@ def connect(address, timeout, connect_timeout=None):
     except BaseException:
         conn.close()
         raise
+    main_thread.quiet_socket(conn.sock)
     conn.timeout = timeout
     conn.sock.settimeout(timeout)
     return conn

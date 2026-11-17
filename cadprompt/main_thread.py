@@ -10,6 +10,8 @@ quiet_pipe() is for the same threads: they write to network connections.
 """
 
 import signal
+import socket
+import sys
 import threading
 
 
@@ -50,3 +52,20 @@ def quiet_pipe():
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})
     except (AttributeError, ValueError, OSError):
         pass                     # Windows has no such signal
+
+
+def quiet_socket(sock):
+    """Call it for each connection of ours, together with quiet_pipe().
+
+    macOS sends SIGPIPE to the program and not to the thread that wrote, so
+    the block of quiet_pipe() in one thread does not help there: another
+    thread gets the signal and FreeCAD ends. macOS has a switch for each
+    connection instead (SO_NOSIGPIPE; Python has no name for it on every
+    version, 0x1022 is its number). Linux needs only quiet_pipe().
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_NOSIGPIPE", 0x1022), 1)
+    except OSError:
+        pass                     # the write then gives the signal as before; nothing more to do here
