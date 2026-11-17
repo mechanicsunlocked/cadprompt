@@ -34,6 +34,7 @@ NOT_SAVED = ("*The model file was not saved, because this request did not end we
              "model in FreeCAD: save it yourself if it is good, or undo the steps.*")
 MAX_IMAGES = local_agent.MAX_IMAGES
 IMAGE_SIDE = 1568                  # longest side of an image that is sent, in pixels
+IMAGE_PIXELS = 64 * 1024 * 1024    # a larger image is refused: Qt needs 4 bytes for each pixel to open it
 IMAGE_BYTES = 3_500_000            # a larger PNG goes as JPEG: the services take about 5 MB
 DOC_CLOSED = ('ERROR: the document "%s" was closed during this request. Nothing more can be done '
               "in it. Stop and tell the user.")
@@ -131,19 +132,41 @@ def images_note(n):
     return "with %d image%s" % (n, "" if n == 1 else "s")
 
 
+def _format(reader):
+    return bytes(reader.format().data()).decode("ascii", "replace").lower()
+
+
+def _too_large(reader):
+    """Text for an image with too many pixels to open, else "".
+
+    Qt 6 refuses to open such an image (256 MB), Qt 5 takes the memory. A JPEG
+    has no limit: Qt opens it at 1/2, 1/4 or 1/8 of its size (see encode_image).
+    """
+    size = reader.size()
+    if _format(reader) in ("jpeg", "jpg") or size.width() * size.height() <= IMAGE_PIXELS:
+        return ""
+    return ("is too large: %d x %d pixels, and the limit is %d million pixels. Make it smaller "
+            "in an image program." % (size.width(), size.height(), IMAGE_PIXELS // 1_000_000))
+
+
 def project_images(project, files):
     """The images for one message, as paths in the project ("refs/photo.png").
 
     A file outside the project is copied to refs/ first, so the conversation
     never points out of its project. Raises ImageError for a file that is not
-    an image, and for more than MAX_IMAGES files.
+    an image, for an image that is too large to open, and for more than
+    MAX_IMAGES files.
     """
     out, root = [], os.path.realpath(project)
     for f in files or []:
         path = f if os.path.isabs(f) else os.path.join(project, f)
-        if not os.path.isfile(path) or not QtGui.QImageReader(path).canRead():
+        reader = QtGui.QImageReader(path)
+        if not os.path.isfile(path) or not reader.canRead():
             raise ImageError("`%s` is not an image that CADprompt can read (PNG or JPEG, for "
                              "example). It was not sent." % os.path.basename(path), f)
+        problem = _too_large(reader)
+        if problem:
+            raise ImageError("`%s` %s It was not sent." % (os.path.basename(path), problem), f)
         try:
             rel = os.path.relpath(os.path.realpath(path), root)
         except ValueError:
@@ -160,8 +183,13 @@ def project_images(project, files):
 
 def _project_file(project, rel):
     """The file of a stored image path. The stored text cannot point out of the project."""
+    parts = str(rel).split("/")
+    # Look at the text first. The chat file can come from another person, and on Windows
+    # realpath opens the path: for a name such as \\host\share\x.png that is a login at that host.
+    if any(p in ("", ".", "..") or os.sep in p or os.path.splitdrive(p)[0] for p in parts):
+        raise ImageError("The image %s is not in the project." % rel, rel)
     root = os.path.realpath(project)
-    path = os.path.realpath(os.path.join(root, *str(rel).split("/")))
+    path = os.path.realpath(os.path.join(root, *parts))
     if not os.path.normcase(path).startswith(os.path.normcase(root) + os.sep):
         raise ImageError("The image %s is not in the project." % rel, rel)
     return path
@@ -176,21 +204,48 @@ def _encoded(img, kind, quality=-1):
     return bytes(data.data()) if ok else b""
 
 
+def _no_text(img):
+    """The same picture without the text of its file (author, comment, XMP block).
+
+    Qt keeps that text with the pixels and writes it into the data that is
+    sent. QImage cannot remove a text key, only empty it, and a key can be
+    text of the file too: so the pixels go into a new image.
+    """
+    pixels = bytes(img.constBits())          # bytes: every PySide takes them
+    clean = QtGui.QImage(pixels, img.width(), img.height(), img.bytesPerLine(), img.format()).copy()
+    if clean.isNull():
+        return clean
+    clean.setColorTable(img.colorTable())    # a PNG with a palette
+    clean.setColorSpace(img.colorSpace())    # a photo in Display P3 keeps its colours
+    return clean
+
+
 def encode_image(path):
     """(media type, base64 text) of an image file, ready to send.
 
     The longest side is at most IMAGE_SIDE pixels: more does not help a model
-    and costs tokens. A photo stays JPEG, everything else becomes PNG. Runs in
-    the worker thread: QImage is safe there (QPixmap is not).
+    and costs tokens. A photo stays JPEG, everything else becomes PNG. Only
+    the pixels are sent, not the text that the file has about its author or
+    its place. Runs in the worker thread: QImage is safe there (QPixmap is not).
     """
     reader = QtGui.QImageReader(path)
     reader.setAutoTransform(True)            # a phone photo is stored turned
-    kind = bytes(reader.format().data()).decode("ascii", "replace").lower()
+    kind = _format(reader)
+    problem = _too_large(reader)             # the file can change after project_images saw it
+    if problem:
+        raise ImageError("The image %s %s" % (os.path.basename(path), problem), path)
+    size = reader.size()
+    if max(size.width(), size.height()) > IMAGE_SIDE:
+        # Qt then opens a JPEG at a part of its size: a 108-megapixel photo needs 30 MB, not 430
+        reader.setScaledSize(size.scaled(IMAGE_SIDE, IMAGE_SIDE, QtCore.Qt.KeepAspectRatio))
     img = reader.read()
     if img.isNull():
         raise ImageError("The image %s could not be read." % os.path.basename(path), path)
-    if max(img.width(), img.height()) > IMAGE_SIDE:
+    if max(img.width(), img.height()) > IMAGE_SIDE:      # a format that does not tell its size
         img = img.scaled(IMAGE_SIDE, IMAGE_SIDE, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    img = _no_text(img)
+    if img.isNull():
+        raise ImageError("The image %s could not be made ready to send." % os.path.basename(path), path)
     photo = kind in ("jpeg", "jpg") and not img.hasAlphaChannel()
     data = _encoded(img, "JPEG", 85) if photo else b""
     if not data:                             # no photo, or a Qt that cannot write JPEG
@@ -279,7 +334,7 @@ class _Worker(QtCore.QThread):
         except Exception:
             res = {"is_error": True, "result": "The built-in engine failed:\n" + traceback.format_exc(limit=-4)}
         if self.agent.incomplete and not res["is_error"]:
-            res["incomplete"] = True             # the step limit, or a problem that was not repaired
+            res["incomplete"] = True             # the step limit, a cut answer, or a problem not repaired
         if not self.agent.stopped():
             self.done.emit(self.number, res)
 
@@ -501,8 +556,8 @@ class LocalRun(QtCore.QObject):
             if not self._changed:
                 pass                      # a question alone does not rewrite the user's file
             elif res.get("is_error") or res.get("incomplete"):
-                # an error, the step limit or a problem that is still there: the file
-                # on disk stays the last good state
+                # an error, the step limit, a cut answer or a problem that is still
+                # there: the file on disk stays the last good state
                 self.text.emit(NOT_SAVED)
             else:
                 self._save_document()

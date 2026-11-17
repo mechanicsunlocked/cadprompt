@@ -31,6 +31,7 @@ utf8_output()
 import FreeCAD as App                       # noqa: E402
 from cadprompt import backends, local_agent, paths      # noqa: E402
 from cadprompt import local_tools as T      # noqa: E402
+import windows_paths                        # noqa: E402
 
 
 def new_doc(name="Model", undo=True):
@@ -546,6 +547,28 @@ class ReadProjectFile(unittest.TestCase):
                 answer = self.read(path)
                 self.assertTrue(answer.startswith("ERROR:"), path + " -> " + answer)
                 self.assertNotIn("TOP-SECRET", answer)
+
+    def test_a_name_on_another_computer_is_refused_before_windows_opens_it(self):
+        # On Windows os.path.realpath opens the path. For \\host\share\x that is a login at that host,
+        # with the name of the user: the model must not be able to cause it with a file name.
+        seen = []
+        self.addCleanup(setattr, T, "os", T.os)
+        T.os = windows_paths.windows_os(seen)
+        project = windows_paths.PROJECT
+        for path in windows_paths.FOREIGN:
+            del seen[:]
+            self.assertIsNone(T._inside(project, path), path)
+            self.assertEqual(windows_paths.outside(seen), [], path)
+        inside = project + "\\refs\\INDEX.md"
+        for path in ("refs/INDEX.md", "refs\\INDEX.md", inside, inside.lower().replace("\\", "/")):
+            self.assertEqual(T.os.path.normcase(T._inside(project, path)), inside.lower(), path)
+        for path in ("..\\x.txt", "refs/../../x.txt", "C:\\Windows\\win.ini", "C:..\\x.txt"):
+            self.assertIsNone(T._inside(project, path), path)        # this drive: opened, and found outside
+        # a project on a share of the school: its own share is not "another computer"
+        share = "\\\\server\\classes\\proj"
+        self.assertEqual(T._inside(share, "refs/INDEX.md"), share + "\\refs\\INDEX.md")
+        self.assertIsNone(T._inside(share, "\\\\server\\teachers\\marks.txt"))
+        self.assertIsNone(T._inside(share, "\\\\other\\classes\\proj\\a.txt"))
 
     def test_a_project_folder_written_another_way_is_the_same_project(self):
         out = self.read("refs/INDEX.md")

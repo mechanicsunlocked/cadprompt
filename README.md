@@ -62,8 +62,9 @@ change between them in the middle of the work.
 - **Add reference…**, or drop a photo, a PDF or a link on the panel: it goes into
   `refs/` for the AI. With a local model or an API key, an image (PNG, JPEG) also
   goes with your next message, at most 4 for each message, made smaller to
-  1568 pixels. The model must be able to read images; if it cannot, the panel
-  tells you and you can send the message again without them.
+  1568 pixels. Only the picture is sent, not the text that the file holds about
+  its author, camera or place. The model must be able to read images; if it
+  cannot, the panel tells you and you can send the message again without them.
 - **Drawing**: a workshop drawing on an ISO sheet (A4 to A2): three views, an
   isometric view, the overall dimensions, the title block, and a PDF in
   `drawings/`. The sheet is made by fixed rules, not by the AI. Tolerances,
@@ -98,6 +99,9 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   `api.anthropic.com`: the conversation of the project (up to about 300,000
   characters of it), the images of that conversation and the key. Find models is
   one more request with the key. Nothing else is contacted.
+- CADprompt connects to the AI service directly. It does not use a proxy from the
+  settings of the computer, so a key never goes to a proxy. On a network that
+  reaches the internet only through a proxy, the API key source does not work.
 - With the Claude account source, the panel downloads the freecad-mcp bridge
   from GitHub the first time, after it asks you.
 

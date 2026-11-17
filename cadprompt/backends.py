@@ -245,7 +245,10 @@ def list_models(url, key="", timeout=5, kind="openai"):
         req = urllib.request.Request(url + "/models", headers={"Accept": "application/json"})
         if key:
             req.add_header("Authorization", "Bearer " + key)
-    with urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout) as r:
+    # No proxy, like the engine: urllib would hand the request to the proxy of the system
+    # settings, and the key of an http server would go there in clear text.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    with opener.open(req, timeout=timeout) as r:
         data = json.loads(r.read(4_000_000).decode("utf-8", "replace"))
     rows = data.get("data", data.get("models")) if isinstance(data, dict) else data
     if not isinstance(rows, list):

@@ -6,7 +6,7 @@ import urllib.error
 
 from PySide import QtCore, QtWidgets
 
-from . import backends, paths
+from . import backends, local_agent, paths
 
 # Linux and macOS: the key file has mode 0600. Windows has no such modes; there the
 # folder of the user's own profile keeps other users out (backends.py).
@@ -32,7 +32,8 @@ def _why(exc, kind="openai"):
             return f"Anthropic answered with error {exc.code}. Try again later."
         if isinstance(exc, ValueError):
             return "The answer of Anthropic was not a list of models. Try again later."
-        return "No answer from Anthropic. Check the internet connection of this computer."
+        return ("No answer from Anthropic. Check the internet connection of this computer."
+                + local_agent.proxy_note(backends.ANTHROPIC_URL))
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in (401, 403):
             return "The server did not accept the key."

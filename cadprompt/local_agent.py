@@ -30,6 +30,7 @@ import re
 import socket
 import threading
 import urllib.parse
+import urllib.request
 
 MARK = "\n... (shortened, %d characters in total)"
 
@@ -324,10 +325,15 @@ class OpenAIWire:
         data, error, detail = _detail(raw)
         if status == 200 and not error:
             try:
-                msg = data["choices"][0]["message"]
+                choice = data["choices"][0]
+                msg = choice["message"]
                 if isinstance(msg, dict):
+                    text = _visible(msg.get("content"))
+                    if choice.get("finish_reason") == "length" and text and not msg.get("tool_calls"):
+                        # the text stops in the middle (a cut tool call fails by itself: no valid JSON)
+                        msg = dict(msg, content=_add_line(text, CUT_OFF), _cut_off=True)
                     return msg
-            except (KeyError, IndexError, TypeError):
+            except (KeyError, IndexError, TypeError, AttributeError):
                 pass
             raise AgentError("The answer of the server at %s was not understood. Is it an "
                              "OpenAI-compatible server? The address usually ends in /v1." % self.url)
@@ -368,9 +374,23 @@ class OpenAIWire:
                 "Settings." % (self.url, exc.__class__.__name__))
 
 
-def _block_id(text):
-    """A tool call id in the letters the Messages API takes. Other servers make their own."""
-    return re.sub(r"[^A-Za-z0-9_-]", "_", str(text or "")) or "call"
+def _block_id(text, used):
+    """A tool call id in the letters the Messages API takes, and one that `used` does
+    not have yet: that API refuses a conversation in which an id comes twice. Other
+    servers make their own ids; some repeat them and some send none."""
+    base = re.sub(r"[^A-Za-z0-9_-]", "_", str(text or "")) or "call"
+    ident, n = base, 1
+    while ident in used:
+        n += 1
+        ident = "%s_%d" % (base, n)
+    used.add(ident)
+    return ident
+
+
+def _tool_name(text):
+    """A tool name in the letters and the length the Messages API takes. A small local
+    model can ask for "default_api.run_python": one such name must not block the conversation."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(text or ""))[:64] or "tool"
 
 
 def anthropic_messages(view, picture):
@@ -379,7 +399,8 @@ def anthropic_messages(view, picture):
     That API wants user and assistant turns in turn, every tool call answered
     by a tool_result in the very next user turn, and no empty text.
     """
-    out, waiting = [], []       # waiting: ids of tool calls that have no result yet
+    out, used = [], set()       # used: every tool call id that was sent so far
+    waiting = []                # (stored id, id that is sent) of the tool calls that have no result yet
 
     def add(role, blocks):
         if out and out[-1]["role"] == role:
@@ -389,17 +410,19 @@ def anthropic_messages(view, picture):
 
     def answer_all():
         if waiting:             # a stored conversation that was cut in the middle of a step
-            add("user", [{"type": "tool_result", "tool_use_id": i, "content": "(no result)"} for i in waiting])
+            add("user", [{"type": "tool_result", "tool_use_id": sent, "content": "(no result)"}
+                         for _, sent in waiting])
             del waiting[:]
 
     for m in view:
         role, text = m.get("role"), m.get("content")
         text = text if isinstance(text, str) else ""
         if role == "tool":
-            ident = _block_id(m.get("tool_call_id"))
-            if ident in waiting:
-                waiting.remove(ident)
-                block = {"type": "tool_result", "tool_use_id": ident, "content": text or "(no output)"}
+            stored = str(m.get("tool_call_id") or "")
+            pair = next((p for p in waiting if p[0] == stored), None)
+            if pair:
+                waiting.remove(pair)    # the first open call with this id: results come in the order of the calls
+                block = {"type": "tool_result", "tool_use_id": pair[1], "content": text or "(no output)"}
                 if text.startswith("ERROR"):
                     block["is_error"] = True
             else:
@@ -408,20 +431,24 @@ def anthropic_messages(view, picture):
         elif role == "assistant":
             answer_all()
             blocks = m.get("_native")
-            if not blocks:
-                blocks = [{"type": "text", "text": text}] if text.strip() else []
+            if blocks:                  # the service's own blocks go back unchanged, with its ids
+                pairs = [(str(b.get("id") or ""), b.get("id")) for b in blocks if b.get("type") == "tool_use"]
+                used.update(sent for _, sent in pairs)
+            else:
+                blocks, pairs = ([{"type": "text", "text": text}] if text.strip() else []), []
                 for call in m.get("tool_calls") or []:
                     fn = call.get("function") or {}
                     try:
                         args = json.loads(fn.get("arguments") or "{}")
                     except ValueError:
                         args = None
-                    blocks.append({"type": "tool_use", "id": _block_id(call.get("id")),
-                                   "name": fn.get("name") or "tool",
+                    stored = str(call.get("id") or "")
+                    pairs.append((stored, _block_id(stored, used)))
+                    blocks.append({"type": "tool_use", "id": pairs[-1][1], "name": _tool_name(fn.get("name")),
                                    "input": args if isinstance(args, dict) else {}})
             if blocks:
                 add("assistant", blocks)
-                waiting[:] = [b["id"] for b in blocks if b.get("type") == "tool_use"]
+                waiting[:] = pairs
         else:
             answer_all()
             blocks, gone = [], []
@@ -521,6 +548,7 @@ class AnthropicWire:
         if reason in ("max_tokens", "model_context_window_exceeded"):
             # a tool call that was cut off has half its code: it is not run
             msg["content"] = _add_line(text, CUT_OFF)
+            msg["_cut_off"] = True     # for the loop: the model was stopped in the middle of its work
             return msg
         calls = [{"id": b.get("id"), "type": "function",
                   "function": {"name": b.get("name") or "", "arguments": json.dumps(b.get("input") or {})}}
@@ -541,6 +569,26 @@ class AnthropicWire:
 
 
 WIRES = {"openai": OpenAIWire, "anthropic": AnthropicWire}
+
+PROXY = (" This computer is set to reach the internet through a proxy. CADprompt does not use a "
+         "proxy: it connects directly, and this network may not allow that.")
+
+
+def proxy_note(address):
+    """PROXY when the system settings name a proxy for this https address, else "".
+
+    The engine and Find models connect directly, so that a key goes to its own
+    server and to no other host. On a network that lets a computer out only
+    through its proxy the request fails, and the user must know why.
+    """
+    try:
+        u = urllib.parse.urlsplit(address)
+        if u.scheme == "https" and urllib.request.getproxies().get("https") \
+                and not urllib.request.proxy_bypass(u.netloc):
+            return PROXY
+    except Exception:                  # a broken system setting must not hide the error itself
+        pass
+    return ""
 
 
 class Agent:
@@ -586,7 +634,7 @@ class Agent:
         self._calls = 0
         self._pictures = {}       # path -> what load_image gave, so every step sends the same bytes
         self._no_pictures = False  # this model cannot read pictures: none is sent
-        self.incomplete = False   # after ask(): the step limit, or a problem that was not repaired
+        self.incomplete = False   # after ask(): the step limit, a cut answer, or a problem not repaired
 
     # ---- stop ---------------------------------------------------------------
     def stop(self):
@@ -674,6 +722,8 @@ class Agent:
                 self.on_event("note", "Automatic check: there is still a problem. The model continues.")
                 continue
             if not calls:
+                if msg.get("_cut_off"):
+                    self.incomplete = True      # half an answer: the work can be half done too
                 return self._final(content, problem)
             self.messages.append(dict({"role": "assistant", "content": content, "tool_calls": calls}, **native))
             if content:
@@ -804,5 +854,5 @@ class Agent:
         except (OSError, http.client.HTTPException, ValueError) as exc:
             if self._stop.is_set():
                 raise Stopped()
-            raise AgentError(wire.unreachable(exc, self.timeout))
+            raise AgentError(wire.unreachable(exc, self.timeout) + proxy_note(address))
         return wire.answer(status, got, raw, pictures)

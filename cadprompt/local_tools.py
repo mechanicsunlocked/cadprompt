@@ -456,9 +456,22 @@ def run_python(code, project=""):
     return "\n".join(lines)
 
 
+def _elsewhere(project, root, path):
+    """Windows: True when the text of `path` names another drive or another computer."""
+    drive = os.path.splitdrive(path)[0]
+    if not drive:
+        # "\\host" alone: not every Python version sees a drive in it
+        return os.sep == "\\" and path.replace("/", "\\").startswith("\\\\")
+    return os.path.normcase(drive) not in {os.path.normcase(os.path.splitdrive(p)[0]) for p in (project, root)}
+
+
 def _inside(project, path):
     """The real path of `path` when it is inside the project folder, else None."""
     root = os.path.realpath(project)
+    # Look at the text first. On Windows realpath opens the path, and for a name on another
+    # computer (\\host\share\x) that is a login there: the model must not be able to cause it.
+    if _elsewhere(project, root, path):
+        return None
     real = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
     try:
         rel = os.path.relpath(real, root)

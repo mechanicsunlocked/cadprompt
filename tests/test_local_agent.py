@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 import unittest
+import urllib.request
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -23,7 +25,8 @@ utf8_output()
 
 from cadprompt import local_agent                      # noqa: E402
 from cadprompt.local_agent import Agent, AgentError, Stopped   # noqa: E402
-from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, claude_error, error, slow   # noqa: E402
+from local_fake_server import (FakeAnthropic, FakeServer, answer, call, claude, claude_error,   # noqa: E402
+                               cut, error, slow)
 
 TOOLS = [{"type": "function", "function": {"name": "run_python", "description": "run",
                                            "parameters": {"type": "object", "properties": {}}}}]
@@ -164,6 +167,30 @@ class Loop(Base):
         b = self.agent(max_steps=2)
         b.ask("Loop")
         self.assertTrue(b.incomplete)                       # the step limit
+
+    def test_a_text_that_the_server_cut_off_is_not_a_good_end(self):
+        self.srv.add(call("run_python", {"code": "a"}), cut(answer("Now I add the four ho")))
+        a = self.agent()
+        out = a.ask("x")
+        self.assertTrue(out.startswith("Now I add the four ho"))
+        self.assertIn("cut off", out)
+        self.assertTrue(a.incomplete)                       # the engine does not save the model then
+        self.assertNotIn("_cut_off", json.dumps(a.messages))
+        self.assertNotIn("_cut_off", json.dumps(self.srv.bodies()))
+
+    def test_only_thinking_before_the_limit_still_gets_the_nudge(self):
+        self.srv.add(cut(answer("", reasoning="I think and think")), answer("Done."))
+        a = self.agent()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertFalse(a.incomplete)
+        self.assertEqual(len(self.srv.requests), 2)
+
+    def test_a_tool_call_at_the_limit_is_run_when_it_is_whole(self):
+        self.srv.add(cut(call("run_python", {"code": "a"})), answer("Done."))
+        a = self.agent()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertEqual(self.tool_calls, [("run_python", {"code": "a"})])
+        self.assertFalse(a.incomplete)
 
     def test_empty_answer_gets_one_nudge(self):
         self.srv.add(answer("", reasoning="thinking a lot"), answer("Hello."))
@@ -709,6 +736,21 @@ class AnthropicLoop(AnthropicBase):
         self.assertEqual(self.tool_calls, [])
         self.assertIn("I start.", out)
         self.assertIn("cut off", out)
+        self.assertTrue(a.incomplete)                       # the engine does not save the model then
+        self.assertNotIn("_cut_off", json.dumps(a.messages))
+
+    def test_an_answer_that_was_cut_off_after_tools_ran_is_incomplete(self):
+        self.srv.add(claude("", [("run_python", {"code": "a"}, "t1")]),
+                     claude("", [("run_python", {"code": "half"}, "t2")], stop_reason="max_tokens"))
+        a = self.agent()
+        out = a.ask("x")
+        self.assertEqual(self.tool_calls, [("run_python", {"code": "a"})])
+        self.assertIn("cut off", out)
+        self.assertTrue(a.incomplete)
+        self.srv.add(claude("", [("run_python", {"code": "a"}, "t1")]), claude("Done."))
+        b = self.agent()
+        b.ask("x")
+        self.assertFalse(b.incomplete)                      # a normal end stays a good end
 
     def test_a_refusal_is_a_plain_error(self):
         self.srv.add(claude("", stop_reason="refusal"))
@@ -842,6 +884,52 @@ class AnthropicErrors(AnthropicBase):
         with self.assertRaises(AgentError) as cm:
             a.ask("x")
         self.assertIn("No connection to Anthropic", str(cm.exception))
+
+    def dead_port(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def no_connection(self, address, proxies):
+        """The error text for a service that cannot be reached, on a computer with these proxy settings."""
+        names = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        clean = {k: v for k, v in os.environ.items() if k.lower() not in names}
+        # without a variable, macOS and Windows read the settings of the system: none there
+        system = mock.patch.object(urllib.request, "getproxies", return_value={})
+        with mock.patch.dict(os.environ, dict(clean, **proxies), clear=True), (mock.MagicMock() if proxies else system):
+            a = Agent(address, "claude-fake-1", self.run_tool, key="k", kind="anthropic", timeout=5)
+            with self.assertRaises(AgentError) as cm:
+                a.ask("x")
+        self.assertIn("No connection to Anthropic", str(cm.exception))
+        return str(cm.exception)
+
+    def test_no_connection_on_a_network_with_a_proxy_says_that_no_proxy_is_used(self):
+        https = "https://127.0.0.1:%d" % self.dead_port()
+        proxy = {"https_proxy": "http://127.0.0.1:%d" % self.dead_port()}
+        self.assertTrue(self.no_connection(https, proxy).endswith(local_agent.PROXY))
+        self.assertIn("does not use a proxy", local_agent.PROXY)
+        # no proxy in the settings, an exception for this address, a local http server: no such hint
+        self.assertNotIn("proxy", self.no_connection(https, {}))
+        self.assertNotIn("proxy", self.no_connection(https, dict(proxy, no_proxy="127.0.0.1")))
+        http = https.replace("https", "http")
+        self.assertNotIn("proxy", self.no_connection(http, {"http_proxy": proxy["https_proxy"]}))
+
+    def test_the_engine_itself_never_goes_through_a_proxy(self):
+        proxy = socket.socket()                 # it would be seen here: a connection waits in the queue
+        proxy.bind(("127.0.0.1", 0))
+        proxy.listen(5)
+        proxy.settimeout(0.2)
+        address = "http://127.0.0.1:%d" % proxy.getsockname()[1]
+        self.srv.add(claude("direct"))
+        names = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        clean = {k: v for k, v in os.environ.items() if k.lower() not in names}
+        with mock.patch.dict(os.environ, dict(clean, http_proxy=address, https_proxy=address), clear=True):
+            self.assertEqual(self.agent().ask("x"), "direct")
+        with self.assertRaises(OSError):        # nobody knocked
+            proxy.accept()
+        proxy.close()
 
     def test_not_the_messages_api(self):
         text = self.fails(("error", 200, {"hello": "world"}))
@@ -1033,6 +1121,75 @@ class Switch(Base):
             self.assertLessEqual(set(m), {"role", "content", "tool_calls", "tool_call_id"})
         self.assertNotIn("SIGNATURE", json.dumps(self.srv.bodies()))
         self.assertNotIn("thinking", json.dumps(self.srv.bodies()))
+
+    def uses_and_results(self, body):
+        """(the tool_use ids, the tool_result ids) of a request to the Messages API, in order."""
+        blocks = [(m["role"], b) for m in body["messages"] for b in m["content"]]
+        return ([b["id"] for role, b in blocks if b["type"] == "tool_use"],
+                [b["tool_use_id"] for role, b in blocks if b["type"] == "tool_result"])
+
+    def test_a_server_that_sends_no_call_ids_does_not_block_the_change_to_anthropic(self):
+        # a new Agent for each message, as the engine makes it: the made-up id is "call_1" both times
+        no_id = {"role": "assistant", "content": "", "tool_calls": [
+            {"type": "function", "function": {"name": "run_python", "arguments": "{}"}}]}
+        stored = []
+        for text in ("Make a plate.", "Add a hole."):
+            self.srv.add(no_id, answer("Done."))
+            a = self.agent(messages=stored)
+            a.ask(text)
+            stored = self.stored(a)
+        ids = [c["id"] for m in stored for c in m.get("tool_calls") or []]
+        self.assertEqual(ids, ["call_1", "call_1"])         # as stored: what the local server gets back
+        self.results["run_python"] = ["first result", "second result"]
+        self.claude.add(claude("", [("run_python", {}, "toolu_9")]), claude("ok"))
+        b = self.anthropic(stored)
+        b.ask("Go on.")
+        for body in self.claude.bodies():
+            uses, results = self.uses_and_results(body)
+            self.assertEqual(len(set(uses)), len(uses), uses)       # the Messages API refuses a second use of an id
+            self.assertEqual(results, uses)                         # and each result names the call before it
+        self.assertEqual(self.uses_and_results(self.claude.bodies()[1])[0], ["call_1", "call_1_2", "toolu_9"])
+        self.assertEqual([c["id"] for m in self.stored(b) for c in m.get("tool_calls") or []],
+                         ["call_1", "call_1", "toolu_9"])           # the stored conversation is not rewritten
+
+    def test_two_ids_that_differ_only_in_letters_anthropic_does_not_take(self):
+        def use(ident):
+            return {"id": ident, "type": "function", "function": {"name": "run_python", "arguments": "{}"}}
+        view = [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "", "tool_calls": [use("a:b"), use("a/b"), use("")]},
+                {"role": "tool", "tool_call_id": "a/b", "content": "second"},
+                {"role": "tool", "tool_call_id": "a:b", "content": "first"},
+                {"role": "tool", "tool_call_id": "", "content": "third"},
+                {"role": "assistant", "content": "", "tool_calls": [use("a_b"), use(None)]},
+                {"role": "tool", "tool_call_id": "a_b", "content": "fourth"}]
+        sent = local_agent.anthropic_messages(view, lambda path: None)
+        self.assertEqual([b["id"] for b in sent[1]["content"]], ["a_b", "a_b_2", "call"])
+        self.assertEqual([(b["tool_use_id"], b["content"]) for b in sent[2]["content"]],
+                         [("a_b_2", "second"), ("a_b", "first"), ("call", "third")])
+        self.assertEqual([b["id"] for b in sent[3]["content"]], ["a_b_3", "call_2"])
+        self.assertEqual([(b["tool_use_id"], b["content"]) for b in sent[4]["content"][:2]],
+                         [("a_b_3", "fourth"), ("call_2", "(no result)")])
+        self.assertEqual(sent, local_agent.anthropic_messages(view, lambda path: None))   # the same each time
+
+    def test_a_tool_name_the_local_model_made_up_goes_to_anthropic_in_safe_letters(self):
+        no_tool = "ERROR: there is no tool %s. Use run_python."
+        for made_up, safe in (("default_api.run_python", "default_api_run_python"),
+                              ("run python", "run_python"), ("x" * 90, "x" * 64), ("", "tool")):
+            stored = [{"role": "user", "content": "Make a plate."},
+                      {"role": "assistant", "content": "", "tool_calls": [
+                          {"id": "c1", "type": "function", "function": {"name": made_up, "arguments": "{}"}}]},
+                      {"role": "tool", "tool_call_id": "c1", "content": no_tool % made_up},
+                      {"role": "assistant", "content": "Sorry."}]
+            self.claude.add(claude("ok"))
+            b = self.anthropic(stored)
+            b.ask("Go on.")
+            sent = self.claude.bodies()[-1]["messages"]
+            self.assertEqual(sent[1]["content"], [{"type": "tool_use", "id": "c1", "name": safe, "input": {}}])
+            # the result still says which name the model asked for
+            self.assertEqual(sent[2]["content"], [{"type": "tool_result", "tool_use_id": "c1",
+                                                   "content": no_tool % made_up, "is_error": True}])
+            # and the stored conversation is not changed: the local server gets its own name back
+            self.assertEqual(self.stored(b)[1]["tool_calls"][0]["function"]["name"], made_up)
 
     def test_a_conversation_that_was_cut_in_a_step_is_made_whole_for_anthropic(self):
         stored = [{"role": "user", "content": "Make a plate."},

@@ -96,6 +96,21 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class _Proxy(http.server.BaseHTTPRequestHandler):
+    """A pretend proxy of the school network. It writes down what reaches it and passes nothing on."""
+    seen = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        _Proxy.seen.append((self.path, self.headers.get("Authorization")))
+        self.send_response(502)
+        self.end_headers()
+
+    do_CONNECT = do_GET
+
+
 def inside(path, folder):
     """True when path is the folder or in it. Not a comparison of two texts: Windows mixes \\ and /
     and upper and lower case, macOS has two names for its temporary folder."""
@@ -444,6 +459,21 @@ def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
+    # This computer has a proxy in its settings, as in many schools, and no exception for local
+    # addresses. All checks below run like that: the fake server must still be asked directly.
+    proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Proxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    names = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY")
+    shell = {k: os.environ.pop(k) for k in names if k in os.environ}
+    for k in names[:4]:
+        os.environ[k] = "http://127.0.0.1:%d" % proxy.server_address[1]
+    try:
+        got = backends.list_models(base + "/v1", key="LOCAL-KEY-made-up")
+    except OSError as exc:
+        got = repr(exc)
+    check("list_models: no proxy is used; the key goes to the typed address and to no other host",
+          got == ["google/gemma-4-e4b", "other-model"] and not _Proxy.seen
+          and _Fake.seen[-1] == ("/v1/models", "Bearer LOCAL-KEY-made-up"), f"{got} proxy saw {_Proxy.seen}")
     got = backends.list_models(base + "/v1")
     check("list_models: ids from the fake server, each once", got == ["google/gemma-4-e4b", "other-model"], str(got))
     check("list_models: no Authorization header without a key", _Fake.seen[-1] == ("/v1/models", None),
@@ -510,6 +540,12 @@ def main():
     r = raises(OSError, lambda: backends.list_models(base + "/v1"))
     check("list_models: a dead port is an OSError, at once", bool(r) and time.time() - t0 < 5,
           f"{r} after {time.time() - t0:.1f} s")
+    check("list_models: in all these checks nothing reached the proxy", not _Proxy.seen, str(_Proxy.seen))
+    for k in names:
+        os.environ.pop(k, None)
+    os.environ.update(shell)
+    proxy.shutdown()
+    proxy.server_close()
 
 
 try:

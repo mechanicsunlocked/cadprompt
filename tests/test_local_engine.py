@@ -13,11 +13,13 @@ import json
 import os
 import re
 import shutil
+import struct
 import sys
 import threading
 import time
 import traceback
 import types
+import zlib
 
 if not os.environ.get("FREECAD_USER_HOME"):
     os.write(1, b"Set FREECAD_USER_HOME to a fresh folder first.\n")
@@ -39,7 +41,8 @@ from PySide import QtCore, QtGui, QtWidgets             # noqa: E402
 QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
 from cadprompt import backends, local_agent, local_engine, local_tools, projects    # noqa: E402
-from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, error, slow   # noqa: E402
+from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, cut, error, slow   # noqa: E402
+import windows_paths                                                                          # noqa: E402
 
 HOME = os.environ["FREECAD_USER_HOME"]
 LOG = os.path.join(HOME, "test_local_engine.log")
@@ -141,6 +144,25 @@ def sent_image(data):
     """(width, height) of an image as it was sent, from its base64 text."""
     img = QtGui.QImage.fromData(base64.b64decode(data))
     return img.width(), img.height()
+
+
+def same_pixels(a, b):
+    a, b = (i.convertToFormat(QtGui.QImage.Format_ARGB32) for i in (a, b))
+    return a.size() == b.size() and all(a.pixel(x, y) == b.pixel(x, y)
+                                        for x in range(a.width()) for y in range(a.height()))
+
+
+def opened(fn):
+    """Run fn() and give (its error text or "", the paths that os.path.realpath was asked for)."""
+    seen, real, said = [], os.path.realpath, ""
+    os.path.realpath = lambda path, *a, **kw: seen.append(str(path)) or real(path, *a, **kw)
+    try:
+        fn()
+    except local_engine.ImageError as exc:
+        said = str(exc)
+    finally:
+        os.path.realpath = real
+    return said, seen
 
 
 # like a small model, the code does not make a document first
@@ -415,6 +437,14 @@ def main():
     check("an error after a change: not saved, and the user is told",
           rec7d.result().get("is_error") is True and os.path.getmtime(file_a) == mtime_a
           and "tool:save" not in rec7d.kinds() and ("text", local_engine.NOT_SAVED) in rec7d.events, rec7d.events)
+    srv.add(call("run_python", {"code": 'doc.addObject("Part::Box", "Extra3b")'}, "n4b"),
+            cut(answer("Now I add the four ho")))
+    _, rec7d2 = run_once(two, "And more.", cfg)
+    check("an answer that the server cut off at the token limit: not saved, and the user is told",
+          rec7d2.result().get("is_error") is False and rec7d2.result().get("incomplete") is True
+          and "cut off" in rec7d2.result()["result"] and os.path.getmtime(file_a) == mtime_a
+          and "tool:save" not in rec7d2.kinds() and ("text", local_engine.NOT_SAVED) in rec7d2.events
+          and doc_a.getObject("Extra3b") is not None, rec7d2.events)
     srv.add(call("run_python", {"code": 'doc.addObject("Part::Box", "Extra4")'}, "n5"), answer("Good now."))
     _, rec7e = run_once(two, "Once more.", cfg)
     check("the next request that ends well is saved again",
@@ -806,6 +836,120 @@ def main():
         said = str(exc)
     check("more than 4 images with one message: a plain error", said == "At most 4 images can go with one message."
           and not run13.running(), said)
+    huge = os.path.join(HOME, "huge.png")
+    with open(huge, "wb") as f:              # 200 bytes that declare 50000 x 50000 pixels: 10 GB when opened
+        for kind, data in ((b"IHDR", struct.pack(">IIBBBBB", 50000, 50000, 8, 6, 0, 0, 0)),
+                           (b"IDAT", zlib.compress(bytes(200001) * 3)), (b"IEND", b"")):
+            f.write((b"" if f.tell() else b"\x89PNG\r\n\x1a\n") + struct.pack(">I", len(data)) + kind + data
+                    + struct.pack(">I", zlib.crc32(kind + data)))
+    try:
+        said = ""
+        run13.start(project12, "Look.", acfg, images=[huge])
+    except local_engine.ImageError as exc:
+        said = str(exc)
+    check("an image with too many pixels: a plain error with its size and the limit, before anything starts",
+          "`huge.png` is too large: 50000 x 50000 pixels" in said and "67 million" in said
+          and not run13.running() and chat(project12) == before
+          and (len(cl.requests), len(srv.requests)) == n, said)
+    if run13.running():
+        run13.stop()
+    swapped = os.path.join(project12, "refs", "view0.png")       # a good image when the message was written
+    shutil.copyfile(huge, swapped)
+    try:
+        said = ""
+        local_engine.encode_image(swapped)
+    except local_engine.ImageError as exc:
+        said = str(exc)
+    check("a stored image whose file became too large later is refused before it is opened",
+          "view0.png is too large: 50000 x 50000 pixels" in said, said)
+    if jpeg:
+        phone = os.path.join(HOME, "phone.jpg")
+        grey = QtGui.QImage(12000, 9000, QtGui.QImage.Format_Grayscale8)
+        grey.fill(QtGui.QColor(200, 200, 200))
+        made = grey.save(phone, "JPEG")
+        del grey
+        cl.add(claude("A grey photo."))
+        run, rec = run_once(project12, "And this photo?", acfg, images=[phone], timeout=60)
+        sent = [b for b in cl.bodies()[-1]["messages"][-1]["content"] if b["type"] == "image"]
+        check("a 108-megapixel phone photo is sent, small (Qt opens a JPEG at a part of its size)",
+              made and rec.done() and not rec.result()["is_error"] and len(sent) == 1
+              and sent_image(sent[0]["source"]["data"]) == (1568, 1176), rec.events)
+        before = chat(project12)
+
+    # the text that an image file holds about its author is not sent
+    private = ("Jane Student", "Rue du Test 5", "CameraOwner")
+    for name, kind, size in (("meta.png", "PNG", (60, 40)), ("meta-large.png", "PNG", (2000, 1500))) \
+            + ((("meta.jpg", "JPEG", (60, 40)),) if jpeg else ()):
+        src = os.path.join(HOME, name)
+        img = QtGui.QImage(size[0], size[1], QtGui.QImage.Format_RGB32)
+        img.fill(QtGui.QColor(200, 200, 200))
+        img.setText("Author", "Jane Student")
+        img.setText("Description", "Jane Student, Rue du Test 5")
+        img.setText("CameraOwner", "Jane Student")
+        on_disk = b""
+        if img.save(src, kind):
+            with open(src, "rb") as f:
+                on_disk = f.read()
+        media, data = local_engine.encode_image(src)
+        raw = base64.b64decode(data)
+        out = QtGui.QImage.fromData(raw)
+        check("%s: the file has text about its author; what is sent has the picture only" % name,
+              b"Jane Student" in on_disk and not any(word.encode() in raw for word in private)
+              and not out.textKeys() and not out.isNull()
+              and media == ("image/jpeg" if kind == "JPEG" else "image/png")
+              and (out.width(), out.height()) == ((1568, 1176) if size[0] > 1568 else size),
+              (media, out.textKeys(), [w for w in private if w.encode() in raw], b"Jane Student" in on_disk))
+    for fmt, label in ((QtGui.QImage.Format_Indexed8, "a palette"), (QtGui.QImage.Format_ARGB32, "transparency"),
+                       (QtGui.QImage.Format_Grayscale8, "grey"), (QtGui.QImage.Format_Mono, "black and white")):
+        src = os.path.join(HOME, "kind.png")
+        img = QtGui.QImage(31, 17, fmt)
+        if fmt in (QtGui.QImage.Format_Indexed8, QtGui.QImage.Format_Mono):
+            img.setColorTable([QtGui.QColor(250, 10, 10).rgb(), QtGui.QColor(10, 10, 250).rgb()])
+            img.fill(0)
+            for x in range(0, 31, 3):
+                img.setPixel(x, x % 17, 1)
+        else:
+            img.fill(QtGui.QColor(250, 120, 10, 255))
+            alpha = 90 if fmt == QtGui.QImage.Format_ARGB32 else 255
+            for x in range(0, 31, 3):
+                img.setPixelColor(x, x % 17, QtGui.QColor(10, 20, 250, alpha))
+        img.setText("Author", "Jane Student")
+        ok = img.save(src, "PNG")
+        again = QtGui.QImage(src)
+        media, data = local_engine.encode_image(src)
+        out = QtGui.QImage.fromData(base64.b64decode(data))
+        check("a PNG with %s arrives with the same pixels, without its text" % label,
+              ok and media == "image/png" and same_pixels(out, again) and not out.textKeys()
+              and b"Jane" not in base64.b64decode(data), (media, out.format(), again.format(), out.textKeys()))
+
+    # stored image paths are text from a file that another person can have written
+    said, seen = opened(lambda: local_engine._project_file(project12, "refs/view1.png"))
+    check("(setup) a good stored path gives its file, and the file system is asked for it",
+          not said and len(seen) == 2, (said, seen))
+    bad = ["../../outside.png", "refs/../../outside.png", "/outside.png", "refs//view1.png", "./refs/view1.png", ""]
+    if os.sep == "\\":                         # Windows: realpath would open these, a login at that host
+        bad += ["\\\\127.0.0.1\\nothing\\a.png", "\\\\?\\UNC\\127.0.0.1\\nothing\\a.png", "D:\\x.png",
+                "D:x.png", "refs\\..\\..\\outside.png", "refs/\\\\127.0.0.1\\nothing\\a.png"]
+    got = [(text,) + opened(lambda: local_engine._project_file(project12, text)) for text in bad]
+    check("a stored path that is not a plain path in the project is refused as text: no file system call",
+          all("is not in the project" in said and not seen for _, said, seen in got),
+          [g for g in got if "is not in the project" not in g[1] or g[2]])
+    seen, real_os = [], local_engine.os
+    local_engine.os = windows_paths.windows_os(seen)
+    try:
+        got = []
+        for text in windows_paths.FOREIGN + ("refs/" + windows_paths.FOREIGN[0], "refs\\..\\..\\x.png", "\\x.png"):
+            try:
+                got.append((text, local_engine._project_file(windows_paths.PROJECT, text)))
+            except local_engine.ImageError:
+                pass
+        fine = local_engine._project_file(windows_paths.PROJECT, "refs/photo 1.png")
+    finally:
+        local_engine.os = real_os
+    check("by the path rules of Windows: a name on another computer or drive is refused and never opened",
+          not got and windows_paths.outside(seen) == [] and fine == windows_paths.PROJECT + "\\refs\\photo 1.png",
+          (got, seen, fine))
+
     outside = os.path.join(HOME, "outside.png")
     picture(outside, 20, 20, "PNG")
     stolen = dict(before[0], images=["../../outside.png"])
@@ -842,6 +986,31 @@ def main():
           and gate[-2:] == [("anthropic", cl.url), ("openai", srv.url)] and chat(project12) == before,
           (results, cl.connections - c0, srv.connections - c1, gate[-2:]))
     backends.may_contact = real_gate
+
+    # ---- 15: an answer that was cut off ------------------------------------------------
+    say("--- 15 an answer that the service cut off: the half-built model is not saved")
+    close_all()
+    local_tools.reset()
+    project15 = new_project("cut")
+    cl.add(claude("", [("run_python", {"code": BOX}, "toolu_a")]), claude("A plate."))
+    run, rec = run_once(project15, "Make a plate.", acfg)
+    doc = App.ActiveDocument
+    file15 = doc.FileName if doc is not None else ""
+    check("(setup) the plate is made and saved", bool(file15) and os.path.isfile(file15) and "tool:save" in rec.kinds(),
+          rec.events)
+    mtime15 = os.path.getmtime(file15) if file15 else 0
+    cl.add(claude("", [("run_python", {"code": 'doc.addObject("Part::Box", "Extra1")'}, "toolu_b")]),
+           claude("Now the holes.", [("run_python", {"code": "for i in ra"}, "toolu_c")], stop_reason="max_tokens"))
+    run, rec = run_once(project15, "Add four holes.", acfg)
+    res = rec.result() if rec.done() else {}
+    check("anthropic: an answer cut off in a tool call ends the request as incomplete; the half call is not run",
+          res.get("is_error") is False and res.get("incomplete") is True and "Now the holes." in res["result"]
+          and "cut off" in res["result"] and rec.kinds().count("tool:run_python") == 1, rec.events)
+    check("... the model file is not saved, the user is told, the work is still in FreeCAD",
+          bool(file15) and os.path.getmtime(file15) == mtime15 and "tool:save" not in rec.kinds()
+          and ("text", local_engine.NOT_SAVED) in rec.events and doc.getObject("Extra1") is not None, rec.events)
+    check("... nothing of the cut answer is stored but its text", "_cut_off" not in json.dumps(chat(project15))
+          and "for i in ra" not in json.dumps(chat(project15)), str(chat(project15))[-300:])
     check("the Anthropic script was used exactly", cl.overrun == 0 and not cl.script, (cl.overrun, len(cl.script)))
     cl.close()
 

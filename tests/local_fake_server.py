@@ -5,7 +5,7 @@
     srv.requests[0]["body"]["messages"]     what the engine sent
     srv.close()
 
-A reply is: a message dict (see answer() and call()), error(status, text),
+A reply is: a message dict (see answer() and call()), cut(message), error(status, text),
 slow(seconds, reply), or a function body -> reply. When the script is used up
 the server answers "(script ended)", so a test never hangs.
 
@@ -33,6 +33,11 @@ def call(name, args, call_id=None, text="", reasoning=None):
     msg["tool_calls"] = [{"id": call_id or "call_%s" % name, "type": "function",
                           "function": {"name": name, "arguments": json.dumps(args)}}]
     return msg
+
+
+def cut(msg):
+    """The same answer, stopped by the server at the token limit (finish_reason "length")."""
+    return dict(msg, _finish="length")
 
 
 def error(status, text, code=None, headers=None):
@@ -153,8 +158,10 @@ class FakeServer:
         return answer("(script ended)")
 
     def wrap(self, reply, body):
+        reply = dict(reply)
+        finish = reply.pop("_finish", "stop")
         return {"id": "x", "object": "chat.completion", "model": body.get("model"),
-                "choices": [{"index": 0, "message": reply, "finish_reason": "stop"}]}
+                "choices": [{"index": 0, "message": reply, "finish_reason": finish}]}
 
     def add(self, *replies):
         with self._lock:

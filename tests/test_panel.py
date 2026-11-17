@@ -476,6 +476,20 @@ def main():
     find_api(dlg)
     check("API key: no connection is said in plain words, without 'server'",
           dlg.api_find_msg.text().startswith("No answer from Anthropic."), dlg.api_find_msg.text())
+    # a school network with a proxy in the settings of the computer: CADprompt does not use it, and says so
+    names = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY")
+    shell = {k: os.environ.pop(k) for k in names if k in os.environ}
+    plain = dlg.api_find_msg.text()
+    os.environ["https_proxy"] = "http://127.0.0.1:1"
+    backends.ANTHROPIC_URL = "https://127.0.0.1:1"
+    find_api(dlg)
+    check("API key: no connection on a computer with a proxy says that CADprompt does not use a proxy",
+          dlg.api_find_msg.text().startswith("No answer from Anthropic.")
+          and dlg.api_find_msg.text().endswith("does not use a proxy: it connects directly, and this network "
+                                               "may not allow that.") and "proxy" not in plain,
+          f"{dlg.api_find_msg.text()!r} / {plain!r}")
+    del os.environ["https_proxy"]
+    os.environ.update(shell)
     backends.ANTHROPIC_URL = base + "/anthropic"
 
     # ---- the gate: may_contact() is asked before Find models sends anything ----
