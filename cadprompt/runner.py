@@ -4,8 +4,9 @@ One `claude -p` process per message, in the project folder, prompt on stdin,
 `--output-format stream-json --verbose`. The conversation continues with
 `--resume <session_id>`. Claude Code reads the project's .mcp.json,
 .claude/settings.json and CLAUDE.md exactly as it does in a terminal, and
-signs in with the user's own login, or with the API key or endpoint chosen in
-Settings (backends.claude_env).
+signs in with the user's own login, or with the endpoint chosen in Settings
+(backends.claude_env). The project's .mcp.json sends it to the FreeCAD tools
+of this process (bridge.py): mcp_env() is where and with which token.
 """
 
 import json
@@ -17,6 +18,8 @@ from . import backends, paths
 
 
 HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the user did
+MCP_SERVER = "freecad"           # the name of the bridge in the project's .mcp.json
+WEB_TOOLS = ("WebSearch", "WebFetch")
 
 
 def _short_tool(name):
@@ -35,6 +38,31 @@ def _tool_detail(inp):
         first = code.strip().splitlines()[0]
         return first[:60] + ("…" if len(first) > 60 else "")
     return ""
+
+
+def mcp_env(url, token):
+    """The variables that the project's .mcp.json reads: where the FreeCAD tools are.
+
+    Not names that start with ANTHROPIC_: Claude Code reads those as empty
+    when it fills in the address and the headers of a server.
+    """
+    return {"CADPROMPT_MCP_URL": url, "CADPROMPT_MCP_TOKEN": token}
+
+
+def allowed_tools():
+    """The tools that Claude Code may call without a question of its own.
+
+    Claude Code started with -p cannot ask anybody, and it does not use the
+    allow rules of a project folder that was never opened in a terminal. So
+    the FreeCAD tools of the bridge are named here, each by its full name and
+    no others. The user's yes or no to a step is asked inside FreeCAD, before
+    the tool runs (approval.request).
+    """
+    from . import local_prompt
+    tools = ["mcp__%s__%s" % (MCP_SERVER, name) for name in local_prompt.BRIDGE]
+    if paths.params().GetBool("AllowWeb", False):
+        tools += list(WEB_TOOLS)
+    return tools
 
 
 def backend_env():
@@ -59,8 +87,8 @@ def system_environment():
     """The environment of this FreeCAD, without what FreeCAD's own start script put in.
 
     An AppImage, the macOS app and other bundles export PYTHONHOME and more for
-    their own Python. Handed on, no other Python would start: not Claude Code's
-    tools, not uvx. See paths.child_environment.
+    their own Python. Handed on, no other Python would start, for example in a
+    tool of Claude Code. See paths.child_environment.
     """
     pe = QtCore.QProcessEnvironment.systemEnvironment()
     ours = paths.child_environment({k: pe.value(k) for k in pe.keys()})
@@ -75,11 +103,7 @@ def system_environment():
 def claude_environment(claude, env=None):
     """The environment Claude Code starts with: the system's, our PATH, env, the source."""
     pe = system_environment()
-    extra_path = [os.path.dirname(claude)]
-    uvx = paths.find_tool("uvx")
-    if uvx:
-        extra_path.append(os.path.dirname(uvx))
-    pe.insert("PATH", os.pathsep.join(extra_path + [pe.value("PATH", "")]))
+    pe.insert("PATH", os.pathsep.join([os.path.dirname(claude), pe.value("PATH", "")]))
     for k, v in (env or {}).items():
         pe.insert(k, v)
     _apply_backend(pe)
@@ -162,8 +186,7 @@ class ClaudeRun(QtCore.QObject):
         model = paths.params().GetString("ModelOverride", "")
         if model and backends.current() == "account":
             args += ["--model", model]
-        if paths.params().GetBool("AllowWeb", False):
-            args += ["--allowedTools", "WebSearch", "WebFetch"]
+        args += ["--allowedTools"] + allowed_tools()
 
         self._buf, self._err, self._result, self._tools = b"", b"", None, {}
         self._stopped = False
@@ -261,9 +284,6 @@ def auth_status(claude, callback, parent=None):
     proc.finished.connect(done)
     _start(proc, claude, ["auth", "status"])
     return proc
-
-
-WEB_TOOLS = ("WebSearch", "WebFetch")
 
 
 def allow_web_in_project(project):

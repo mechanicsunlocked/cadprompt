@@ -123,9 +123,11 @@ def main():
           f"{App.getUserAppDataDir()} {cadprompt.__file__} {[d for d in sys.path if os.path.isabs(d) and same(d, REPO)]}")
     opt_in = CASE in ("optin", "notechdraw")
     if CASE == "autoload":
-        check("FreeCAD started in the workbench, so the panel and hoischen are loaded; the engine and the drawing code are not",
+        check("FreeCAD started in the workbench, so the panel and hoischen are loaded; the engine, the server "
+              "for Claude Code, the tools and the drawing code are not",
               set(["cadprompt.panel", "cadprompt.workbench"] + HOISCHEN_MODULES) <= set(EARLY)
-              and "cadprompt.local_engine" not in EARLY and "cadprompt.drawing" not in EARLY, str(EARLY))
+              and not [m for m in ("cadprompt.local_engine", "cadprompt.drawing", "cadprompt.mcp_server",
+                                   "cadprompt.local_tools", "cadprompt.local_agent") if m in EARLY], str(EARLY))
     else:
         want_early = ["cadprompt", "cadprompt.workbench"] + (HOISCHEN_MODULES if opt_in else [])
         check("the start loaded the workbench module and, because the user asked for the TechDraw buttons, hoischen"
@@ -212,6 +214,10 @@ def main():
     check("(setup) the panel made no connection: it waits for a server address",
           [k for k, _ in dock.widget().entries] == ["setup"] and dock.widget().claude is None
           and not dock.widget()._running(), str(dock.widget().entries))
+    from cadprompt import bridge
+    check("the open panel listens on no port: the server for Claude Code is not started, not even loaded",
+          not bridge.running() and "cadprompt.mcp_server" not in sys.modules, str(sorted(
+              m for m in sys.modules if m.startswith("cadprompt."))))
     panel.show()
     pump()
     check("panel.show() with the dock on screen: the same dock, still on screen", dock_shown() and panel._dock is dock)

@@ -3,6 +3,10 @@
 Who does the work is chosen in Settings (backends.py): Claude Code with the
 user's account or another endpoint, or the built-in engine with a local model
 or an Anthropic API key. The panel looks and works the same for all of them.
+
+Claude Code reaches FreeCAD through the bridge (bridge.py), a server inside
+this process. The panel starts it right before it starts Claude Code, and
+stops it when it is closed or another kind of source is chosen.
 """
 
 import os
@@ -20,11 +24,6 @@ INSTALL_CLAUDE = {
     "win": "In PowerShell: `irm https://claude.ai/install.ps1 | iex`",
     "mac": "In Terminal: `curl -fsSL https://claude.ai/install.sh | bash`",
     "linux": "In a terminal: `curl -fsSL https://claude.ai/install.sh | bash`",
-}
-INSTALL_UV = {
-    "win": 'In PowerShell: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`',
-    "mac": "In Terminal: `curl -LsSf https://astral.sh/uv/install.sh | sh`",
-    "linux": "In a terminal: `curl -LsSf https://astral.sh/uv/install.sh | sh`",
 }
 
 
@@ -85,6 +84,8 @@ class Panel(QtWidgets.QWidget):
         self._connect(self.run)
         self._check = 0                       # counts check_setup runs: late answers are dropped
         self._stop_asked = False
+        self._closed = False                  # the dock is hidden: the bridge is not kept open
+        self._project_notes = []              # what projects.migrate() says about this project
         self.entries = []
         self.project = None
         self.claude = None
@@ -95,6 +96,7 @@ class Panel(QtWidgets.QWidget):
         self._build_ui()
         self._show_source()
         self._fill_projects()
+        self.destroyed.connect(lambda *_: bridge.stop())
         QtCore.QTimer.singleShot(0, self.check_setup)
 
     # ---- the two engines ----------------------------------------------------
@@ -120,9 +122,29 @@ class Panel(QtWidgets.QWidget):
 
     def _stop(self):
         if self.run.running():
+            bridge.idle()         # a tool call of Claude Code that still waits must not run after Stop
             self.run.stop()
         if self.local_run is not None and self.local_run.running():
             self.local_run.stop()
+
+    # ---- the bridge: open only while Claude Code can need it ---------------------
+    def _bridge_idle(self):
+        """Close the bridge when the panel is closed or the source is not Claude Code."""
+        if not self.run.running() and (self._closed or not backends.uses_claude_code()):
+            bridge.stop()
+
+    def _bridge_note(self, name, detail):
+        """What the bridge did by itself for a request of Claude Code (the backup copy)."""
+        self._add("tool", f"`{name}` {detail}".strip())
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._closed = True
+        self._bridge_idle()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._closed = False
 
     @staticmethod
     def _name(backend, start=False):
@@ -259,12 +281,13 @@ class Panel(QtWidgets.QWidget):
             self.entries = [e for e in self.entries if not e[0].startswith("setup")]
             self._render()
         if not backends.uses_claude_code():
+            self._bridge_idle()
             return self._check_engine()
         return self._check_claude_code()
 
     def _check_engine(self):
-        """The built-in engine needs no Claude Code, no uv and no bridge: a local
-        model needs a server and a model, the API key source a key and a model."""
+        """The built-in engine needs no Claude Code and no bridge: a local model
+        needs a server and a model, the API key source a key and a model."""
         if not paths.template_dir():
             self._setup("The project template is missing: install the whole cadprompt repository.")
             return False
@@ -302,31 +325,7 @@ class Panel(QtWidgets.QWidget):
             self._setup("Claude Code is not installed. " + INSTALL_CLAUDE[k] +
                         " Then sign in once by running `claude` and restart FreeCAD.")
             return False
-        if not paths.find_tool("uvx"):
-            self._setup("uv is not installed (it runs the FreeCAD bridge). " + INSTALL_UV[k] +
-                        " Then restart FreeCAD.")
-            return False
-        try:
-            _, msg = bridge.ensure()
-            if "expected" in msg:
-                self._setup(msg, note=True)
-        except LookupError:
-            ans = QtWidgets.QMessageBox.question(
-                self, "CADprompt",
-                f"The FreeCAD MCP bridge (freecad-mcp {paths.FREECAD_MCP_VERSION}) is not installed.\n\n"
-                "Download it from GitHub (github.com/neka-nat/freecad-mcp) into FreeCAD's Mod folder now?")
-            if ans != QtWidgets.QMessageBox.Yes:
-                self._setup("Without the bridge Claude cannot reach FreeCAD.")
-                return False
-            try:
-                self._setup(bridge.install(), note=True)
-                bridge.ensure()
-            except Exception as e:
-                self._setup(f"Could not install the bridge: {e}")
-                return False
-        except Exception as e:
-            self._setup(f"The FreeCAD bridge did not start: {e}")
-            return False
+        self._show_project_notes()
         if not runner.backend_env():
             runner.auth_status(self.claude, lambda st, n=self._check: self._on_auth(st, n), self)
         return True
@@ -336,7 +335,7 @@ class Panel(QtWidgets.QWidget):
             return      # the settings changed while Claude Code was answering
         if st and st.get("projectsDirectory"):
             self.claude_projects = st["projectsDirectory"]
-            if len(self.entries) <= 1:
+            if len([e for e in self.entries if not e[0].startswith("setup")]) <= 1:
                 self._load_history()
         if st is None:
             self._setup("Could not ask Claude Code whether you are signed in; trying anyway.", note=True)
@@ -382,12 +381,20 @@ class Panel(QtWidgets.QWidget):
         self._stop()
         self.project = projects.path_of(name)
         paths.params().SetString("LastProject", name)
+        try:
+            # a project made by an earlier version: its files name tools that are gone
+            self._project_notes = projects.migrate(self.project)
+        except Exception as e:
+            self._project_notes = []
+            App.Console.PrintWarning(f"CADprompt: could not bring the project up to date: {e}\n")
         runner.allow_web_in_project(self.project)
         self._sync_mode()
         self.entries = []
         self._images = []             # they are in the refs/ of the project that was open
         self._add("note", f"Project **{name}**.")
         self._load_history()
+        if backends.uses_claude_code():
+            self._show_project_notes()
         if open_model:
             model = projects.newest_model(self.project)
             if model:
@@ -395,6 +402,13 @@ class Panel(QtWidgets.QWidget):
                     projects.open_model(model)
                 except Exception as e:
                     self._add("error", f"Could not open {os.path.basename(model)}: {e}")
+
+    def _show_project_notes(self):
+        """Say what a file of the project that was left alone means for Claude Code."""
+        shown = [t for k, t in self.entries if k == "setup-note"]
+        for text in self._project_notes:
+            if text not in shown:
+                self._setup(text, note=True)
 
     def _load_history(self):
         """The earlier conversation of this project with the source chosen now."""
@@ -413,7 +427,8 @@ class Panel(QtWidgets.QWidget):
                 return
             old = runner.read_history(path)
         if old:
-            self.entries = self.entries[:1] + old + [("note", "Continuing this conversation.")]
+            kept = [e for e in self.entries[1:] if e[0].startswith("setup")]
+            self.entries = self.entries[:1] + old + [("note", "Continuing this conversation.")] + kept
             self._render()
 
     def _sync_mode(self):
@@ -539,7 +554,7 @@ class Panel(QtWidgets.QWidget):
             return
         backend = backends.current()
         engine = not backends.uses_claude_code(backend)
-        token, images = None, []
+        where, images = None, []
         if engine:
             if not self.check_setup():
                 return
@@ -550,9 +565,9 @@ class Panel(QtWidgets.QWidget):
             if not self.claude and not self.check_setup():
                 return
             try:
-                token, _ = bridge.ensure()
+                where = bridge.ensure(self.project, backend, self._bridge_note)
             except Exception as e:
-                self._add("error", f"FreeCAD bridge: {e}")
+                self._add("error", f"The FreeCAD tools for Claude could not be started: {e}")
                 return
         self._images = []
         if typed:
@@ -564,7 +579,7 @@ class Panel(QtWidgets.QWidget):
         if engine:
             self._start_local(text, backend, images)
         else:
-            self._start(text, token)
+            self._start(text, *where)
 
     def _take_images(self):
         """The images that go with this message, as paths in the project.
@@ -583,11 +598,10 @@ class Panel(QtWidgets.QWidget):
             self._add("error", f"{e} Press Send again to send your message without it.")
             return None
 
-    def _start(self, text, token):
-        # the source's own variables (key, endpoint) are added by the runner: backends.claude_env
-        env = {"FREECAD_MCP_TOKEN": token,
-               "CADPROMPT_FREECADCMD": paths.freecadcmd_string(),
-               "FREECAD_MCP_VERSION": paths.FREECAD_MCP_VERSION}
+    def _start(self, text, url, token):
+        """`url` and `token`: where Claude Code finds the FreeCAD tools (bridge.ensure)."""
+        # the source's own variables (endpoint) are added by the runner: backends.claude_env
+        env = runner.mcp_env(url, token)
         self._engine = self.run
         self._busy(True, f"{self._who(start=True)} is working…")
         self.run.start(self.claude, self.project, text, projects.get_session(self.project), env)
@@ -615,6 +629,9 @@ class Panel(QtWidgets.QWidget):
     def _on_finished(self, res, run=None):
         run = run or self._engine
         local = run is not self.run
+        if not local:
+            bridge.idle()            # Claude Code is gone: a call of it that still waits is dropped
+            self._bridge_idle()
         if run is self._engine:      # a run that was stopped for a newer one must not end "working…"
             self._busy(False)
         if res.get("stopped"):
@@ -655,7 +672,12 @@ class Panel(QtWidgets.QWidget):
             projects.set_session(self.project, None)     # the old conversation is gone: start fresh
             self._retried = True
             self._add("note", "The earlier conversation could not be found; starting a new one.")
-            self._start(self._last_prompt, bridge.ensure()[0])
+            try:
+                where = bridge.ensure(self.project, self._sent_to, self._bridge_note)
+            except Exception as e:
+                self._add("error", f"The FreeCAD tools for Claude could not be started: {e}")
+                return
+            self._start(self._last_prompt, *where)
             return
         if "login" in msg.lower() or "authenticat" in msg.lower():
             msg += "\n\nSign in: open a terminal, run `claude`, and sign in with your Claude account."

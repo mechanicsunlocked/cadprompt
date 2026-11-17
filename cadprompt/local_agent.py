@@ -32,6 +32,8 @@ import threading
 import urllib.parse
 import urllib.request
 
+from . import main_thread
+
 MARK = "\n... (shortened, %d characters in total)"
 
 CHECK = ("Automatic check: the work is not complete. Your last tool result had this problem:\n%s\n"
@@ -62,6 +64,7 @@ MAX_IMAGES = 4                                   # pictures with one message
 RETRIES = 3                                      # waits for a busy service before the run gives up
 BACKOFF = 2                                      # seconds of the first wait when the service names none
 LONGEST_WAIT = 60                                # seconds; a longer wait is the user's decision
+CONNECT_TIMEOUT = 15                             # seconds to reach the server; an answer can take minutes
 
 _REFUSED = {}     # (address, model) -> request fields that server does not take
 
@@ -100,6 +103,36 @@ class _NoPictures(Exception):
 
 class _BadThinking(Exception):
     """The service does not take back the thinking blocks of an earlier step."""
+
+
+class NoConnection(OSError):
+    """The server was not reached in time. Not a TimeoutError: that one means a slow answer."""
+
+
+def connect(address, timeout, connect_timeout=None):
+    """An open http.client connection to the server of `address`.
+
+    Two time limits: a short one to reach the server, so that a network which
+    drops the packets gives its error soon, and `timeout` for each step of
+    the answer, which a model can take minutes for. No proxy: http.client
+    connects to the address itself. Raises OSError.
+    """
+    main_thread.quiet_pipe()     # a server that closes the line in the middle must not end FreeCAD
+    u = urllib.parse.urlsplit(address)
+    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    short = CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
+    conn = cls(u.hostname or "", u.port, timeout=min(short, timeout))
+    try:
+        conn.connect()
+    except TimeoutError:
+        conn.close()
+        raise NoConnection("no connection within %g seconds" % min(short, timeout))
+    except BaseException:
+        conn.close()
+        raise
+    conn.timeout = timeout
+    conn.sock.settimeout(timeout)
+    return conn
 
 
 def user_message(text, shown=None, images=None):
@@ -612,7 +645,8 @@ class Agent:
 
     def __init__(self, url, model, run_tool, key="", system="", tools=None, messages=None,
                  on_event=None, max_steps=None, max_tokens=None, temperature=0.2, timeout=600,
-                 context_chars=None, kind="openai", may_contact=None, load_image=None):
+                 context_chars=None, kind="openai", may_contact=None, load_image=None,
+                 connect_timeout=None):
         self.key = (key or "").strip()
         self.model = (model or "").strip()
         self.wire = WIRES[kind](url, self.model, self.key)
@@ -625,7 +659,8 @@ class Agent:
         self.max_steps = max_steps or self.wire.max_steps
         self.max_tokens = max_tokens or self.wire.max_tokens
         self.temperature = temperature
-        self.timeout = timeout
+        self.timeout = timeout                    # seconds for each step of an answer
+        self.connect_timeout = connect_timeout    # seconds to reach the server; None: CONNECT_TIMEOUT
         self.context_chars = context_chars or self.wire.context_chars
         self.may_contact = may_contact
         self.load_image = load_image
@@ -833,13 +868,10 @@ class Agent:
                                               self.temperature, self._picture)
         pictures = any(m.get("images") for m in view)
         u = urllib.parse.urlsplit(address)
-        https = u.scheme == "https"
         try:
-            cls = http.client.HTTPSConnection if https else http.client.HTTPConnection
-            conn = cls(u.hostname or "", u.port, timeout=self.timeout)
+            conn = connect(address, self.timeout, self.connect_timeout)
             self._conn = conn
             try:
-                conn.connect()
                 self._check_stop()     # stop() either saw the socket or we see its flag here
                 conn.request("POST", u.path + ("?" + u.query if u.query else ""),
                              json.dumps(body).encode("utf-8"), headers)

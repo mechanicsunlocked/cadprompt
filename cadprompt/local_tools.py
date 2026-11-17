@@ -1,7 +1,9 @@
-"""The tools a local model can call. Every one must run in FreeCAD's main thread.
+"""The tools a model can call. Every one must run in FreeCAD's main thread.
 
 run_python runs the model's code in one namespace that stays between calls,
 as one undo step, and reports what changed in words a small model can act on.
+The built-in engine and the bridge to Claude Code use the same functions
+(local_prompt.TOOLS names them); get_view is for the bridge only.
 """
 
 import ast
@@ -11,6 +13,7 @@ import linecache
 import math
 import os
 import sys
+import tempfile
 import textwrap
 import traceback
 
@@ -23,6 +26,7 @@ MAX_FILE = 6000          # characters of a project file
 BINARY = (".fcstd", ".fcbak", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf", ".step",
           ".stp", ".iges", ".igs", ".stl", ".zip", ".brep")
 RUN_SECONDS = 60         # the longest that the Python lines of one run_python call may run
+VIEW_SIDE = 800          # longest side of get_view's picture, in pixels: about 600 tokens for Claude
 ORIGIN_PARTS = ("App::Line", "App::Plane", "App::Point")    # the axes and planes of an App::Origin
 
 _namespace = {}
@@ -521,6 +525,54 @@ def make_drawing(project, sheet="A3", obj_name=""):
         return str(drawing.make_drawing(project, sheet=sheet or "A3", obj_name=obj_name or ""))
     except Exception as exc:      # drawing.make_drawing reports errors as text; this is a last net
         return "ERROR: the drawing failed: %s" % exc
+
+
+class NoView(Exception):
+    """get_view has no picture to give. The text is for the model."""
+
+
+def get_view():
+    """The 3D view of the active document as the bytes of a PNG file. Raises NoView."""
+    if not App.GuiUp:
+        raise NoView("FreeCAD runs without its window, so there is no view. Use get_document_state.")
+    import FreeCADGui as Gui
+    from PySide import QtGui
+    # FreeCAD draws the picture with OpenGL. Qt's platforms without a screen have none,
+    # and FreeCAD 1.1 does not come back from saveImage there.
+    if QtGui.QGuiApplication.platformName() in ("offscreen", "minimal"):
+        raise NoView("This FreeCAD runs without a screen, so it cannot make a picture of the view. "
+                     "Use get_document_state.")
+    gdoc = Gui.ActiveDocument
+    if gdoc is None:
+        raise NoView("There is no open document.")
+    view = gdoc.ActiveView
+    if not hasattr(view, "saveImage"):       # a drawing page or a spreadsheet is in front
+        views = gdoc.mdiViewsOfType("Gui::View3DInventor")
+        view = views[0] if views else None
+    if view is None:
+        raise NoView("The document has no 3D view open.")
+    try:
+        width, height = view.getSize()
+    except Exception:
+        width, height = 4, 3
+    scale = VIEW_SIDE / float(max(width, height, 1))
+    width, height = max(int(width * scale), 16), max(int(height * scale), 16)
+    handle, path = tempfile.mkstemp(prefix="cadprompt-view-", suffix=".png")
+    os.close(handle)
+    try:
+        view.saveImage(path, width, height, "Current")
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception as exc:
+        raise NoView("FreeCAD could not make a picture of the view: %s" % exc)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if not data.startswith(b"\x89PNG"):
+        raise NoView("FreeCAD could not make a picture of the view.")
+    return data
 
 
 def _run_tool(project, name, args):

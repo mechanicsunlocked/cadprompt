@@ -75,6 +75,9 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         elif self.path == "/slow/models":
             time.sleep(4)
             body = {"data": []}
+        elif self.path == "/slowish/models":
+            time.sleep(1.2)
+            body = {"data": [{"id": "late-model"}]}
         elif self.path.startswith("/redirect"):       # /redirect/<code>/<port>/models
             _, _, code, port, _ = self.path.split("/")
             self.send_response(int(code))
@@ -335,18 +338,26 @@ def main():
     p.SetString("Backend", "custom")
     check("runner.backend_env() still gives the custom endpoint", runner.backend_env().get(
         "ANTHROPIC_BASE_URL") == "http://localhost:11434")
-    pe = runner.claude_environment("/nowhere/bin/claude", {"FREECAD_MCP_TOKEN": "t"})
+    bridge_env = runner.mcp_env("http://127.0.0.1:5/mcp", "t")
+    check("mcp_env: where the FreeCAD tools are, in names that Claude Code does not blank",
+          bridge_env == {"CADPROMPT_MCP_URL": "http://127.0.0.1:5/mcp", "CADPROMPT_MCP_TOKEN": "t"}
+          and not [k for k in bridge_env if k.startswith("ANTHROPIC_")], str(bridge_env))
+    pe = runner.claude_environment("/nowhere/bin/claude", bridge_env)
     check("custom process: endpoint from Settings, shell key removed",
           pe.value("ANTHROPIC_BASE_URL") == "http://localhost:11434" and pe.value("ANTHROPIC_AUTH_TOKEN") == "tok"
-          and not pe.contains("ANTHROPIC_API_KEY") and pe.value("FREECAD_MCP_TOKEN") == "t")
+          and not pe.contains("ANTHROPIC_API_KEY") and pe.value("CADPROMPT_MCP_TOKEN") == "t")
     p.SetString("Backend", "account")
     check("runner.backend_env() is {} for the account", runner.backend_env() == {})
-    pe = runner.claude_environment("/nowhere/bin/claude", {"FREECAD_MCP_TOKEN": "t"})
+    pe = runner.claude_environment("/nowhere/bin/claude", bridge_env)
     check("account process: shell key, token and endpoint are all removed",
           not pe.contains("ANTHROPIC_API_KEY") and not pe.contains("ANTHROPIC_AUTH_TOKEN")
           and not pe.contains("ANTHROPIC_BASE_URL"))
-    check("account process: PATH starts with claude's folder, the bridge token is passed",
-          pe.value("PATH").split(os.pathsep)[0] == "/nowhere/bin" and pe.value("FREECAD_MCP_TOKEN") == "t")
+    check("account process: PATH starts with claude's folder, the address and the token of the bridge are passed",
+          pe.value("PATH").split(os.pathsep)[0] == "/nowhere/bin" and pe.value("CADPROMPT_MCP_TOKEN") == "t"
+          and pe.value("CADPROMPT_MCP_URL") == "http://127.0.0.1:5/mcp")
+    old = [k for k in pe.keys() if k.startswith("FREECAD_MCP") or k == "CADPROMPT_FREECADCMD"]
+    check("account process: nothing of the old bridge is in the environment, and uvx is not looked for",
+          not old and not hasattr(paths, "FREECAD_MCP_VERSION") and not hasattr(paths, "freecadcmd_string"), str(old))
     check("account process: a key handed in by the caller is removed too",
           not runner.claude_environment("/nowhere/bin/claude", {"ANTHROPIC_API_KEY": "x"}).contains(
               "ANTHROPIC_API_KEY"))
@@ -417,11 +428,11 @@ def main():
               and pe.value("CADPROMPT_TEST_KEPT") == "kept" and pe.contains("PATH"), str(names))
         check("runner.system_environment: FreeCAD's own PYTHONHOME is not handed on",
               not roots or not pe.contains("PYTHONHOME"), pe.value("PYTHONHOME"))
-        pe = runner.claude_environment(os.path.join(home, "bin", "claude"), {"FREECAD_MCP_TOKEN": "t"})
+        pe = runner.claude_environment(os.path.join(home, "bin", "claude"), bridge_env)
         check("claude process: the same clean environment, with claude's folder first in PATH",
               not [k for k in pe.keys() if bundle in pe.value(k)] and not pe.contains("PYTHONPATH")
               and pe.value("PATH").split(os.pathsep)[0] == os.path.join(home, "bin")
-              and pe.value("FREECAD_MCP_TOKEN") == "t", pe.value("PATH")[:200])
+              and pe.value("CADPROMPT_MCP_TOKEN") == "t", pe.value("PATH")[:200])
     finally:
         paths.bundle_roots = real_roots
         for k in ("PYTHONPATH", "CADPROMPT_TEST_BUNDLE_FILE", "CADPROMPT_TEST_KEPT"):
@@ -534,6 +545,25 @@ def main():
     r = raises(OSError, lambda: backends.list_models(base + "/slow", timeout=1))
     check("list_models: a server that does not answer in time is an OSError", bool(r) and time.time() - t0 < 3,
           f"{r} after {time.time() - t0:.1f} s")
+    # reaching the server has a short time limit of its own; the answer keeps the one that was given
+    import socket
+    asked = []
+
+    def no_route(address, timeout=None, source_address=None, **kw):
+        asked.append(timeout)                # a network that drops the packets: no answer, no refusal
+        raise TimeoutError("timed out")
+    real_connect, socket.create_connection = socket.create_connection, no_route
+    try:
+        r = [raises(OSError, lambda: backends.list_models(base + "/v1", timeout=600)),
+             raises(OSError, lambda: backends.list_models(base + "/v1", timeout=600, connect_timeout=0.2)),
+             raises(OSError, lambda: backends.list_models(base + "/v1"))]
+    finally:
+        socket.create_connection = real_connect
+    check("list_models: the connection has its own short time limit (15 s), never longer than the one for the answer",
+          r == ["NoConnection"] * 3 and asked == [local_agent.CONNECT_TIMEOUT, 0.2, 5]
+          and local_agent.CONNECT_TIMEOUT == 15, f"{r} {asked}")
+    check("list_models: an answer can take longer than the connection may",
+          backends.list_models(base + "/slowish", timeout=5, connect_timeout=0.3) == ["late-model"])
     server.shutdown()
     server.server_close()
     t0 = time.time()

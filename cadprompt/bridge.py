@@ -1,123 +1,164 @@
-"""The freecad-mcp bridge inside this FreeCAD: localhost, token, running.
+"""The bridge between Claude Code and this FreeCAD: an MCP server in this process.
 
-Claude Code starts `uvx freecad-mcp`, which talks to this bridge on
-127.0.0.1:9875. The bridge runs in this very process, so the panel can set it
-up and start it itself, and installs it if it is missing.
+Claude Code needs nothing but itself: the project's .mcp.json points it at
+http://127.0.0.1:<port>/mcp (mcp_server.py), and the panel hands it the
+address and the token in its environment. Every tool call arrives in a thread
+of the server and is handed to FreeCAD's main thread, the same way the
+built-in engine does it (main_thread.py).
+
+This module owns the life of that server. It starts only when the panel is
+about to start Claude Code (ensure), never when FreeCAD starts. It stops when
+the panel says so (the panel is closed, another source is chosen) and when
+FreeCAD quits.
+
+The panel imports this module when it opens. The server and the tools are
+imported in ensure(), so a panel that never starts Claude Code loads neither.
 """
 
-import io
-import os
-import secrets
-import shutil
-import sys
-import tempfile
-import urllib.request
-import zipfile
+import traceback
 
 import FreeCAD as App
+from PySide import QtCore
 
-from .paths import FREECAD_MCP_VERSION
+from . import main_thread
 
-REPO_ZIP = "https://github.com/neka-nat/freecad-mcp/archive/refs/tags/v{v}.zip"
+INSTRUCTIONS = ("The tools work in the user's open FreeCAD. run_python: App, Part, Sketcher, Draft, math and "
+                "Gui are imported, doc is the active document, PROJECT is the project folder, variables stay "
+                "between calls, each call is one undo step, and a call that fails is taken back. Check with "
+                "get_document_state. For a drawing call make_drawing first.")
+GONE = "ERROR: this request was stopped. Nothing was done."
 
-
-def mod_dir():
-    return os.path.join(App.getUserAppDataDir(), "Mod")
-
-
-def _import_rpc():
-    """rpc_server from the installed FreeCADMCP addon, or None."""
-    try:
-        from rpc_server import rpc_server  # on sys.path when FreeCADMCP loaded
-        return rpc_server
-    except ImportError:
-        pass
-    addon = os.path.join(mod_dir(), "FreeCADMCP")
-    if not os.path.isdir(addon):
-        return None
-    if addon not in sys.path:
-        sys.path.insert(0, addon)
-    try:
-        from rpc_server import rpc_server
-        return rpc_server
-    except Exception as e:
-        App.Console.PrintError(f"CADprompt: FreeCADMCP addon is broken: {e}\n")
-        return None
+_host = None          # made with the first server, lives in the main thread
+_server = None
 
 
-def installed_version():
-    try:
-        from rpc_server.version import __version__
-        return __version__
-    except Exception:
-        return None
+class _Host(QtCore.QObject):
+    """Runs the tools in the main thread for the requests of the server."""
 
+    need_tool = QtCore.Signal(object)       # a main_thread.Call, sent from a thread of the server
 
-def install():
-    """Download the pinned FreeCADMCP addon from GitHub into Mod/. Returns a message."""
-    url = REPO_ZIP.format(v=FREECAD_MCP_VERSION)
-    with urllib.request.urlopen(url, timeout=60) as r:
-        data = r.read()
-    prefix = f"freecad-mcp-{FREECAD_MCP_VERSION}/addon/FreeCADMCP/"
-    dest = os.path.join(mod_dir(), "FreeCADMCP")
-    if os.path.islink(dest) or os.path.exists(dest):
-        raise RuntimeError(f"{dest} already exists; remove it first to reinstall")
-    tmp = tempfile.mkdtemp(prefix="cadprompt-")
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            members = [m for m in z.namelist() if m.startswith(prefix)]
-            if not members:
-                raise RuntimeError("the download does not contain addon/FreeCADMCP")
-            for m in members:
-                rel = m[len(prefix):]
-                if not rel or ".." in rel.split("/"):
-                    continue
-                target = os.path.join(tmp, *rel.split("/"))
-                if m.endswith("/"):
-                    os.makedirs(target, exist_ok=True)
-                else:
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    with z.open(m) as src, open(target, "wb") as out:
-                        out.write(src.read())
-        os.makedirs(mod_dir(), exist_ok=True)
-        shutil.move(tmp, dest)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    return f"freecad-mcp {FREECAD_MCP_VERSION} installed in {dest}"
+    def __init__(self):
+        super().__init__()
+        self.project, self.source, self.note = "", "account", None
+        self._serial = 0          # counts requests of the user; a call of an earlier one is not run
+        self._backed = set()      # model files that have their backup copy for this request
+        self._in_tool = False
+        self.need_tool.connect(self._on_tool, QtCore.Qt.QueuedConnection)
 
+    def begin(self, project, source, note):
+        """A new request of the user starts: Claude Code is about to run."""
+        self._serial += 1
+        from . import local_tools
+        self.project, self.source, self.note = project or "", source or "account", note
+        self._backed = set()
+        local_tools.begin_request()
 
-def ensure():
-    """Make the bridge safe and running. Returns (token, message) or raises."""
-    rpc = _import_rpc()
-    if rpc is None:
-        raise LookupError("The FreeCAD MCP bridge is not installed.")
-    from rpc_server.settings import load_settings, save_settings
+    def end(self):
+        """Claude Code is not running any more: a call that still waits must not run."""
+        self._serial += 1
 
-    s = load_settings()
-    changed = False
-    wanted = {"remote_enabled": False, "allowed_ips": "127.0.0.1", "auto_start_rpc": True}
-    for k, v in wanted.items():
-        if s.get(k) != v:
-            s[k] = v
-            changed = True
-    if not s.get("auth_token"):
-        s["auth_token"] = secrets.token_urlsafe(32)
-        changed = True
-    if changed:
-        save_settings(s)
+    # ---- in a thread of the server ----------------------------------------------
+    def call(self, name, args):
+        from . import mcp_server
+        server, call = _server, main_thread.Call(name, args)
+        call.serial = self._serial
+        self.need_tool.emit(call)
+        # the wait ends when the server is stopped, so a request cannot hang on a closed panel
+        if not main_thread.wait(call, lambda: server is None or not server.running()):
+            return [mcp_server.text_item(GONE)], True
+        return call.result
+
+    # ---- in the main thread -----------------------------------------------------
+    def _on_tool(self, call):
+        from . import mcp_server
+        if call.serial != self._serial or not running():
+            call.result = ([mcp_server.text_item(GONE)], True)
+            call.done.set()
+            return
+        if self._in_tool:
+            # a tool that opened a dialog lets events through; never run two tools at once
+            QtCore.QTimer.singleShot(50, lambda: self._on_tool(call))
+            return
+        self._in_tool = True
         try:
-            os.chmod(os.path.join(App.getUserAppDataDir(), "freecad_mcp_settings.json"), 0o600)
-        except OSError:
-            pass
+            call.result = self._run(call.name, call.args)
+        except Exception:
+            call.result = ([mcp_server.text_item("ERROR in tool:\n" + traceback.format_exc(limit=3))], True)
+        finally:
+            self._in_tool = False
+            call.done.set()
 
-    running = getattr(rpc, "rpc_server_instance", None) is not None
-    if running and changed:
-        rpc.stop_rpc_server()       # restart so the token applies
-        running = False
-    msg = "bridge running"
-    if not running:
-        msg = rpc.start_rpc_server()
-    v = installed_version()
-    if v and v != FREECAD_MCP_VERSION:
-        msg += f" (addon {v}, expected {FREECAD_MCP_VERSION}: tools may not match)"
-    return s["auth_token"], msg
+    def _run(self, name, args):
+        from . import approval, local_agent, local_prompt, local_tools, mcp_server
+        if name in local_prompt.CHANGING:
+            # the user decides, in this thread, before anything of the step happens
+            if not approval.request(name, args, self.source):
+                return [mcp_server.text_item(approval.DECLINED)], False
+            self._backup()
+        if name == "get_view":
+            try:
+                return [mcp_server.image_item(local_tools.get_view(), "image/png")], False
+            except local_tools.NoView as exc:
+                return [mcp_server.text_item("ERROR: %s" % exc)], True
+        text = local_tools.run_tool(self.project, name, args)
+        return [mcp_server.text_item(text)], bool(local_agent.find_problem(name, text))
+
+    def _backup(self):
+        """Before the first change of a request, keep the model file as it is on disk."""
+        doc = App.ActiveDocument
+        path = doc.FileName if doc is not None else ""
+        if not path or not self.project or path in self._backed:
+            return
+        self._backed.add(path)
+        from . import projects
+        try:
+            copy = projects.backup(self.project, path)
+        except OSError as exc:
+            App.Console.PrintWarning(f"CADprompt: no backup copy of the model could be made: {exc}\n")
+            return
+        if copy and self.note:
+            self.note("backup", "model/.backup/" + copy.replace("\\", "/").rsplit("/", 1)[-1])
+
+
+def ensure(project="", source="account", note=None):
+    """Make sure that the server runs, for a request in `project`. Returns (url, token).
+
+    Call it in the main thread, right before Claude Code starts. `source` is
+    the AI source for approval.request; note(name, detail) is told what the
+    bridge did by itself (the backup copy). Raises OSError when the server
+    cannot listen.
+    """
+    global _host, _server
+    from . import local_prompt, mcp_server
+    if _host is None:
+        _host = _Host()
+        app = QtCore.QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(stop)
+    if _server is None:
+        server = mcp_server.Server(local_prompt.bridge_tools(), _host.call, name="cadprompt",
+                                   version="1", instructions=INSTRUCTIONS)
+        server.start()
+        _server = server
+    _host.begin(project, source, note)
+    return _server.url, _server.token
+
+
+def idle():
+    """Claude Code ended or was stopped: its calls that did not start yet are dropped."""
+    if _host is not None:
+        _host.end()
+
+
+def stop():
+    """Close the server. The next ensure() starts a new one, with a new port and token."""
+    global _server
+    server, _server = _server, None
+    if _host is not None:
+        _host.end()
+    if server is not None:
+        server.stop()
+
+
+def running():
+    return _server is not None and _server.running()

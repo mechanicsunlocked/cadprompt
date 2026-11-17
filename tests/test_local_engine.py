@@ -1011,6 +1011,51 @@ def main():
           and ("text", local_engine.NOT_SAVED) in rec.events and doc.getObject("Extra1") is not None, rec.events)
     check("... nothing of the cut answer is stored but its text", "_cut_off" not in json.dumps(chat(project15))
           and "for i in ra" not in json.dumps(chat(project15)), str(chat(project15))[-300:])
+    # ---- 16: the user's yes before a step that changes things --------------------
+    say("--- 16 approval.request() is asked in the main thread before run_python and make_drawing")
+    from cadprompt import approval
+    close_all()
+    project16 = new_project("approval")
+    asked, verdict, real_request = [], [False], approval.request
+
+    def request(tool_name, args, source):
+        asked.append((tool_name, dict(args), source, threading.get_ident() == main_thread))
+        return verdict[0]
+    approval.request = request
+    try:
+        code16 = 'doc.addObject("Part::Box", "NotWanted")'
+        srv.add(call("run_python", {"code": code16}, "a1"), call("get_document_state", {}, "a2"),
+                answer("You did not approve the step, so I stopped."))
+        n = len(srv.requests)
+        run, rec = run_once(project16, "Make a box.", cfg)
+        check("the engine asks approval.request(tool_name, args, source) in the main thread, with the source 'local'",
+              asked == [("run_python", {"code": code16}, "local", True)], asked)
+        sent = srv.requests[n + 1]["body"]["messages"][-1] if len(srv.requests) > n + 1 else {}
+        check("the answer False: the model gets 'The user did not approve this step.' as the tool result",
+              sent.get("role") == "tool" and sent.get("content") == approval.DECLINED == "The user did not approve this step.",
+              sent)
+        check("... nothing ran: no object, no document, no backup, no save, no error",
+              App.ActiveDocument is None and rec.kinds() == ["tool:run_python", "tool:get_document_state", "text", "finished"]
+              and rec.result().get("is_error") is False and not copies_of(project16)
+              and not os.path.isdir(os.path.join(project16, "model", ".backup")), rec.events)
+        check("a tool that only looks is not asked for", len(asked) == 1, asked)
+        cl.add(claude("", [("make_drawing", {"sheet": "A4"}, "toolu_d")]), claude("Not approved, so no drawing."))
+        run, rec = run_once(project16, "Make a drawing.", acfg)
+        check("the API key source asks the same function, with the source 'apikey', also for make_drawing",
+              asked[-1] == ("make_drawing", {"sheet": "A4"}, "apikey", True) and len(asked) == 2
+              and rec.result().get("is_error") is False and "tool:save" not in rec.kinds(), (asked, rec.events))
+        verdict[0] = True
+        srv.add(call("run_python", {"code": 'doc.addObject("Part::Box", "Wanted")'}, "a3"), answer("Done."))
+        run, rec = run_once(project16, "Make a box now.", cfg)
+        check("the answer True: the step runs and the model is saved",
+              len(asked) == 3 and App.ActiveDocument is not None and App.ActiveDocument.getObject("Wanted") is not None
+              and "tool:save" in rec.kinds(), rec.events)
+    finally:
+        approval.request = real_request
+    check("approval.request says yes for now, for every tool and source",
+          approval.request("run_python", {"code": "x"}, "local") is True
+          and approval.request("make_drawing", {}, "account") is True)
+
     check("the Anthropic script was used exactly", cl.overrun == 0 and not cl.script, (cl.overrun, len(cl.script)))
     cl.close()
 

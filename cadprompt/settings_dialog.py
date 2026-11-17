@@ -12,7 +12,8 @@ from . import backends, local_agent, paths
 # folder of the user's own profile keeps other users out (backends.py).
 KEY_PLACE = "a file only you can read" if backends.POSIX else "a file in your own user folder"
 HINTS = {
-    "account": "Uses your Claude subscription. Sign in once: run `claude` in a terminal.",
+    "account": "Uses your Claude subscription through the Claude Code program on this computer. "
+               "Nothing else to install. Sign in once: run `claude` in a terminal.",
     "apikey": "Uses your key from console.anthropic.com; Anthropic bills what you use. "
               "Nothing else to install. Your messages, the images you send with them and what "
               "the tools report go to Anthropic. The key is kept in %s, not in FreeCAD's "
@@ -214,9 +215,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.claude = QtWidgets.QLineEdit(p.GetString("claudePath", ""))
         self.claude.setPlaceholderText(paths.find_tool("claude") or "not found")
         f.addRow("claude program", self.claude)
-        self.uvx = QtWidgets.QLineEdit(p.GetString("uvxPath", ""))
-        self.uvx.setPlaceholderText(paths.find_tool("uvx") or "not found")
-        f.addRow("uvx program", self.uvx)
         lay.addWidget(self.claude_box)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -359,5 +357,4 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("Model", self.model.text().strip())
         p.SetString("AuthToken", self.token.text().strip())
         p.SetString("claudePath", self.claude.text().strip())
-        p.SetString("uvxPath", self.uvx.text().strip())
         self.accept()

@@ -1,8 +1,12 @@
-"""What a local model is told: the system prompt and the tool list.
+"""What a model is told: the system prompt of the built-in engine, and the tool list.
 
-A compact version of the project's CLAUDE.md for a small model with a short
-context (about 800 tokens). Pure data, no FreeCAD import. Keep it short:
-every line here is sent with every step.
+The prompt is a compact version of the project's CLAUDE.md for a small model
+with a short context (about 800 tokens). Keep it short: every line here is
+sent with every step. Pure data, no FreeCAD import.
+
+TOOLS is the one list of tools, for the built-in engine and for the bridge to
+Claude Code (bridge_tools): the same names, the same arguments, the same
+functions in local_tools. Read AGENTS.md before you change a name.
 """
 
 RULES = """You are CADprompt, a CAD assistant that works inside the user's FreeCAD 1.1. The user is a craftsman or a student. You do the work yourself with the tools. Answer in the language the user writes in.
@@ -50,7 +54,7 @@ def system_prompt(mode="build"):
 
 
 # Added after the text of a slash command: the command files are written for
-# Claude Code, which has other tools.
+# Claude Code, which reads files itself and can do more by hand than a small model.
 COMMAND_HINTS = {
     "build": "(The mode file is already written. The rules of CLAUDE.md are in your instructions.)",
     "teach": "(The mode file is already written. The rules of CLAUDE.md are in your instructions.)",
@@ -86,3 +90,23 @@ TOOLS = [
                                       "obj_name": {"type": "string",
                                                    "description": "Name of the object. Empty: the main object"}}}}},
 ]
+
+# Offered to Claude Code only: an agent with vision. The built-in engine does not
+# send a tool result with a picture, so a local model does not get this tool.
+VIEW_TOOL = {"type": "function", "function": {
+    "name": "get_view",
+    "description": "A small picture (PNG) of the 3D view of the active document, as the user sees it. "
+                   "It costs far more than get_document_state: check with numbers first.",
+    "parameters": {"type": "object", "properties": {}}}}
+
+CHANGING = ("run_python", "make_drawing")     # tools that can change the document: the user approves them
+BRIDGE = ("run_python", "get_document_state", "make_drawing", "get_view")    # what Claude Code gets
+# read_project_file is not in BRIDGE: Claude Code reads the files of the project itself, inside
+# the limits of the project's own permission settings.
+
+
+def bridge_tools():
+    """The tools of BRIDGE in the shape of the Model Context Protocol (tools/list)."""
+    known = {t["function"]["name"]: t["function"] for t in TOOLS + [VIEW_TOOL]}
+    return [{"name": name, "description": known[name]["description"], "inputSchema": known[name]["parameters"]}
+            for name in BRIDGE]

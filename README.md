@@ -38,7 +38,7 @@ in the panel and choose where the AI runs:
 |---|---|---|
 | **Local model** | a model server that speaks the OpenAI API: LM Studio, Ollama, llama.cpp. On this computer or on another one in your network. Nothing else. | nothing, when the server is on this computer; else to that server |
 | **Anthropic API key** | a key from the Anthropic Console. Nothing else. | your messages, the images that you send with them, and what the tools report (the objects of your model, the output of the code, text files of the project that the AI reads): to `api.anthropic.com`, billed per use |
-| **Claude account** | the Claude Code program, signed in, and the `uv` program | your messages, the project files that Claude reads, screenshots of FreeCAD: to Anthropic, on your subscription |
+| **Claude account** | the Claude Code program, signed in. Nothing else. | your messages, the project files that Claude reads, what the tools report, and a picture of the 3D view when Claude asks for one: to Anthropic, on your subscription |
 
 **Local model, step by step.** In Settings choose "Local model or other server",
 type the server address (LM Studio: `http://127.0.0.1:1234/v1`, Ollama:
@@ -49,6 +49,10 @@ students type its address, for example `http://192.168.1.20:1234/v1`.
 **API key, step by step.** In Settings choose "Anthropic API key", paste the
 key, OK. The model is `claude-opus-5-5` until you pick another one: **Find
 models** asks Anthropic which models your key can use.
+
+**Claude account, step by step.** Install Claude Code, run `claude` one time in
+a terminal and sign in. In Settings choose "Claude account". The panel starts
+Claude Code for each message; you do not need the terminal again.
 
 The local model and the API key share one conversation in a project. You can
 change between them in the middle of the work.
@@ -102,20 +106,43 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 - CADprompt connects to the AI service directly. It does not use a proxy from the
   settings of the computer, so a key never goes to a proxy. On a network that
   reaches the internet only through a proxy, the API key source does not work.
-- With the Claude account source, the panel downloads the freecad-mcp bridge
-  from GitHub the first time, after it asks you.
+- With the Claude account source, Claude Code is a program of its own, and it
+  must reach FreeCAD. For that, CADprompt opens a small server inside FreeCAD
+  (the Model Context Protocol, over HTTP). The server listens only on this
+  computer (`127.0.0.1`), on a port that the system picks. Each request needs a
+  token that is made new for each start and is kept in memory only; the panel
+  gives it to the Claude Code program that it starts. A web page cannot use the
+  server: a request from a browser is refused. The server starts when you send
+  a message to Claude, not when FreeCAD starts. It stops when you close the
+  panel, choose a local model or an API key, or quit FreeCAD.
+- Claude Code gets four tools from that server and may use them without a
+  question of its own: `run_python`, `get_document_state`, `make_drawing` and
+  `get_view`. It gets no shell: the project's settings deny that.
 
 ## What is not done yet
 
-- The **Claude account** source still needs `uv` and the freecad-mcp download.
-  A bridge built into the addon is planned.
 - The AI's code runs **without asking first**. A "show the code, then Run or
-  Skip" step, with a switch for "run without asking", is planned. The official
+  Skip" step, with a switch for "run without asking", is planned (the place for
+  it is `cadprompt/approval.py`; all sources go through it). The official
   FreeCAD addon list requires it, so CADprompt is not in that list yet.
 - A question "may CADprompt contact this service?" before the first request to
   each AI service is planned (the place for it is `backends.may_contact`).
 - No person has tested Windows and macOS.
 - A fine-tuned small model for FreeCAD is planned.
+
+## Projects from an older version
+
+The first test versions needed the `uv` program and the FreeCADMCP addon for the
+Claude account source. It needs neither now.
+
+- When you pick a project that an older CADprompt made, the files that came
+  from the template (`.mcp.json`, `CLAUDE.md`, two commands) are replaced by the
+  new ones, and the old ones stay beside them as `<name>.old`. This happens only
+  for a file that you never changed. A file that you changed is left alone, and
+  the panel tells you what to do.
+- CADprompt does not remove the FreeCADMCP addon. If you do not use it for other
+  things, remove it in the Addon Manager: as long as it is installed, it opens
+  its own port when FreeCAD starts.
 
 ## For developers
 

@@ -1,5 +1,5 @@
-"""The built-in engine: a local model or an Anthropic API key, without Claude Code,
-uvx or the MCP bridge.
+"""The built-in engine: a local model or an Anthropic API key, without Claude Code
+and without the bridge.
 
 LocalRun has the same signals as runner.ClaudeRun, so the panel can use
 either. The chat loop (local_agent) talks HTTP in a worker thread. FreeCAD is
@@ -11,25 +11,21 @@ middle of a project. Images are kept as paths in the project, never as data.
 """
 
 import base64
-import filecmp
 import json
 import os
 import re
-import shutil
-import threading
-import time
 import traceback
 
 import FreeCAD as App
 from PySide import QtCore, QtGui
 
-from . import backends, local_agent, local_prompt, local_tools, projects
+from . import approval, backends, local_agent, local_prompt, local_tools, main_thread, projects
 
 CHAT_FILE = "local-chat.json"
 MAX_STORED = 400                   # messages kept in the file; older requests are dropped whole
 STOPPED = {"role": "assistant", "content": "*Stopped.*"}
-CHANGING = ("run_python", "make_drawing")     # tools that can change the document
-BACKUPS = 10                       # copies kept of each model in model/.backup
+CHANGING = local_prompt.CHANGING   # tools that can change the document
+SOURCES = {"openai": "local", "anthropic": "apikey"}     # wire format -> the source, for approval.request
 NOT_SAVED = ("*The model file was not saved, because this request did not end well. Look at the "
              "model in FreeCAD: save it yourself if it is good, or undo the steps.*")
 MAX_IMAGES = local_agent.MAX_IMAGES
@@ -296,12 +292,7 @@ def expand(project, prompt):
 
 
 # ---- worker thread -----------------------------------------------------------
-class _Call:
-    """One tool request. The worker waits on `done`; the main thread fills `result`."""
-
-    def __init__(self, name, args):
-        self.name, self.args, self.result = name, args, ""
-        self.done = threading.Event()
+_Call = main_thread.Call     # one request of the worker to the main thread
 
 
 class _Worker(QtCore.QThread):
@@ -313,8 +304,8 @@ class _Worker(QtCore.QThread):
     def __init__(self, number, project, config, system, messages, text, shown, images):
         super().__init__()     # no parent: the thread must be able to outlive a closed panel
         self.number, self.ask_text, self.shown, self.images = number, text, shown, images
-        extra = {k: config[k] for k in ("max_steps", "max_tokens", "temperature", "timeout", "context_chars")
-                 if config.get(k) is not None}
+        extra = {k: config[k] for k in ("max_steps", "max_tokens", "temperature", "timeout", "connect_timeout",
+                                        "context_chars") if config.get(k) is not None}
         self.agent = local_agent.Agent(
             config.get("url", ""), config.get("model", ""), self._tool, key=config.get("key", ""),
             system=system, tools=local_prompt.TOOLS, messages=messages,
@@ -353,9 +344,8 @@ class _Worker(QtCore.QThread):
 
     def _ask_main(self, signal, call):
         signal.emit(self.number, call)
-        while not call.done.wait(0.05):
-            if self.agent.stopped():
-                raise local_agent.Stopped()
+        if not main_thread.wait(call, self.agent.stopped):
+            raise local_agent.Stopped()
         return call.result
 
 
@@ -394,6 +384,7 @@ class LocalRun(QtCore.QObject):
         self._ran = []            # (name, args, result) of the tools done since that copy
         self._doc = None          # name of the document this run works on
         self._backed = set()      # model files that have their backup copy for this request
+        self._source = "local"    # the source of this run, as approval.request wants it
         self._changed = False
         self._in_tool = False
         live = self._live = []    # the running worker, shared with the hook below
@@ -425,6 +416,7 @@ class LocalRun(QtCore.QObject):
         messages = _load(project)
         self._number += 1
         self._project, self._changed = project, False
+        self._source = SOURCES.get(config.get("kind") or "openai", "local")
         self._safe = messages + [local_agent.user_message(text, prompt, images)]
         self._ran, self._backed = [], set()
         worker = _Worker(self._number, project, config,
@@ -485,8 +477,6 @@ class LocalRun(QtCore.QObject):
         elif kind == "note":
             self.text.emit(f"*{data}*")
         elif kind == "tool_call":
-            if data["name"] in CHANGING:
-                self._changed = True
             self.tool.emit(data["name"], _tool_detail(data["args"]))
         elif kind == "tool_result" and data["problem"]:
             self.tool_error.emit(data["name"])
@@ -526,6 +516,10 @@ class LocalRun(QtCore.QObject):
                 # the user can click another document while the model thinks: go back to ours
                 App.setActiveDocument(self._doc)
         if name in CHANGING:
+            # the user decides, in this thread, before anything of the step happens
+            if not approval.request(name, args, self._source):
+                return approval.DECLINED
+            self._changed = True
             self._backup()
         result = local_tools.run_tool(self._project, name, args)
         if works_in_document:
@@ -606,29 +600,7 @@ def _document(name):
         return None
 
 
-def backup(project, path):
-    """Copy a model file to <project>/model/.backup/<name>-YYYYmmdd-HHMMSS.FCStd.
-
-    The newest BACKUPS copies of each model are kept. Returns the path of the
-    copy, or None when the file was not saved since the newest copy.
-    """
-    if not os.path.isfile(path):
-        return None
-    folder = os.path.join(project, "model", ".backup")
-    name = os.path.splitext(os.path.basename(path))[0]
-    ours = re.compile(re.escape(name) + r"-\d{8}-\d{6}\.FCStd")
-    os.makedirs(folder, exist_ok=True)
-    copies = sorted(f for f in os.listdir(folder) if ours.fullmatch(f))    # the names sort by time
-    if copies and filecmp.cmp(path, os.path.join(folder, copies[-1]), shallow=False):
-        return None
-    copy = "%s-%s.FCStd" % (name, time.strftime("%Y%m%d-%H%M%S"))
-    shutil.copy2(path, os.path.join(folder, copy))
-    for old in sorted(set(copies + [copy]))[:-BACKUPS]:
-        try:
-            os.remove(os.path.join(folder, old))
-        except OSError:
-            pass
-    return os.path.join(folder, copy)
+backup = projects.backup     # the bridge makes the same copies
 
 
 def _open_model(project):

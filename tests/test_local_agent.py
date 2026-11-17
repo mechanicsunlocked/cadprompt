@@ -6,6 +6,7 @@
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -1270,7 +1271,8 @@ class Guards(unittest.TestCase):
 
     FILES = ("test_backends.py", "test_local_tools.py", "test_local_engine.py", "test_panel.py",
              "test_panel_engine.py", "test_integration_gui.py", "test_drawing_headless.py",
-             "test_drawing_gui.py", "local_smoke.py")
+             "test_drawing_gui.py", "local_smoke.py", "test_migrate.py", "test_bridge_gui.py",
+             "claude_real_run.py")
 
     def test_freecad_tests_refuse_to_run_without_a_scratch_profile(self):
         env = {k: v for k, v in os.environ.items() if k != "FREECAD_USER_HOME"}
@@ -1280,6 +1282,92 @@ class Guards(unittest.TestCase):
                                   capture_output=True, text=True, timeout=60)
             self.assertEqual(done.returncode, 2, "%s: %s" % (name, (done.stdout + done.stderr)[-300:]))
             self.assertNotIn("Traceback", done.stdout + done.stderr, name)
+
+
+class ConnectTimeout(Base):
+    """Reaching the server has a short time limit of its own; the answer keeps the long one."""
+
+    @staticmethod
+    def hang(seen):
+        def create_connection(address, timeout=None, source_address=None, **kw):
+            seen.append(timeout)                 # a network that drops the packets: no answer, no refusal
+            time.sleep(min(timeout, 5))
+            raise TimeoutError("timed out")
+        return create_connection
+
+    def test_a_network_that_drops_the_packets_gives_its_error_soon(self):
+        seen = []
+        with mock.patch("socket.create_connection", self.hang(seen)):
+            a = self.agent(timeout=600, connect_timeout=0.3)
+            t0 = time.time()
+            with self.assertRaises(AgentError) as cm:
+                a.ask("x")
+        self.assertEqual(seen, [0.3])
+        self.assertLess(time.time() - t0, 3)
+        self.assertIn("does not answer", str(cm.exception))
+        self.assertIn("Start the server", str(cm.exception))
+        self.assertNotIn("600", str(cm.exception))           # not "did not answer within 600 seconds"
+        self.assertEqual(a.messages, [])
+
+    def test_the_connection_gets_15_seconds_by_default_and_the_answer_600(self):
+        seen = []
+        with mock.patch("socket.create_connection", self.hang(seen)), mock.patch("time.sleep"):
+            a = Agent(self.srv.url, "m", self.run_tool)
+            with self.assertRaises(AgentError):
+                a.ask("x")
+        self.assertEqual((seen, local_agent.CONNECT_TIMEOUT, a.timeout), ([15], 15, 600))
+
+    def test_a_short_time_limit_for_the_answer_is_not_made_longer(self):
+        seen = []
+        with mock.patch("socket.create_connection", self.hang(seen)), mock.patch("time.sleep"):
+            with self.assertRaises(AgentError):
+                self.agent(timeout=2).ask("x")
+        self.assertEqual(seen, [2])
+
+    def test_an_answer_can_take_longer_than_the_connection_may(self):
+        self.srv.add(slow(1.2, answer("late, and fine")))
+        a = self.agent(timeout=10, connect_timeout=0.3)
+        self.assertEqual(a.ask("x"), "late, and fine")
+
+    def test_anthropic_says_no_connection_not_slow_answer(self):
+        seen = []
+        with mock.patch("socket.create_connection", self.hang(seen)):
+            a = Agent("http://127.0.0.1:9", "claude-fake-1", self.run_tool, key="k", kind="anthropic",
+                      timeout=600, connect_timeout=0.2)
+            with self.assertRaises(AgentError) as cm:
+                a.ask("x")
+        self.assertEqual(seen, [0.2])
+        self.assertIn("No connection to Anthropic", str(cm.exception))
+        self.assertNotIn("600", str(cm.exception))
+
+
+class BrokenLine(Base):
+    @unittest.skipUnless(hasattr(signal, "SIGPIPE"), "this system has no SIGPIPE")
+    def test_a_write_to_a_closed_connection_is_an_error_not_the_end_of_the_program(self):
+        # FreeCAD does not ignore SIGPIPE as Python does. With the signal as FreeCAD has it, a
+        # request written to a connection that is closed (Stop, or a server that cut the line)
+        # would end the whole program, and this test with it. The engine works in its own thread.
+        before = signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        got = []
+
+        def worker():
+            conn = local_agent.connect(self.srv.url, 10)
+            conn.sock.shutdown(socket.SHUT_RDWR)             # what Agent.stop() does from the other thread
+            try:
+                conn.request("POST", "/v1/chat/completions", b"x" * 100000, {"Content-Type": "application/json"})
+                got.append("sent")
+            except OSError as exc:
+                got.append(exc)
+            finally:
+                conn.close()
+        try:
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join(10)
+        finally:
+            signal.signal(signal.SIGPIPE, before)
+        self.assertEqual(len(got), 1)
+        self.assertIsInstance(got[0], OSError)
 
 
 class Continue(Base):

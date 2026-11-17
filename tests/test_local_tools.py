@@ -671,6 +671,16 @@ class Dispatch(unittest.TestCase):
         out = T.make_drawing("/p")
         self.assertTrue(out.startswith("ERROR: the drawing function is not available"), out)
 
+    def test_get_view_without_the_window_says_so(self):
+        # freecadcmd has no 3D view. The picture itself is tested in test_bridge_gui.py.
+        with self.assertRaises(T.NoView) as cm:
+            T.get_view()
+        self.assertIn("without its window", str(cm.exception))
+        self.assertIn("get_document_state", str(cm.exception))
+
+    def test_get_view_is_not_a_tool_of_the_built_in_engine(self):
+        self.assertTrue(T.run_tool("/p", "get_view", {}).startswith("ERROR: there is no tool get_view"))
+
 
 suite = unittest.TestSuite()
 for case in (RunPython, Keys, State, ReadProjectFile, Dispatch):

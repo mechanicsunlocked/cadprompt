@@ -121,16 +121,19 @@ For the unpacked `.7z` archive, in PowerShell:
 |---|---|---|
 | `hoischen/test_layout` | python | Only Python. The rules for dimension lines. |
 | `test_local_agent` | python | Only Python. The agent loop against scripted servers, in the OpenAI format and in the Anthropic format, with images. |
+| `test_mcp_server` | python | Only Python. The server that Claude Code talks to: the protocol, the token, and what it refuses (a web page, a wrong address, a large request). |
 | `test_time_limit` | python | Only Python. The time limit that stops code which does not end. |
 | `test_workbench` | python | Starts `freecadcmd` and `freecad` itself (found the same way as above). FreeCAD loads a copy of the addon from a new profile. |
 | `test_backends` | freecadcmd | The AI sources, what the built-in engine gets for each, and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
+| `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays. `old_template.json` holds the old files. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |
+| `test_bridge_gui` | freecad-gui | The bridge for Claude Code in a real FreeCAD: tool calls from other threads run in the main thread, the approval question, start and stop of the server. Client threads play Claude Code. |
 | `test_drawing_gui` | freecad-gui | Drawings with pages, views and PDF files. |
 | `test_integration_gui` | freecad-gui | The whole addon. A scripted server plays the model. |
 | `test_local_engine` | freecad-gui | The built-in engine with both formats, images, and the gate for outgoing requests. Scripted servers play the model. |
-| `test_panel` | freecad-gui | The panel and the settings dialog. A pretend `claude` and a stub engine. |
+| `test_panel` | freecad-gui | The panel and the settings dialog. A stub engine, and a pretend `claude` that calls the real bridge as Claude Code does. |
 | `test_panel_engine` | freecad-gui | The panel with the real engine, for the local model and for the API key. Scripted servers play the model and Anthropic. |
 
 Not run by `run_all.py`:
@@ -140,6 +143,10 @@ Not run by `run_all.py`:
   these variables (all names with `_REAL_`, and `CADPROMPT_SMOKE_*`) before it
   starts a test, so it never calls a real model. It also removes
   `ANTHROPIC_*` and `OPENAI_API_KEY`, so no key of your computer gets into a test.
+- `claude_real_run.py`. It sends one message to the real Claude Code through
+  the real panel and checks that the tool call arrives in FreeCAD. It uses your
+  Claude account, so you switch it on yourself with `PANEL_REAL_CLAUDE=1` (the
+  file says how). Run it after an update of Claude Code.
 - `drawing_run.py`. It runs the two drawing tests and makes PNG pictures of the
   drawings to look at. Use it when you work on drawings.
 - The other files are helpers for the tests (fake servers, pretend `claude`,

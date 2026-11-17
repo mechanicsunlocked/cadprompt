@@ -7,13 +7,15 @@ real setting is touched:
     FREECAD_USER_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen timeout 300 freecad tests/test_panel.py
 
 Nothing real is called: the local engine is panel_stub_engine.py, `claude` is
-panel_fake_claude.py, the bridge is a two-line stand-in and every key is made up.
+panel_fake_claude.py and every key is made up. The bridge is a stand-in that
+counts, until the last part: there the pretend claude calls the real one.
 """
 
 import faulthandler
 import http.server
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -127,7 +129,7 @@ def main():
     home = os.environ["FREECAD_USER_HOME"]
     say("FreeCAD user data: " + App.getUserAppDataDir())
 
-    # ---- a pretend claude, a pretend uvx, the stub engine, a pretend bridge ----
+    # ---- a pretend claude, the stub engine, a pretend bridge ----
     # In a folder with a space and a letter that is not ASCII, as in C:\\Users\\Zoë Müller.
     bindir = os.path.join(home, "bin of Zoë")
     try:
@@ -148,8 +150,6 @@ def main():
         with open(fake_claude, "w", encoding="utf-8") as f:
             f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (python, script))
         os.chmod(fake_claude, 0o755)
-    fake_uvx = os.path.join(bindir, "uvx")
-    open(fake_uvx, "w").close()
     # What the start script of a FreeCAD bundle (AppImage, macOS app) leaves in the
     # environment. Nothing of it may reach a program that the addon starts.
     bundle = os.path.join(home, "pretend bundle")
@@ -186,12 +186,13 @@ def main():
 
     bridge_calls = []
     bridge_ok = [True]
+    real_ensure = bridge.ensure
 
-    def fake_ensure():
-        bridge_calls.append(1)
+    def fake_ensure(project="", source="account", note=None):
+        bridge_calls.append((project, source))
         if not bridge_ok[0]:
             raise RuntimeError("the test turned the bridge off")
-        return "test-token", "bridge running"
+        return "http://127.0.0.1:1/mcp", "test-token"
     bridge.ensure = fake_ensure
     asked = []
     QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: asked.append(a) or QtWidgets.QMessageBox.No)
@@ -199,7 +200,6 @@ def main():
     p = paths.params()
     p.SetString("ProjectsDir", os.path.join(home, "projects"))
     p.SetString("claudePath", fake_claude)
-    p.SetString("uvxPath", fake_uvx)
     project = projects.create("Test part")
     other = projects.create("Other part")
     os.utime(project, None)      # the newest project is the one the panel opens
@@ -231,10 +231,12 @@ def main():
               (see(dlg.apikey_box), see(dlg.local_box), see(dlg.custom_box)) ==
               (b == "apikey", b == "local", b == "custom"),
               str((see(dlg.apikey_box), see(dlg.local_box), see(dlg.custom_box))))
-        claude_fields = [see(w) for w in (dlg.web, dlg.claude, dlg.uvx)]
+        claude_fields = [see(w) for w in (dlg.web, dlg.claude)]
         code = b in ("account", "custom")        # the API key and the local model need no Claude Code
-        check(f"{b}: web toggle, claude and uvx program " + ("shown" if code else "hidden"),
-              claude_fields == [code] * 3, str(claude_fields))
+        check(f"{b}: web toggle and claude program " + ("shown" if code else "hidden"),
+              claude_fields == [code] * 2, str(claude_fields))
+        check(f"{b}: no field for uvx: Claude Code needs no other program",
+              not hasattr(dlg, "uvx") and not [w for w in dlg.findChildren(QtWidgets.QLabel) if "uvx" in w.text()])
         check(f"{b}: Claude Code model " + ("shown" if b == "account" else "hidden"),
               see(dlg.model_override) == (b == "account"))
         check(f"{b}: projects folder is always there", see(dlg.projects))
@@ -284,9 +286,8 @@ def main():
     check("OK saves the model for the API key", p.GetString("ApiModel") == "claude-haiku-5-5"
           and backends.engine_config("apikey")["model"] == "claude-haiku-5-5")
     check("OK saves the old fields too", (p.GetBool("AllowWeb"), p.GetString("ModelOverride"),
-          p.GetString("BaseUrl"), p.GetString("Model"), p.GetString("AuthToken"), p.GetString("claudePath"),
-          p.GetString("uvxPath")) == (True, "sonnet", "http://localhost:11434", "endpoint-model",
-                                      "endpoint-token", fake_claude, fake_uvx))
+          p.GetString("BaseUrl"), p.GetString("Model"), p.GetString("AuthToken"), p.GetString("claudePath"))
+          == (True, "sonnet", "http://localhost:11434", "endpoint-model", "endpoint-token", fake_claude))
     key_file = os.path.join(App.getUserAppDataDir(), "cadprompt_api_key")
     check("OK saves both keys in their own files" + (", mode 0600" if os.name == "posix" else ""),
           backends.api_key() == "sk-ant-made-up-1" and backends.local_key() == "made-up-local-key"
@@ -913,14 +914,15 @@ def main():
     check("account: send() goes to ClaudeRun.start(claude, project, text, session, env)",
           args is not None and args[:4] == (fake_claude, project, "make a flange", "claude-session-keep"), str(args))
     check("account: LocalRun is not used", not [c for c in stub.calls if c[0] == "start"])
-    check("account: the bridge token and FreeCAD's path are handed over",
-          args[4].get("FREECAD_MCP_TOKEN") == "test-token" and "CADPROMPT_FREECADCMD" in args[4]
-          and args[4].get("FREECAD_MCP_VERSION") == paths.FREECAD_MCP_VERSION, str(args[4]))
+    check("account: the address and the token of the bridge are handed over, and nothing else",
+          args[4] == {"CADPROMPT_MCP_URL": "http://127.0.0.1:1/mcp", "CADPROMPT_MCP_TOKEN": "test-token"}, str(args[4]))
+    check("account: the bridge is asked for this project and this source, right before Claude Code starts",
+          bridge_calls[-1] == (project, "account"), str(bridge_calls[-1:]))
     check("account: ANTHROPIC_API_KEY is set in os.environ for this test",
           os.environ.get("ANTHROPIC_API_KEY") == "shell-key-must-not-leak"
           and QtCore.QProcessEnvironment.systemEnvironment().value("ANTHROPIC_API_KEY") == "shell-key-must-not-leak")
     check("account: the process environment has ANTHROPIC_API_KEY, _AUTH_TOKEN and _BASE_URL removed",
-          not [k for k in shell if pe.contains(k)] and pe.value("FREECAD_MCP_TOKEN") == "test-token",
+          not [k for k in shell if pe.contains(k)] and pe.value("CADPROMPT_MCP_TOKEN") == "test-token",
           str([k for k in shell if pe.contains(k)]))
     check("account: the user's other variables are still there",
           pe.value("HOME") == (os.environ.get("HOME") or "") and pe.value("PANEL_BUNDLE_OTHER") == "kept"
@@ -943,6 +945,8 @@ def main():
           and pe.value("ANTHROPIC_AUTH_TOKEN") == "endpoint-token" and pe.value("ANTHROPIC_MODEL") == "endpoint-model"
           and not pe.contains("ANTHROPIC_API_KEY"))
     check("custom: the old backend_env() still answers", runner.backend_env().get("ANTHROPIC_MODEL") == "endpoint-model")
+    check("custom: the bridge is asked with the source 'custom'", bridge_calls[-1] == (project, "custom"),
+          str(bridge_calls[-1:]))
 
     # the Claude Code result handling is as before
     p.SetString("Backend", "account")
@@ -951,11 +955,11 @@ def main():
     pan.send("make a flange")
     check("account: while it works: 'Claude is working…' and Stop",
           pan.status.text() == "Claude is working…" and pan.send_btn.text() == "Stop")
-    pan.run.tool.emit("execute_code", "doc.recompute()")
-    pan.run.tool_error.emit("execute_code")
+    pan.run.tool.emit("run_python", "doc.recompute()")
+    pan.run.tool_error.emit("run_python")
     check("account: tool status and tool error name Claude",
-          pan.status.text() == "Claude is working… (execute_code)"
-          and pan.entries[-1] == ("error", "`execute_code` failed, Claude is looking at why"), str(pan.entries[-1]))
+          pan.status.text() == "Claude is working… (run_python)"
+          and pan.entries[-1] == ("error", "`run_python` failed, Claude is looking at why"), str(pan.entries[-1]))
     pan.run.finished.emit({"is_error": False, "result": "ok", "session_id": "claude-session-new"})
     check("account: the session id of the result is stored, as before",
           projects.get_session(project) == "claude-session-new" and pan.send_btn.text() == "Send")
@@ -992,8 +996,57 @@ def main():
     spin(300)
 
     # =====================================================================
-    say("\n-- panel: the real ClaudeRun with the pretend claude program --")
+    say("\n-- panel: a project that an older CADprompt made --")
+    with open(os.path.join(HERE, "old_template.json"), encoding="utf-8") as f:
+        old_files = json.load(f)["before"]
+    aged = projects.create("Aged part")
+    for rel in (".mcp.json", "CLAUDE.md"):
+        with open(os.path.join(aged, rel), "w", encoding="utf-8", newline="") as f:
+            f.write(old_files[rel])
+    p.SetString("Backend", "account")
+    pan._select("aged-part", open_model=False)
+    with open(os.path.join(aged, ".mcp.json"), encoding="utf-8") as f:
+        now = f.read()
+    check("a project with the old files: picking it brings .mcp.json and CLAUDE.md up to date, the old ones are kept",
+          "CADPROMPT_MCP_URL" in now and "uvx" not in now and os.path.isfile(os.path.join(aged, ".mcp.json.old"))
+          and os.path.isfile(os.path.join(aged, "CLAUDE.md.old")) and not kinds(pan, "setup-note"),
+          now[:200] + str(kinds(pan, "setup-note")))
+    edited = projects.create("Edited part")
+    mine = old_files["CLAUDE.md"] + "\n## My shop\n\nOnly M6 and M8 screws.\n"
+    with open(os.path.join(edited, "CLAUDE.md"), "w", encoding="utf-8", newline="") as f:
+        f.write(mine)
+    pan._select("edited-part", open_model=False)
+    notes = kinds(pan, "setup-note")
+    with open(os.path.join(edited, "CLAUDE.md"), encoding="utf-8", newline="") as f:
+        check("a CLAUDE.md that the user changed is left alone", f.read() == mine
+              and not os.path.exists(os.path.join(edited, "CLAUDE.md.old")))
+    check("... and the panel says one time, in plain words, that it names old tools",
+          len(notes) == 1 and "`CLAUDE.md`" in notes[0] and "old tools" in notes[0] and "`run_python`" in notes[0]
+          and pan.entries[0] == ("note", "Project **edited-part**."), str(notes))
+    pan.check_setup()
+    spin(300)
+    check("the note is still there after the next setup check, one time",
+          kinds(pan, "setup-note") == notes and "names old tools" in pan.view.toPlainText().replace("\n", " "),
+          str(kinds(pan, "setup-note")))
+    p.SetString("Backend", "local")
+    pan._select("edited-part", open_model=False)
+    pan.check_setup()
+    check("with a local model the note is not shown: the built-in engine does not read CLAUDE.md",
+          not kinds(pan, "setup-note"), str(kinds(pan, "setup-note")))
+    p.SetString("Backend", "account")
+    pan._select("test-part", open_model=False)
+    check("back in a project of today: no note", not kinds(pan, "setup-note") and pan.project == project)
+    pan.check_setup()
+    spin(300)
+
+    # =====================================================================
+    say("\n-- panel: the real ClaudeRun with the pretend claude program and the real bridge --")
     runner.ClaudeRun.start = real_start
+    bridge.ensure = real_ensure
+    fresh = new_panel(400)                       # a panel with the Claude account, set up and signed in
+    check("the bridge does not listen before the first message goes to Claude Code: not when the panel "
+          "opens, not after the setup check", not bridge.running() and fresh.claude == fake_claude
+          and not setup_errors(fresh), str(setup_errors(fresh)))
 
     def run_fake(backend, text):
         p.SetString("Backend", backend)
@@ -1016,15 +1069,24 @@ def main():
           and "PYTHONHOME" not in rec["env"] and not [d for d in rec["path"] if d.startswith(bundle)]
           and rec["env"].get("PANEL_BUNDLE_OTHER") == "kept",
           str({k: v for k, v in rec["env"].items() if k.startswith(("PYTHON", "PANEL_"))}) + str(rec["path"][:3]))
-    check("account: arguments as before (stream-json, model, web tools)",
+    freecad_tools = ["mcp__freecad__run_python", "mcp__freecad__get_document_state", "mcp__freecad__make_drawing",
+                     "mcp__freecad__get_view"]
+    check("account: arguments: stream-json, the model, and the tools that need no question of Claude Code: "
+          "the four FreeCAD tools by name, and the web tools because they are on in Settings",
           rec["argv"] == ["-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
-                          "--allowedTools", "WebSearch", "WebFetch"], str(rec["argv"]))
+                          "--allowedTools"] + freecad_tools + ["WebSearch", "WebFetch"], str(rec["argv"]))
     check("account: the started program has no ANTHROPIC_API_KEY, _AUTH_TOKEN, _BASE_URL",
-          not [k for k in shell if k in rec["env"]] and rec["env"].get("FREECAD_MCP_TOKEN") == "test-token",
-          str(rec["env"]))
+          not [k for k in shell if k in rec["env"]], str(rec["env"]))
+    url1, token1 = rec["env"].get("CADPROMPT_MCP_URL", ""), rec["env"].get("CADPROMPT_MCP_TOKEN", "")
+    check("account: the started program has the address and the token of the bridge in its environment",
+          re.fullmatch(r"http://127\.0\.0\.1:\d+/mcp", url1) is not None and len(token1) >= 43, f"{url1} {len(token1)}")
+    check("account: nothing of the old bridge is handed over, and no uvx program is on this computer",
+          not [k for k in rec["env"] if k.startswith("FREECAD_MCP") or k == "CADPROMPT_FREECADCMD"]
+          and shutil.which("uvx", path=bindir) is None and paths.params().GetString("uvxPath", "") == "", str(rec["env"]))
+    check("account: the bridge listens since that message, and stays for the next one", bridge.running())
     check("account: answer, tool line and session id arrive in the panel",
           ("claude", "fake answer to: make a bracket") in pan.entries
-          and ("tool", "`execute_code` doc.recompute()") in pan.entries
+          and ("tool", "`run_python` doc.recompute()") in pan.entries
           and projects.get_session(project) == "fake-session-1", str(pan.entries[-3:]))
     n = len(claude_calls())
     p.SetString("Backend", "apikey")
@@ -1034,11 +1096,38 @@ def main():
     check("apikey: no program is started, the saved key is in no program's environment",
           got == [] and len(claude_calls()) == n and projects.get_session(project) == "fake-session-1"
           and "sk-ant-made-up-3" not in json.dumps(claude_calls()), str(claude_calls()[n:]))
+    check("apikey: the bridge is closed when the source is not Claude Code any more", not bridge.running())
     rec = run_fake("custom", "make a knob")
     check("custom: the started program has the endpoint and no API key, and no Claude model argument",
           rec["env"].get("ANTHROPIC_BASE_URL") == "http://localhost:11434" and "ANTHROPIC_API_KEY" not in rec["env"]
           and "--model" not in rec["argv"], str(rec))
+    check("custom: Claude Code on another endpoint gets the bridge too, with a new token",
+          bridge.running() and len(rec["env"].get("CADPROMPT_MCP_TOKEN", "")) >= 43
+          and rec["env"].get("CADPROMPT_MCP_TOKEN") != token1, str(rec["env"]))
     p.SetBool("AllowWeb", False)
+
+    # the pretend claude does what Claude Code does: it reads .mcp.json and calls the FreeCAD tools
+    for d in list(App.listDocuments()):
+        App.closeDocument(d)
+    rec = run_fake("account", "mcp: box = doc.addObject('Part::Box', 'FromClaude')\nbox.Length = 20")
+    mcp = rec.get("mcp") or {}
+    made = App.ActiveDocument.getObject("FromClaude") if App.ActiveDocument is not None else None
+    check("during the run the started program reaches the bridge with the project's .mcp.json and its environment",
+          mcp.get("type") == "http" and mcp.get("url") == rec["env"].get("CADPROMPT_MCP_URL")
+          and (mcp.get("initialize") or [0])[0] == 200 and mcp.get("initialized") == [202, None]
+          and "error" not in mcp, str(mcp)[:600])
+    check("... it gets the four tools", mcp.get("tools") == ["run_python", "get_document_state", "make_drawing", "get_view"],
+          str(mcp.get("tools")))
+    call_status, call_body = mcp.get("call") or (0, {})
+    check("... and its run_python call makes the object in this FreeCAD while the panel waits",
+          call_status == 200 and made is not None and abs(made.Length.Value - 20) < 1e-9
+          and "+ new FromClaude" in call_body["result"]["content"][0]["text"]
+          and call_body["result"]["isError"] is False, str(mcp.get("call"))[:400])
+    check("... a request without the token is refused", mcp.get("no_token") == 401, str(mcp.get("no_token")))
+    check("with the web off in Settings only the four FreeCAD tools are allowed: no web tool, no Bash, no wildcard",
+          rec["argv"][-5:] == ["--allowedTools"] + freecad_tools, str(rec["argv"]))
+    check("the panel shows the tool call and the answer as before",
+          ("tool", "`run_python` doc.recompute()") in pan.entries and pan.send_btn.text() == "Send")
 
     # a session id that Claude Code does not have any more (transcript deleted, other computer)
     projects.set_session(project, "gone-session")
@@ -1107,6 +1196,63 @@ def main():
     check("back on local: the stub engine gets the message, claude is not started",
           stub.calls[-1][:3] == ("start", project, "back to local") and len(claude_calls()) == n
           and projects.get_session(project) == "fake-session-1")
+
+    # the life of the bridge: only while Claude Code can need it
+    say("\n-- panel: when the bridge listens --")
+    port_of = lambda url: int(re.search(r":(\d+)/", url).group(1))
+
+    def listens(port):
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            return True
+        except OSError:
+            return False
+
+    rec = run_fake("account", "make a pin")
+    url2 = rec["env"].get("CADPROMPT_MCP_URL", "")
+    check("(setup) a message to Claude Code: the bridge listens", bridge.running() and listens(port_of(url2)), url2)
+    settings(lambda d: d.local.click())
+    check("the source changes to the local model in Settings: the bridge stops and its port is closed",
+          not bridge.running() and not listens(port_of(url2)))
+    settings(lambda d: d.account.click())
+    spin(300)
+    check("back on the Claude account: still closed until the next message", not bridge.running())
+    rec = run_fake("account", "make a pin again")
+    url3, token3 = rec["env"].get("CADPROMPT_MCP_URL", ""), rec["env"].get("CADPROMPT_MCP_TOKEN", "")
+    check("the next message starts it again, with a new token",
+          bridge.running() and listens(port_of(url3)) and len(token3) >= 43 and token3 not in (token1, ""), url3)
+    pan.show()
+    spin(100)
+    check("(setup) the panel is on screen, the bridge still listens", pan.isVisible() and bridge.running())
+    pan.hide()
+    spin(100)
+    check("the panel is closed: the bridge stops", not bridge.running() and not listens(port_of(url3)))
+    rec = run_fake("account", "mcp: closed = 1")
+    check("a message from a closed panel still works, and the bridge stops again when Claude Code has ended",
+          ((rec.get("mcp") or {}).get("call") or [0])[0] == 200 and not bridge.running(), str(rec.get("mcp"))[:300])
+    pan.show()
+    spin(100)
+    n = len(claude_calls())
+    pan.send("slow: make a housing")
+    wait_for(lambda: [c for c in claude_calls()[n:] if c["stdin"].startswith("slow")], 15)
+    check("(setup) Claude Code works, the bridge listens", pan.send_btn.text() == "Stop" and bridge.running())
+    pan.hide()
+    spin(100)
+    check("the panel is closed while Claude Code works: the bridge stays for that run", bridge.running())
+    pan.send_btn.click()                     # Stop
+    wait_for(lambda: pan.send_btn.text() == "Send", 15)
+    spin(200)
+    check("... and stops when the run has ended", not bridge.running())
+    pan.show()
+    spin(100)
+    bridge.ensure(project, "account")
+    for one in panels:
+        one.deleteLater()
+    del panels[:]
+    QtWidgets.QApplication.sendPostedEvents(None, int(QtCore.QEvent.DeferredDelete))
+    spin(200)
+    check("the panel is deleted: the bridge stops", not bridge.running())
 
     check("no exception in any Qt slot", not SLOT_ERRORS, "\n".join(SLOT_ERRORS))
     for pan in panels:

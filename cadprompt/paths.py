@@ -1,18 +1,15 @@
 """Where things are, on Linux, macOS and Windows.
 
 FreeCAD started from a desktop icon (above all on macOS) does not get the
-shell's PATH, so claude and uvx are also looked for where their own
-installers put them.
+shell's PATH, so claude is also looked for where its own installer puts it.
 """
 
 import os
-import shlex
 import shutil
 import sys
 
 import FreeCAD as App
 
-FREECAD_MCP_VERSION = "0.1.28"  # addon and MCP server must match (lib/common.sh pins the same)
 WIN = sys.platform.startswith("win")
 HOME = os.path.expanduser("~")
 
@@ -26,8 +23,7 @@ def params():
 def _candidates(name):
     exe = [name + ".exe", name + ".cmd", name] if WIN else [name]
     dirs = [
-        os.path.join(HOME, ".local", "bin"),          # claude and uv native installers
-        os.path.join(HOME, ".cargo", "bin"),          # older uv installs
+        os.path.join(HOME, ".local", "bin"),          # claude's native installer
         "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
         os.path.join(HOME, ".local", "share", "mise", "shims"),
     ]
@@ -42,7 +38,7 @@ def _candidates(name):
 
 
 def find_tool(name):
-    """Absolute path of claude / uvx, or None. A path set in the preferences wins."""
+    """Absolute path of a program (claude), or None. A path set in the preferences wins."""
     custom = params().GetString(name + "Path", "")
     if custom and os.path.isfile(custom):
         return custom
@@ -53,19 +49,6 @@ def find_tool(name):
         if os.path.isfile(c):
             return c
     return None
-
-
-def freecadcmd_string():
-    """Headless FreeCAD as one shlex-quoted string (freecad-mcp's --freecadcmd).
-
-    Forward slashes on Windows, because freecad-mcp splits it POSIX-style.
-    """
-    bindir = os.path.join(App.getHomePath(), "bin")
-    for n in ("FreeCADCmd.exe", "freecadcmd.exe", "FreeCADCmd", "freecadcmd"):
-        p = os.path.join(bindir, n)
-        if os.path.isfile(p):
-            return shlex.quote(os.path.normpath(p).replace("\\", "/"))
-    return shutil.which("freecadcmd") or "FreeCADCmd"
 
 
 def projects_root():

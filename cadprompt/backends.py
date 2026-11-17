@@ -9,11 +9,12 @@ Four sources, chosen in Settings (parameter "Backend"):
 No Qt in here, so the settings and the tests can use it anywhere.
 """
 
+import http.client
 import json
 import os
 import stat
+import urllib.error
 import urllib.parse
-import urllib.request
 
 import FreeCAD as App
 
@@ -223,33 +224,40 @@ def claude_env():
 
 # ---- asking a service for its models ---------------------------------------
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """The key goes only to the address the user typed, never to a redirect target."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def list_models(url, key="", timeout=5, kind="openai"):
+def list_models(url, key="", timeout=5, kind="openai", connect_timeout=None):
     """Model ids from GET <url>/models (kind "anthropic": <url>/v1/models).
 
-    Raises OSError or ValueError. The caller asks may_contact() first.
+    `timeout` is for the answer; reaching the server has its own short limit
+    (local_agent.connect). Raises OSError (urllib.error.HTTPError for an
+    answer that is not 200) or ValueError. The caller asks may_contact() first.
     """
     url = (url or "").strip().rstrip("/")
     if not url.lower().startswith(("http://", "https://")):
         raise ValueError("the server address must start with http:// or https://")
     if kind == "anthropic":
-        req = urllib.request.Request(url + "/v1/models?limit=100", headers={
-            "Accept": "application/json", "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION})
+        address = url + "/v1/models?limit=100"
+        headers = {"Accept": "application/json", "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
     else:
-        req = urllib.request.Request(url + "/models", headers={"Accept": "application/json"})
+        address = url + "/models"
+        headers = {"Accept": "application/json"}
         if key:
-            req.add_header("Authorization", "Bearer " + key)
-    # No proxy, like the engine: urllib would hand the request to the proxy of the system
-    # settings, and the key of an http server would go there in clear text.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-    with opener.open(req, timeout=timeout) as r:
-        data = json.loads(r.read(4_000_000).decode("utf-8", "replace"))
+            headers["Authorization"] = "Bearer " + key
+    # The same way as the engine: no proxy (the key of an http server would go to the proxy
+    # in clear text) and no redirect (the key goes only to the address the user typed).
+    from . import local_agent        # here, not at the top: the panel loads this module when it opens
+    u = urllib.parse.urlsplit(address)
+    conn = local_agent.connect(address, timeout, connect_timeout)
+    try:
+        conn.request("GET", (u.path or "/") + ("?" + u.query if u.query else ""), headers=headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise urllib.error.HTTPError(address, resp.status, resp.reason, resp.headers, None)
+        raw = resp.read(4_000_000)
+    except http.client.HTTPException as exc:
+        raise OSError("the answer of the server is not HTTP: %s" % exc.__class__.__name__)
+    finally:
+        conn.close()
+    data = json.loads(raw.decode("utf-8", "replace"))
     rows = data.get("data", data.get("models")) if isinstance(data, dict) else data
     if not isinstance(rows, list):
         raise ValueError("the server did not answer with a list of models")

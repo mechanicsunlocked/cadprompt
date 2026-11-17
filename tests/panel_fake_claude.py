@@ -7,22 +7,80 @@ file named in PANEL_FAKE_CLAUDE_LOG, then answers like Claude Code would:
 A session id that starts with "gone" is one it does not have any more.
 A prompt that starts with "slow" is one it works on for a minute: it writes
 its process id to the log first, so the test can see that Stop ends it.
+A prompt that starts with "mcp:" makes it do what Claude Code does with the
+project's .mcp.json: it reads the file, fills in the variables, and calls the
+FreeCAD tools at that address; the rest of the prompt is the code for
+run_python. What the server answered goes into the log as "mcp".
 """
 
+import http.client
 import json
 import os
+import re
 import sys
 import time
 
 args = sys.argv[1:]
 auth = args[:2] == ["auth", "status"]
 keep = ("ANTHROPIC_", "FREECAD_MCP_", "CADPROMPT_", "PYTHON", "PANEL_BUNDLE_")
+
+
+def expand(text):
+    """${NAME} and ${NAME:-default} from the environment, as Claude Code fills them in."""
+    def value(m):
+        name, _, default = m.group(1).partition(":-")
+        return os.environ.get(name, default)
+    return re.sub(r"\$\{([^}]+)\}", value, text)
+
+
+def post(url, headers, message):
+    """(HTTP status, parsed answer) of one JSON-RPC message sent to the MCP server."""
+    host, path = re.fullmatch(r"http://([^/]+)(/.*)", url).groups()
+    conn = http.client.HTTPConnection(host, timeout=30)
+    try:
+        conn.request("POST", path, json.dumps(message).encode("utf-8"),
+                     dict(headers, **{"Content-Type": "application/json",
+                                      "Accept": "application/json, text/event-stream"}))
+        resp = conn.getresponse()
+        text = resp.read().decode("utf-8")
+        try:
+            return resp.status, json.loads(text) if text else None
+        except ValueError:
+            return resp.status, text
+    finally:
+        conn.close()
+
+
+def use_tools(code):
+    """What Claude Code does at its start and for one tool call, as a dict for the log."""
+    out = {}
+    try:
+        with open(".mcp.json", encoding="utf-8") as f:
+            server = json.load(f)["mcpServers"]["freecad"]
+        url = expand(server["url"])
+        headers = {k: expand(v) for k, v in server.get("headers", {}).items()}
+        out["type"], out["url"] = server.get("type"), url
+        out["initialize"] = post(url, headers, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "pretend-claude", "version": "0"}}})
+        out["initialized"] = post(url, headers, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        status, body = post(url, headers, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        out["tools"] = [t["name"] for t in body["result"]["tools"]] if status == 200 else [status, body]
+        out["call"] = post(url, headers, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                          "params": {"name": "run_python", "arguments": {"code": code}}})
+        out["no_token"] = post(url, {}, {"jsonrpc": "2.0", "id": 4, "method": "tools/list"})[0]
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 if not auth:                     # the prompt is UTF-8, whatever the encoding of this system is
     prompt = sys.stdin.buffer.read().decode("utf-8", "replace")
 record = {"argv": args, "cwd": os.getcwd(), "stdin": "" if auth else prompt, "pid": os.getpid(),
           "env": {k: v for k, v in os.environ.items() if k.startswith(keep)},
           "path": os.environ.get("PATH", "").split(os.pathsep),
           "path0": os.environ.get("PATH", "").split(os.pathsep)[0]}
+if record["stdin"].startswith("mcp:"):
+    record["mcp"] = use_tools(record["stdin"][4:].strip())
 with open(os.environ["PANEL_FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps(record) + "\n")
 if record["stdin"].startswith("slow"):
@@ -41,7 +99,7 @@ else:
     for event in (
         {"type": "assistant", "message": {"content": [
             {"type": "text", "text": "fake answer to: " + record["stdin"]},
-            {"type": "tool_use", "id": "t1", "name": "mcp__freecad__execute_code",
+            {"type": "tool_use", "id": "t1", "name": "mcp__freecad__run_python",
              "input": {"code": "doc.recompute()"}}]}},
         {"type": "result", "is_error": False, "result": "done", "session_id": "fake-session-1"},
     ):
