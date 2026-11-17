@@ -4,10 +4,12 @@
     python3 tests/test_local_agent.py
 """
 
+import base64
 import json
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,6 +23,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 from utf8_output import utf8_output            # noqa: E402
+import fake_proxy                              # noqa: E402
 
 utf8_output()
 
@@ -906,18 +909,18 @@ class AnthropicErrors(AnthropicBase):
         self.assertIn("No connection to Anthropic", str(cm.exception))
         return str(cm.exception)
 
-    def test_no_connection_on_a_network_with_a_proxy_says_that_no_proxy_is_used(self):
+    def test_no_connection_on_a_network_with_a_proxy_says_that_the_two_ways_were_tried(self):
         https = "https://127.0.0.1:%d" % self.dead_port()
         proxy = {"https_proxy": "http://127.0.0.1:%d" % self.dead_port()}
         self.assertTrue(self.no_connection(https, proxy).endswith(local_agent.PROXY))
-        self.assertIn("does not use a proxy", local_agent.PROXY)
+        self.assertIn("tried the proxy and then a direct connection", local_agent.PROXY)
         # no proxy in the settings, an exception for this address, a local http server: no such hint
         self.assertNotIn("proxy", self.no_connection(https, {}))
         self.assertNotIn("proxy", self.no_connection(https, dict(proxy, no_proxy="127.0.0.1")))
         http = https.replace("https", "http")
         self.assertNotIn("proxy", self.no_connection(http, {"http_proxy": proxy["https_proxy"]}))
 
-    def test_the_engine_itself_never_goes_through_a_proxy(self):
+    def test_an_http_server_is_never_reached_through_a_proxy(self):
         proxy = socket.socket()                 # it would be seen here: a connection waits in the queue
         proxy.bind(("127.0.0.1", 0))
         proxy.listen(5)
@@ -1339,6 +1342,99 @@ class ConnectTimeout(Base):
         self.assertEqual(seen, [0.2])
         self.assertIn("No connection to Anthropic", str(cm.exception))
         self.assertNotIn("600", str(cm.exception))
+
+
+class ThroughAProxy(unittest.TestCase):
+    """local_agent.connect(), the one way out for the engine and for Find models, on a computer
+    whose settings name a proxy. The service speaks real TLS (tests/fake_proxy.py)."""
+
+    KEY = "sk-made-up-KEY-for-the-proxy-tests"
+
+    def setUp(self):
+        self.service = fake_proxy.Service()
+        self.addCleanup(self.service.close)
+        self.context = fake_proxy.client_context()
+
+    def proxy(self, mode="pass"):
+        proxy = fake_proxy.Proxy(mode)
+        self.addCleanup(proxy.close)
+        return proxy
+
+    def get(self, setting, address=None):
+        """One GET with the key, on a computer with this https proxy in its settings: (status, body)."""
+        names = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        clean = {k: v for k, v in os.environ.items() if k.lower() not in names}
+        with mock.patch.dict(os.environ, dict(clean, https_proxy=setting), clear=True):
+            conn = local_agent.connect(address or self.service.url, 10, context=self.context)
+            try:
+                conn.request("GET", "/v1/models", headers={"x-api-key": self.KEY})
+                resp = conn.getresponse()
+                return resp.status, resp.read()
+            finally:
+                conn.close()
+
+    def test_https_goes_through_the_proxy_of_the_system_and_the_proxy_reads_nothing(self):
+        proxy = self.proxy()
+        status, body = self.get(proxy.url)
+        self.assertEqual((status, json.loads(body)["data"][0]["id"]), (200, "model-1"))
+        # the proxy got one request: where to connect to. No address of ours, no key.
+        self.assertEqual([line for line, _ in proxy.requests], ["CONNECT 127.0.0.1:%d HTTP/1.1" % self.service.port])
+        self.assertNotIn("proxy-authorization", proxy.requests[0][1])
+        self.assertNotIn(self.KEY.encode(), proxy.clear)
+        self.assertNotIn(b"/v1/models", proxy.clear)
+        # the service got the request as without a proxy: its own name as Host, the key
+        path, headers = self.service.seen[-1]
+        self.assertEqual((path, headers["host"], headers["x-api-key"]),
+                         ("/v1/models", "127.0.0.1:%d" % self.service.port, self.KEY))
+        self.assertNotIn("proxy-authorization", headers)
+
+    def test_the_certificate_of_the_service_is_checked_through_the_proxy_too(self):
+        proxy = self.proxy()
+        self.context = ssl.create_default_context()          # does not know the test certificate
+        with self.assertRaises(ssl.SSLError):
+            self.get(proxy.url)
+        self.assertEqual(self.service.seen, [])
+
+    def test_a_login_in_the_setting_goes_to_the_proxy_and_not_to_the_service(self):
+        proxy = self.proxy()
+        status, _ = self.get("http://zo%C3%AB:pa%3Ass@127.0.0.1:" + str(proxy.port))
+        self.assertEqual(status, 200)
+        expected = "Basic " + base64.b64encode("zo\u00eb:pa:ss".encode("utf-8")).decode("ascii")
+        self.assertEqual(proxy.requests[0][1].get("proxy-authorization"), expected)
+        self.assertNotIn("proxy-authorization", self.service.seen[-1][1])
+
+    def test_a_proxy_that_does_not_let_us_through_is_followed_by_the_direct_way(self):
+        for mode in ("login", "refuse"):
+            proxy = self.proxy(mode)
+            status, _ = self.get(proxy.url)
+            self.assertEqual(status, 200, mode)
+            self.assertEqual(len(proxy.requests), 1, mode)           # it was asked first
+            self.assertNotIn(self.KEY.encode(), proxy.clear, mode)
+
+    def test_a_proxy_setting_that_is_old_is_followed_by_the_direct_way(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+        s.close()
+        self.assertEqual(self.get("http://127.0.0.1:%d" % dead)[0], 200)
+        self.assertEqual(self.get("this is not an address")[0], 200)
+        self.assertEqual(self.get("socks5://127.0.0.1:%d" % dead)[0], 200)
+
+    def test_the_way_windows_writes_one_proxy_for_all_protocols(self):
+        proxy = self.proxy()                                 # "https://host:port", a plain proxy all the same
+        self.assertEqual(self.get("https://127.0.0.1:%d" % proxy.port)[0], 200)
+        self.assertEqual(len(proxy.requests), 1)
+
+    def test_an_exception_in_the_settings_is_obeyed(self):
+        proxy = self.proxy()
+        names = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        clean = {k: v for k, v in os.environ.items() if k.lower() not in names}
+        with mock.patch.dict(os.environ, dict(clean, https_proxy=proxy.url, no_proxy="127.0.0.1"), clear=True):
+            self.assertIsNone(local_agent.proxy_for(self.service.url))
+            self.assertIsNone(local_agent.proxy_for("http://example.invalid:1234/v1"))
+        with mock.patch.dict(os.environ, dict(clean, https_proxy=proxy.url, http_proxy=proxy.url), clear=True):
+            self.assertEqual(local_agent.proxy_for(self.service.url), ("127.0.0.1", proxy.port, {}))
+            self.assertIsNone(local_agent.proxy_for("http://example.invalid:1234/v1"))   # http: never
 
 
 class BrokenLine(Base):

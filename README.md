@@ -102,10 +102,15 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 - With the API key source, each step of a request is one HTTPS request to
   `api.anthropic.com`: the conversation of the project (up to about 300,000
   characters of it), the images of that conversation and the key. Find models is
-  one more request with the key. Nothing else is contacted.
-- CADprompt connects to the AI service directly. It does not use a proxy from the
-  settings of the computer, so a key never goes to a proxy. On a network that
-  reaches the internet only through a proxy, the API key source does not work.
+  one more request with the key. Nothing else is contacted, except the proxy of
+  your computer when its settings name one (next point).
+- When the settings of the computer name a proxy, CADprompt uses it for https,
+  as a browser does: the proxy learns the name of the service
+  (`api.anthropic.com`) and passes encrypted data that it cannot read. The key
+  and the conversation stay inside that encryption. A login for the proxy that
+  is part of the setting goes to the proxy only. If the proxy does not answer,
+  CADprompt connects directly. A model server with an `http://` address is
+  never reached through a proxy.
 - With the Claude account source, Claude Code is a program of its own, and it
   must reach FreeCAD. For that, CADprompt opens a small server inside FreeCAD
   (the Model Context Protocol, over HTTP). The server listens only on this

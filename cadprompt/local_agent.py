@@ -23,6 +23,7 @@ project can change its service in the middle:
 only in memory during one request and are never stored.
 """
 
+import base64
 import http.client
 import ipaddress
 import json
@@ -109,24 +110,59 @@ class NoConnection(OSError):
     """The server was not reached in time. Not a TimeoutError: that one means a slow answer."""
 
 
-def connect(address, timeout, connect_timeout=None):
-    """An open http.client connection to the server of `address`.
+def proxy_for(address):
+    """(host, port, headers) of the proxy that this computer names for an https address, or None.
 
-    Two time limits: a short one to reach the server, so that a network which
-    drops the packets gives its error soon, and `timeout` for each step of
-    the answer, which a model can take minutes for. No proxy: http.client
-    connects to the address itself. Raises OSError.
+    Only for https. The proxy gets one line, "CONNECT host:443", and then
+    passes bytes that it cannot read: the key and the conversation are inside
+    the encrypted connection to the service, whose certificate is checked as
+    without a proxy. An http address (a model server in the room) is never
+    sent through a proxy: there the proxy could read everything.
+    The settings are those of the system (environment variables, Windows
+    internet options, macOS network settings), as for every other program.
     """
-    main_thread.quiet_pipe()     # a server that closes the line in the middle must not end FreeCAD
-    u = urllib.parse.urlsplit(address)
-    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
-    short = CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
-    conn = cls(u.hostname or "", u.port, timeout=min(short, timeout))
+    try:
+        u = urllib.parse.urlsplit(address)
+        if u.scheme != "https" or not u.hostname:
+            return None
+        setting = urllib.request.getproxies().get("https")
+        if not setting or urllib.request.proxy_bypass(u.netloc):
+            return None
+        # Windows writes "https://host:port" for its one proxy of all protocols; it is a plain
+        # HTTP proxy all the same, so the scheme of the setting says nothing. SOCKS we do not speak.
+        p = urllib.parse.urlsplit(setting if "://" in setting else "http://" + setting)
+        if p.scheme.lower().startswith("socks") or not p.hostname:
+            return None
+        headers = {}
+        if p.username:
+            login = "%s:%s" % (urllib.parse.unquote(p.username), urllib.parse.unquote(p.password or ""))
+            headers["Proxy-Authorization"] = "Basic " + base64.b64encode(login.encode("utf-8")).decode("ascii")
+        return p.hostname, p.port or 80, headers
+    except Exception:            # a broken system setting is no reason to fail: connect directly
+        return None
+
+
+def _quiet_connection(*args, **kw):
+    sock = socket.create_connection(*args, **kw)
+    main_thread.quiet_socket(sock)       # before the first byte is written, see quiet_socket()
+    return sock
+
+
+def _open(u, timeout, short, context, proxy):
+    https = u.scheme == "https"
+    cls = http.client.HTTPSConnection if https else http.client.HTTPConnection
+    kw = {"context": context} if https and context is not None else {}
+    if proxy:
+        conn = cls(proxy[0], proxy[1], timeout=short, **kw)
+        conn.set_tunnel(u.hostname, u.port or 443, headers=proxy[2])
+    else:
+        conn = cls(u.hostname or "", u.port, timeout=short, **kw)
+    conn._create_connection = _quiet_connection
     try:
         conn.connect()
     except TimeoutError:
         conn.close()
-        raise NoConnection("no connection within %g seconds" % min(short, timeout))
+        raise NoConnection("no connection within %g seconds" % short)
     except BaseException:
         conn.close()
         raise
@@ -134,6 +170,32 @@ def connect(address, timeout, connect_timeout=None):
     conn.timeout = timeout
     conn.sock.settimeout(timeout)
     return conn
+
+
+def connect(address, timeout, connect_timeout=None, context=None):
+    """An open http.client connection to the server of `address`.
+
+    Two time limits: a short one to reach the server, so that a network which
+    drops the packets gives its error soon, and `timeout` for each step of
+    the answer, which a model can take minutes for.
+
+    The way: for https, through the proxy of the system when there is one
+    (see proxy_for), and directly when there is none or when the proxy does
+    not let us through (a setting that is old, a proxy that wants a login we
+    do not have). So it works at home, behind a VPN program and on a network
+    with a proxy. http always goes directly. `context` is for the tests.
+    Raises OSError.
+    """
+    main_thread.quiet_pipe()     # a server that closes the line in the middle must not end FreeCAD
+    u = urllib.parse.urlsplit(address)
+    short = min(CONNECT_TIMEOUT if connect_timeout is None else connect_timeout, timeout)
+    proxy = proxy_for(address)
+    if proxy:
+        try:
+            return _open(u, timeout, short, context, proxy)
+        except (OSError, http.client.HTTPException):
+            pass                 # the direct way is the second try; its error is the one to show
+    return _open(u, timeout, short, context, None)
 
 
 def user_message(text, shown=None, images=None):
@@ -604,25 +666,17 @@ class AnthropicWire:
 
 WIRES = {"openai": OpenAIWire, "anthropic": AnthropicWire}
 
-PROXY = (" This computer is set to reach the internet through a proxy. CADprompt does not use a "
-         "proxy: it connects directly, and this network may not allow that.")
+PROXY = (" This computer is set to reach the internet through a proxy. CADprompt tried the proxy "
+         "and then a direct connection, and neither got through.")
 
 
 def proxy_note(address):
     """PROXY when the system settings name a proxy for this https address, else "".
 
-    The engine and Find models connect directly, so that a key goes to its own
-    server and to no other host. On a network that lets a computer out only
-    through its proxy the request fails, and the user must know why.
+    connect() tried the proxy and the direct way by then. The user must know
+    that a proxy is part of the picture: its setting can be the thing to fix.
     """
-    try:
-        u = urllib.parse.urlsplit(address)
-        if u.scheme == "https" and urllib.request.getproxies().get("https") \
-                and not urllib.request.proxy_bypass(u.netloc):
-            return PROXY
-    except Exception:                  # a broken system setting must not hide the error itself
-        pass
-    return ""
+    return PROXY if proxy_for(address) else ""
 
 
 class Agent:

@@ -242,8 +242,9 @@ def list_models(url, key="", timeout=5, kind="openai", connect_timeout=None):
         headers = {"Accept": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
-    # The same way as the engine: no proxy (the key of an http server would go to the proxy
-    # in clear text) and no redirect (the key goes only to the address the user typed).
+    # The same way as the engine (local_agent.connect): a proxy only as a tunnel for https, never
+    # for http (the key of an http server would go to the proxy in clear text), and no redirect
+    # (the key goes only to the address the user typed).
     from . import local_agent        # here, not at the top: the panel loads this module when it opens
     u = urllib.parse.urlsplit(address)
     conn = local_agent.connect(address, timeout, connect_timeout)
