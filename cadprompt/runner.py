@@ -127,8 +127,11 @@ def _kill(proc):
     killer = QtCore.QProcess(proc)       # a child of proc: gone when proc is
 
     def after(*_):
-        if proc.state() != QtCore.QProcess.NotRunning:
-            proc.kill()
+        try:
+            if proc.state() != QtCore.QProcess.NotRunning:
+                proc.kill()
+        except RuntimeError:      # Qt deleted the process object already: nothing is left to end
+            pass
     killer.finished.connect(after)
     killer.errorOccurred.connect(after)
     killer.start("taskkill", ["/PID", str(pid), "/T", "/F"])

@@ -491,7 +491,8 @@ def main():
     run8.start(project, "Take your time.", cfg)
     t0 = len(ticks)
     pump(timeout=0.6)
-    check("the GUI stays responsive while the model works", len(ticks) - t0 >= 20 and run8.running(),
+    # 30 ticks are possible in 0.6 s; a slow test machine (macOS on GitHub) reaches 18
+    check("the GUI stays responsive while the model works", len(ticks) - t0 >= 10 and run8.running(),
           len(ticks) - t0)
     t = time.time()
     run8.stop()

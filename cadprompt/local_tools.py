@@ -461,10 +461,12 @@ def _inside(project, path):
     root = os.path.realpath(project)
     real = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
     try:
-        inside = os.path.commonpath([root, real]) == root
-    except ValueError:        # other drive on Windows
-        inside = False
-    return real if inside else None
+        rel = os.path.relpath(real, root)
+    except ValueError:        # Windows: another drive, a share, or a device name such as NUL
+        return None
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return None
+    return real
 
 
 def read_project_file(project, path):
