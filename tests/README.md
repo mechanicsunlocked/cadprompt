@@ -120,18 +120,18 @@ For the unpacked `.7z` archive, in PowerShell:
 | Test | Started with | What it needs and what it tests |
 |---|---|---|
 | `hoischen/test_layout` | python | Only Python. The rules for dimension lines. |
-| `test_local_agent` | python | Only Python. The agent loop against a scripted server. |
+| `test_local_agent` | python | Only Python. The agent loop against scripted servers, in the OpenAI format and in the Anthropic format, with images. |
 | `test_time_limit` | python | Only Python. The time limit that stops code which does not end. |
 | `test_workbench` | python | Starts `freecadcmd` and `freecad` itself (found the same way as above). FreeCAD loads a copy of the addon from a new profile. |
-| `test_backends` | freecadcmd | The AI sources and the environment for Claude Code. Every key is made up. |
+| `test_backends` | freecadcmd | The AI sources, what the built-in engine gets for each, and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |
 | `test_drawing_gui` | freecad-gui | Drawings with pages, views and PDF files. |
 | `test_integration_gui` | freecad-gui | The whole addon. A scripted server plays the model. |
-| `test_local_engine` | freecad-gui | The built-in engine. A scripted server plays the model. |
+| `test_local_engine` | freecad-gui | The built-in engine with both formats, images, and the gate for outgoing requests. Scripted servers play the model. |
 | `test_panel` | freecad-gui | The panel and the settings dialog. A pretend `claude` and a stub engine. |
-| `test_panel_engine` | freecad-gui | The panel with the real engine. A scripted server plays the model. |
+| `test_panel_engine` | freecad-gui | The panel with the real engine, for the local model and for the API key. Scripted servers play the model and Anthropic. |
 
 Not run by `run_all.py`:
 
@@ -142,8 +142,8 @@ Not run by `run_all.py`:
   `ANTHROPIC_*` and `OPENAI_API_KEY`, so no key of your computer gets into a test.
 - `drawing_run.py`. It runs the two drawing tests and makes PNG pictures of the
   drawings to look at. Use it when you work on drawings.
-- The other files are helpers for the tests (fake server, pretend `claude`,
-  test parts).
+- The other files are helpers for the tests (fake servers, pretend `claude`,
+  test parts, `hang_report.py` for a test that hangs on macOS).
 
 ## How to add a test
 
@@ -170,9 +170,14 @@ Not run by `run_all.py`:
    Windows mixes `\` and `/` and upper and lower case, and the temporary folder
    of macOS has two names. Call `utf8_output()` from `utf8_output.py` first and
    give every `open()` of a text file `encoding="utf-8"`.
-7. Use a scripted server (`local_fake_server.py`) in place of a model. A run
-   with a real model is switched on with a variable that has `_REAL_` in its
-   name, and is off by default.
+7. Use a scripted server (`local_fake_server.py`: `FakeServer` for the OpenAI
+   format, `FakeAnthropic` for the Anthropic format) in place of a model. A
+   test never sends anything to a real AI service and never uses a real key. A
+   run with a real model is switched on with a variable that has `_REAL_` in
+   its name, and is off by default.
+8. In a window test, wait with `QApplication.processEvents()` in a loop, not
+   with a `QEventLoop` of your own: on macOS such a loop did not come back
+   after a document had its 3D view.
 
 ## What run_all.py does for each test
 

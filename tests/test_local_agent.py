@@ -23,7 +23,7 @@ utf8_output()
 
 from cadprompt import local_agent                      # noqa: E402
 from cadprompt.local_agent import Agent, AgentError, Stopped   # noqa: E402
-from local_fake_server import FakeServer, answer, call, error, slow   # noqa: E402
+from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, claude_error, error, slow   # noqa: E402
 
 TOOLS = [{"type": "function", "function": {"name": "run_python", "description": "run",
                                            "parameters": {"type": "object", "properties": {}}}}]
@@ -562,6 +562,549 @@ class Shortening(Base):
         self.assertIn("left out", sent[0]["content"])
         self.assertEqual([m["role"] for m in sent], ["system", "user"])
         self.assertEqual(len(a.messages), 4)
+
+
+SIGNATURE_ERROR = ("messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound "
+                   "to a different conversation. Remove the block.")
+PNG = ("image/png", "QUJD")          # what load_image gives in these tests: no real picture is needed
+
+
+def roles(body):
+    return [m["role"] for m in body["messages"]]
+
+
+class AnthropicBase(Base):
+    """The same loop against the Anthropic Messages API (a scripted server)."""
+
+    def setUp(self):
+        super().setUp()
+        self.srv.close()
+        self.srv = FakeAnthropic()
+
+    def agent(self, **kw):
+        kw.setdefault("kind", "anthropic")
+        kw.setdefault("key", "sk-ant-made-up")
+        kw.setdefault("model", "claude-fake-1")
+        return super().agent(**kw)
+
+    def well_formed(self):
+        """What the Messages API refuses: two turns of one role in a row, an empty text."""
+        for body in self.srv.bodies():
+            self.assertEqual(roles(body)[0], "user")
+            self.assertEqual(roles(body)[-1], "user")
+            for one, two in zip(roles(body), roles(body)[1:]):
+                self.assertNotEqual(one, two)
+            for m in body["messages"]:
+                self.assertTrue(m["content"])
+                for block in m["content"]:
+                    if block["type"] == "text":
+                        self.assertTrue(block["text"].strip())
+
+
+class AnthropicLoop(AnthropicBase):
+    def test_tool_round_trip(self):
+        self.srv.add(claude("I make it.", [("run_python", {"code": "make()"}, "toolu_1")]),
+                     claude("Plate 100 x 50 x 10 is ready."))
+        a = self.agent()
+        self.assertEqual(a.ask("Make a plate."), "Plate 100 x 50 x 10 is ready.")
+        self.assertEqual(self.tool_calls, [("run_python", {"code": "make()"})])
+        self.assertEqual(self.kinds(), ["text", "tool_call", "tool_result", "answer"])
+        first, second = self.srv.bodies()
+        self.assertEqual(self.srv.requests[0]["path"], "/v1/messages")
+        headers = {k.lower(): v for k, v in self.srv.requests[0]["headers"].items()}
+        self.assertEqual(headers.get("x-api-key"), "sk-ant-made-up")
+        self.assertEqual(headers.get("anthropic-version"), "2026-10-21")
+        self.assertNotIn("authorization", headers)
+        self.assertEqual(first["model"], "claude-fake-1")
+        self.assertEqual(first["max_tokens"], 16000)             # the API does not answer without it
+        self.assertEqual(first["system"], "SYSTEM")              # not a message, as in the OpenAI format
+        self.assertNotIn("temperature", first)                   # this API version refuses it
+        self.assertEqual(first["tools"], [{"name": "run_python", "description": "run",
+                                           "input_schema": {"type": "object", "properties": {}}}])
+        self.assertEqual(first["messages"], [{"role": "user", "content": [{"type": "text", "text": "Make a plate."}]}])
+        self.assertEqual(second["messages"][1:], [
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "I make it."},
+                {"type": "tool_use", "id": "toolu_1", "name": "run_python", "input": {"code": "make()"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": OK}]}])
+        # the stored conversation is the neutral one, the same as with an OpenAI server
+        self.assertEqual(a.messages, [
+            {"role": "user", "content": "Make a plate."},
+            {"role": "assistant", "content": "I make it.", "tool_calls": [
+                {"id": "toolu_1", "type": "function",
+                 "function": {"name": "run_python", "arguments": json.dumps({"code": "make()"})}}]},
+            {"role": "tool", "tool_call_id": "toolu_1", "content": OK},
+            {"role": "assistant", "content": "Plate 100 x 50 x 10 is ready."}])
+        self.well_formed()
+
+    def test_tool_error_goes_back_as_an_error_and_the_check_follows(self):
+        self.results["run_python"] = [BAD, OK]
+        self.srv.add(claude("", [("run_python", {"code": "x"}, "t1")]), claude("Done."),
+                     claude("", [("run_python", {"code": "y"}, "t2")]), claude("Now it is right."))
+        a = self.agent()
+        self.assertEqual(a.ask("Make a plate."), "Now it is right.")
+        bodies = self.srv.bodies()
+        result = bodies[1]["messages"][-1]["content"][0]
+        self.assertEqual((result["type"], result["tool_use_id"], result.get("is_error")), ("tool_result", "t1", True))
+        self.assertIn("NameError", result["content"])
+        # "Done." with a broken model: the automatic check is one more user turn
+        self.assertEqual(roles(bodies[2]), ["user", "assistant", "user", "assistant", "user"])
+        self.assertIn("Automatic check", bodies[2]["messages"][-1]["content"][0]["text"])
+        good = bodies[3]["messages"][-1]["content"][0]
+        self.assertEqual((good["tool_use_id"], good.get("is_error")), ("t2", None))
+        self.assertFalse(a.incomplete)
+        self.well_formed()
+
+    def test_two_calls_in_one_answer_get_their_results_in_one_turn(self):
+        self.srv.add(claude("", [("run_python", {"code": "a"}, "t1"), ("get_document_state", {}, "t2")]),
+                     claude("Done."))
+        self.agent().ask("x")
+        last = self.srv.bodies()[1]["messages"][-1]
+        self.assertEqual([(b["type"], b["tool_use_id"]) for b in last["content"]],
+                         [("tool_result", "t1"), ("tool_result", "t2")])
+        self.well_formed()
+
+    def test_an_empty_answer_gets_one_nudge(self):
+        self.srv.add(claude(""), claude("Here I am."))
+        a = self.agent()
+        self.assertEqual(a.ask("x"), "Here I am.")
+        self.assertIn("empty", self.srv.bodies()[1]["messages"][-1]["content"][-1]["text"])
+        self.well_formed()
+
+    def test_thinking_goes_back_unchanged_and_is_never_stored(self):
+        self.srv.add(claude("", [("run_python", {"code": "a"}, "t1")], thinking="one"),
+                     claude("", [("run_python", {"code": "b"}, "t2")], thinking="two"),
+                     claude("Done.", thinking="three"), claude("Second answer."))
+        a = self.agent()
+        self.assertEqual(a.ask("first"), "Done.")
+        third = self.srv.bodies()[2]["messages"]
+        # in one request the signed blocks go back as they came, in their place
+        self.assertEqual(third[1]["content"][0], {"type": "thinking", "thinking": "", "signature": "SIGNATURE-one"})
+        self.assertEqual(third[3]["content"][0], {"type": "thinking", "thinking": "", "signature": "SIGNATURE-two"})
+        # they are not in what is stored: not in a state event, not in the messages as they are saved
+        states = [d for k, d in self.events if k == "state"]
+        self.assertNotIn("SIGNATURE", json.dumps(states))
+        self.assertNotIn("_native", json.dumps(states))
+        stored = json.loads(json.dumps(local_agent.public(a.messages)))
+        b = self.agent(messages=stored)
+        self.assertEqual(b.ask("second"), "Second answer.")
+        self.assertNotIn("thinking", json.dumps(self.srv.bodies()[3]["messages"]))
+        self.well_formed()
+
+    def test_refused_thinking_blocks_are_left_out_and_the_run_goes_on(self):
+        self.srv.add(claude("", [("run_python", {"code": "a"}, "t1")], thinking="one"),
+                     claude_error(400, "invalid_request_error", SIGNATURE_ERROR), claude("Done."))
+        a = self.agent()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertIn("SIGNATURE-one", json.dumps(self.srv.bodies()[1]))
+        again = self.srv.bodies()[2]
+        self.assertNotIn("thinking", json.dumps(again["messages"]))
+        self.assertEqual(again["messages"][1]["content"],
+                         [{"type": "tool_use", "id": "t1", "name": "run_python", "input": {"code": "a"}}])
+
+    def test_an_answer_that_was_cut_off_runs_no_tool(self):
+        self.srv.add(claude("I start.", [("run_python", {"code": "half a prog"}, "t1")], stop_reason="max_tokens"))
+        a = self.agent()
+        out = a.ask("x")
+        self.assertEqual(self.tool_calls, [])
+        self.assertIn("I start.", out)
+        self.assertIn("cut off", out)
+
+    def test_a_refusal_is_a_plain_error(self):
+        self.srv.add(claude("", stop_reason="refusal"))
+        a = self.agent()
+        with self.assertRaises(AgentError) as cm:
+            a.ask("x")
+        self.assertIn("declined", str(cm.exception))
+        self.assertEqual(a.messages, [])
+
+
+class AnthropicErrors(AnthropicBase):
+    def setUp(self):
+        super().setUp()
+        self.backoff, local_agent.BACKOFF = local_agent.BACKOFF, 0.05
+
+    def tearDown(self):
+        local_agent.BACKOFF = self.backoff
+        super().tearDown()
+
+    def fails(self, *replies, **kw):
+        self.srv.add(*replies)
+        a = self.agent(**kw)
+        with self.assertRaises(AgentError) as cm:
+            a.ask("x")
+        self.assertEqual(a.messages, [])           # nothing happened: the request is forgotten
+        self.assertNotIn("local model", str(cm.exception))
+        self.assertNotIn("model server", str(cm.exception))
+        return str(cm.exception)
+
+    def test_bad_key(self):
+        text = self.fails(claude_error(401, "authentication_error", "invalid x-api-key"))
+        self.assertIn("did not accept the API key", text)
+        self.assertNotIn("sk-ant-made-up", text)
+        self.assertEqual(len(self.srv.requests), 1)
+
+    def test_no_credit(self):
+        text = self.fails(claude_error(400, "invalid_request_error",
+                                       "Your credit balance is too low to access the Anthropic API."))
+        self.assertIn("no credit", text)
+        self.assertEqual(len(self.srv.requests), 1)
+
+    def test_billing_error(self):
+        self.assertIn("no credit", self.fails(claude_error(402, "billing_error", "Payment is required.")))
+
+    def test_permission(self):
+        text = self.fails(claude_error(403, "permission_error", "Not allowed for this workspace."))
+        self.assertIn("not allowed", text)
+        self.assertIn("Not allowed for this workspace.", text)
+
+    def test_model_not_found(self):
+        text = self.fails(claude_error(404, "not_found_error", "model: claude-nope"), model="claude-nope")
+        self.assertIn('does not have the model "claude-nope"', text)
+        self.assertIn("Find models", text)
+
+    def test_context_too_long(self):
+        long = claude_error(400, "invalid_request_error", "prompt is too long: 1200000 tokens > 1000000 maximum")
+        text = self.fails(long, long)
+        self.assertIn("too long for this model", text)
+        self.assertIn("new chat", text)
+        self.assertEqual(len(self.srv.requests), 2)      # one retry with less, then give up
+
+    def test_request_too_large(self):
+        big = claude_error(413, "request_too_large", "Request exceeds the maximum allowed number of bytes.")
+        self.assertIn("too long for this model", self.fails(big, big))
+
+    def test_other_error_shows_what_anthropic_said(self):
+        text = self.fails(claude_error(400, "invalid_request_error", "tools.0.input_schema: bad"))
+        self.assertIn("HTTP 400", text)
+        self.assertIn("tools.0.input_schema: bad", text)
+
+    def test_overloaded_waits_and_tries_again(self):
+        self.srv.add(claude_error(529, "overloaded_error", "Overloaded"), claude("Done."))
+        a = self.agent()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertEqual(len(self.srv.requests), 2)
+        self.assertTrue(any(k == "note" and "busy" in d for k, d in self.events))
+
+    def test_overloaded_for_too_long_is_a_plain_error(self):
+        over = claude_error(529, "overloaded_error", "Overloaded")
+        text = self.fails(over, over, over, over)
+        self.assertIn("overloaded", text)
+        self.assertEqual(len(self.srv.requests), 1 + local_agent.RETRIES)
+
+    def test_rate_limit_waits_for_retry_after(self):
+        self.srv.add(claude_error(429, "rate_limit_error", "Too many requests", {"retry-after": "1"}),
+                     claude("Done."))
+        a = self.agent()
+        t0 = time.time()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertGreaterEqual(time.time() - t0, 0.9)
+        self.assertLess(time.time() - t0, 5)
+        notes = [d for k, d in self.events if k == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("wait 1 seconds", notes[0])
+        self.assertEqual(len(self.srv.requests), 2)
+
+    def test_a_very_long_wait_is_the_users_decision(self):
+        t0 = time.time()
+        text = self.fails(claude_error(429, "rate_limit_error", "Too many requests", {"retry-after": "600"}))
+        self.assertLess(time.time() - t0, 3)
+        self.assertIn("rate limit", text)
+        self.assertEqual(len(self.srv.requests), 1)
+
+    def test_stop_ends_the_wait_for_the_rate_limit(self):
+        self.srv.add(claude_error(429, "rate_limit_error", "Too many requests", {"retry-after": "30"}))
+        a = self.agent()
+        threading.Timer(0.3, a.stop).start()
+        t0 = time.time()
+        with self.assertRaises(Stopped):
+            a.ask("x")
+        self.assertLess(time.time() - t0, 3)
+        self.assertEqual(len(self.srv.requests), 1)
+
+    def test_stop_ends_a_waiting_request(self):
+        self.srv.add(slow(8, claude("late")))
+        a = self.agent(timeout=30)
+        threading.Timer(0.3, a.stop).start()
+        t0 = time.time()
+        with self.assertRaises(Stopped):
+            a.ask("x")
+        self.assertLess(time.time() - t0, 2)
+        time.sleep(0.3)
+        self.assertEqual(self.srv.dropped, 1)            # the server saw the client hang up
+
+    def test_no_connection(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        a = Agent("http://127.0.0.1:%d" % port, "claude-fake-1", self.run_tool, key="k", kind="anthropic", timeout=5)
+        with self.assertRaises(AgentError) as cm:
+            a.ask("x")
+        self.assertIn("No connection to Anthropic", str(cm.exception))
+
+    def test_not_the_messages_api(self):
+        text = self.fails(("error", 200, {"hello": "world"}))
+        self.assertIn("HTTP 200", text)
+
+
+class RateLimitOpenAI(Base):
+    def test_an_openai_server_with_a_rate_limit_is_waited_for_too(self):
+        self.srv.add(error(429, "Rate limit reached", headers={"Retry-After": "1"}), answer("Done."))
+        a = self.agent()
+        t0 = time.time()
+        self.assertEqual(a.ask("x"), "Done.")
+        self.assertGreaterEqual(time.time() - t0, 0.9)
+        self.assertTrue(any(k == "note" and "wait 1 seconds" in d for k, d in self.events))
+
+
+class Images(Base):
+    """Images go with the user message in the format of each service; only paths are stored."""
+
+    def setUp(self):
+        super().setUp()
+        self.claude = FakeAnthropic()
+        self.loaded = []
+
+    def tearDown(self):
+        self.claude.close()
+        super().tearDown()
+
+    def load(self, path):
+        self.loaded.append(path)
+        if "gone" in path:
+            raise OSError("no such file")
+        return PNG
+
+    def agent(self, **kw):
+        kw.setdefault("load_image", self.load)
+        return super().agent(**kw)
+
+    def anthropic(self, **kw):
+        return Agent(self.claude.url, "claude-fake-1", self.run_tool, key="sk-ant-made-up", kind="anthropic",
+                     system="SYSTEM", tools=TOOLS, timeout=10, load_image=self.load,
+                     on_event=lambda k, d: self.events.append((k, d)), **kw)
+
+    def test_openai_format(self):
+        self.srv.add(call("run_python", {"code": "a"}, "c1"), answer("A plate with two holes."))
+        a = self.agent()
+        a.ask("What is this?", images=["refs/sketch.png", "refs/photo.jpg"])
+        url = "data:image/png;base64,QUJD"
+        for body in self.srv.bodies():           # every step of the request sends the images again
+            self.assertEqual(body["messages"][1], {"role": "user", "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "image_url", "image_url": {"url": url}}]})
+        self.assertEqual(self.loaded, ["refs/sketch.png", "refs/photo.jpg"])      # each file is read once
+        self.assertEqual(a.messages[0], {"role": "user", "content": "What is this?",
+                                         "images": ["refs/sketch.png", "refs/photo.jpg"]})
+        self.assertNotIn("QUJD", json.dumps(a.messages))
+        self.assertNotIn("QUJD", json.dumps([d for k, d in self.events if k == "state"]))
+
+    def test_anthropic_format(self):
+        self.claude.add(claude("A plate with two holes."))
+        a = self.anthropic()
+        a.ask("What is this?", images=["refs/sketch.png"])
+        self.assertEqual(self.claude.bodies()[0]["messages"], [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+            {"type": "text", "text": "What is this?"}]}])
+        self.assertEqual(a.messages[0]["images"], ["refs/sketch.png"])
+        self.assertNotIn("QUJD", json.dumps(a.messages))
+
+    def test_at_most_four_images_with_one_message(self):
+        self.srv.add(answer("ok"))
+        a = self.agent()
+        a.ask("x", images=["refs/%d.png" % i for i in range(6)])
+        parts = self.sent(0)[1]["content"]
+        self.assertEqual(len([p for p in parts if p["type"] == "image_url"]), local_agent.MAX_IMAGES)
+        self.assertEqual(a.messages[0]["images"], ["refs/2.png", "refs/3.png", "refs/4.png", "refs/5.png"])
+
+    def test_a_file_that_is_no_image_is_a_plain_error_and_nothing_is_sent(self):
+        a = self.agent()
+        with self.assertRaises(AgentError) as cm:
+            a.ask("x", images=["refs/gone.png"])
+        self.assertIn("refs/gone.png could not be read", str(cm.exception))
+        self.assertEqual(self.srv.connections, 0)
+        self.assertEqual(a.messages, [])
+
+    def test_an_old_image_whose_file_is_gone_becomes_a_line_of_text(self):
+        stored = [{"role": "user", "content": "Look.", "images": ["refs/gone.png"]},
+                  {"role": "assistant", "content": "A bracket."}]
+        for srv, a, reply in ((self.srv, self.agent(messages=stored), answer("ok")),
+                              (self.claude, self.anthropic(messages=stored), claude("ok"))):
+            srv.add(reply)
+            a.ask("And now?")
+            first = srv.bodies()[0]["messages"]
+            said = json.dumps(first)
+            self.assertIn("An image was attached here: refs/gone.png", said)
+            self.assertNotIn("image_url", said)
+            self.assertNotIn('"type": "image"', said)
+
+    def test_old_images_are_left_out_first_when_the_conversation_is_long(self):
+        msgs = [{"role": "user", "content": "first", "images": ["refs/old.png"]},
+                {"role": "assistant", "content": "A " * 200},
+                {"role": "user", "content": "second", "images": ["refs/new.png"]}]
+        view, dropped = local_agent.build_view(msgs, 100000, image_chars=1000)
+        self.assertEqual([m.get("images") for m in view], [["refs/old.png"], None, ["refs/new.png"]])
+        view, dropped = local_agent.build_view(msgs, 1800, image_chars=1000)
+        self.assertFalse(dropped)                                  # no text had to go
+        self.assertEqual([m.get("images") for m in view], [None, None, ["refs/new.png"]])
+        self.assertIn("An image was attached here: refs/old.png", view[0]["content"])
+        self.assertEqual(view[1]["content"], "A " * 200)
+        self.assertEqual(msgs[0]["images"], ["refs/old.png"])     # the stored conversation is whole
+
+    def test_a_model_without_vision_is_a_plain_hint_and_the_user_decides(self):
+        self.srv.add(error(400, "Model does not support images. Please use a model that does."),
+                     answer("Tell me the sizes."))
+        a = self.agent()
+        with self.assertRaises(local_agent.NoVision) as cm:
+            a.ask("What is this?", images=["refs/sketch.png"])
+        self.assertIn("This model cannot read images", str(cm.exception))
+        self.assertEqual(a.messages, [])
+        self.assertEqual(len(self.srv.requests), 1)                # not sent again by itself
+        self.assertEqual(a.ask("What is this?"), "Tell me the sizes.")
+        self.assertEqual(self.sent(1)[1], {"role": "user", "content": "What is this?"})
+
+    def test_images_of_earlier_messages_do_not_block_a_model_without_vision(self):
+        stored = [{"role": "user", "content": "Look.", "images": ["refs/sketch.png"]},
+                  {"role": "assistant", "content": "A bracket."}]
+        self.srv.add(error(400, "image input is not supported - hint: you may need to provide the mmproj"),
+                     answer("Still a bracket."))
+        a = self.agent(messages=stored)
+        self.assertEqual(a.ask("And now?"), "Still a bracket.")
+        self.assertIn("image_url", json.dumps(self.srv.bodies()[0]))
+        again = json.dumps(self.srv.bodies()[1])
+        self.assertNotIn("image_url", again)
+        self.assertIn("An image was attached here: refs/sketch.png", again)
+        self.assertTrue(any(k == "note" and "cannot read images" in d for k, d in self.events))
+        self.assertEqual(a.messages[0]["images"], ["refs/sketch.png"])     # still stored
+
+
+class Switch(Base):
+    """One stored conversation, two services: a project can change its source in the middle."""
+
+    def setUp(self):
+        super().setUp()
+        self.claude = FakeAnthropic()
+
+    def tearDown(self):
+        self.claude.close()
+        super().tearDown()
+
+    def anthropic(self, messages):
+        return Agent(self.claude.url, "claude-fake-1", self.run_tool, key="sk-ant-made-up", kind="anthropic",
+                     system="SYSTEM", tools=TOOLS, timeout=10, messages=messages)
+
+    @staticmethod
+    def stored(agent):
+        return json.loads(json.dumps(local_agent.public(agent.messages)))      # as read back from the file
+
+    def test_openai_then_anthropic_then_openai(self):
+        # 1: a local server; its call id has letters the Messages API does not take
+        self.srv.add(call("run_python", {"code": "plate()"}, "call:1/a", text="I start."), answer("A plate."))
+        a = self.agent()
+        a.ask("Make a plate.")
+        # 2: the same conversation goes on with Anthropic
+        self.claude.add(claude("One hole.", [("run_python", {"code": "hole()"}, "toolu_9")], thinking="x"),
+                        claude("Plate with a hole."))
+        b = self.anthropic(self.stored(a))
+        self.assertEqual(b.ask("Add a hole."), "Plate with a hole.")
+        first = self.claude.bodies()[0]["messages"]
+        self.assertEqual(first, [
+            {"role": "user", "content": [{"type": "text", "text": "Make a plate."}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "I start."},
+                {"type": "tool_use", "id": "call_1_a", "name": "run_python", "input": {"code": "plate()"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1_a", "content": OK}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "A plate."}]},
+            {"role": "user", "content": [{"type": "text", "text": "Add a hole."}]}])
+        # 3: and back to the local server, with what Anthropic did
+        self.srv.add(answer("Yes, one hole."))
+        c = self.agent(messages=self.stored(b))
+        self.assertEqual(c.ask("Is there a hole?"), "Yes, one hole.")
+        sent = self.srv.bodies()[2]["messages"]
+        self.assertEqual([m["role"] for m in sent], ["system", "user", "assistant", "tool", "assistant",
+                                                     "user", "assistant", "tool", "assistant", "user"])
+        self.assertEqual(sent[6], {"role": "assistant", "content": "One hole.", "tool_calls": [
+            {"id": "toolu_9", "type": "function",
+             "function": {"name": "run_python", "arguments": json.dumps({"code": "hole()"})}}]})
+        self.assertEqual(sent[7], {"role": "tool", "tool_call_id": "toolu_9", "content": OK})
+        for m in sent:
+            self.assertLessEqual(set(m), {"role", "content", "tool_calls", "tool_call_id"})
+        self.assertNotIn("SIGNATURE", json.dumps(self.srv.bodies()))
+        self.assertNotIn("thinking", json.dumps(self.srv.bodies()))
+
+    def test_a_conversation_that_was_cut_in_a_step_is_made_whole_for_anthropic(self):
+        stored = [{"role": "user", "content": "Make a plate."},
+                  {"role": "assistant", "content": "", "tool_calls": [
+                      {"id": "c1", "type": "function", "function": {"name": "run_python", "arguments": "{}"}}]},
+                  {"role": "assistant", "content": "*Stopped.*"},
+                  {"role": "tool", "tool_call_id": "lost", "content": "a result without its call"}]
+        self.claude.add(claude("ok"))
+        self.anthropic(stored).ask("Go on.")
+        sent = self.claude.bodies()[0]["messages"]
+        self.assertEqual([m["role"] for m in sent], ["user", "assistant", "user", "assistant", "user"])
+        self.assertEqual(sent[2]["content"], [{"type": "tool_result", "tool_use_id": "c1", "content": "(no result)"}])
+        self.assertEqual(sent[4]["content"][0]["type"], "text")       # never a result without a call
+        self.assertIn("a result without its call", sent[4]["content"][0]["text"])
+
+    def test_each_key_goes_to_its_own_service_only(self):
+        self.srv.add(answer("local"))
+        self.claude.add(claude("remote"))
+        self.agent(key="LOCAL-KEY-made-up").ask("x")
+        self.anthropic([]).ask("x")
+        local = json.dumps(self.srv.requests)
+        remote = json.dumps(self.claude.requests)
+        self.assertIn("Bearer LOCAL-KEY-made-up", local)
+        self.assertNotIn("sk-ant-made-up", local)
+        self.assertNotIn("x-api-key", local.lower())
+        self.assertIn("sk-ant-made-up", remote)
+        self.assertNotIn("LOCAL-KEY-made-up", remote)
+        self.assertNotIn("authorization", remote.lower())
+
+
+class Gate(Base):
+    """may_contact(kind, url) is asked before every request. False: no connection is opened."""
+
+    def setUp(self):
+        super().setUp()
+        self.claude = FakeAnthropic()
+        self.asked = []
+
+    def tearDown(self):
+        self.claude.close()
+        super().tearDown()
+
+    def gate(self, allow, counts):
+        def may(kind, url):
+            # what the servers have seen so far: the question comes before the request
+            self.asked.append((kind, url, tuple(s.connections for s in counts)))
+            return allow
+        return may
+
+    def test_asked_before_every_request(self):
+        self.srv.add(call("run_python", {"code": "a"}, "c1"), call("run_python", {"code": "b"}, "c2"),
+                     answer("Done."))
+        self.agent(may_contact=self.gate(True, [self.srv])).ask("x")
+        self.assertEqual(self.asked, [("openai", self.srv.url, (0,)), ("openai", self.srv.url, (1,)),
+                                      ("openai", self.srv.url, (2,))])
+        del self.asked[:]
+        self.claude.add(claude("", [("run_python", {"code": "a"}, "t1")]), claude("Done."))
+        Agent(self.claude.url, "claude-fake-1", self.run_tool, key="k", kind="anthropic", timeout=10,
+              may_contact=self.gate(True, [self.claude])).ask("x")
+        self.assertEqual(self.asked, [("anthropic", self.claude.url, (0,)), ("anthropic", self.claude.url, (1,))])
+
+    def test_not_allowed_opens_no_socket(self):
+        for srv, kind in ((self.srv, "openai"), (self.claude, "anthropic")):
+            a = Agent(srv.url, "m", self.run_tool, key="KEY-made-up", kind=kind, timeout=10,
+                      may_contact=self.gate(False, [srv]), load_image=lambda path: PNG)
+            with self.assertRaises(AgentError) as cm:
+                a.ask("x", images=["refs/a.png"])
+            self.assertIn("Nothing was sent", str(cm.exception))
+            time.sleep(0.2)
+            self.assertEqual((srv.connections, srv.requests, srv.gets), (0, [], []))
+            self.assertEqual(a.messages, [])
+        self.assertEqual(len(self.asked), 2)
 
 
 class Guards(unittest.TestCase):

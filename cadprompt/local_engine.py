@@ -1,12 +1,16 @@
-"""The built-in engine for a local model: no Claude Code, no uvx, no MCP bridge.
+"""The built-in engine: a local model or an Anthropic API key, without Claude Code,
+uvx or the MCP bridge.
 
 LocalRun has the same signals as runner.ClaudeRun, so the panel can use
 either. The chat loop (local_agent) talks HTTP in a worker thread. FreeCAD is
 not thread-safe, so every tool call is handed to the main thread and the
 worker waits for the result. The conversation is kept in the project, in
-.cadprompt/local-chat.json, and goes on with the next start().
+.cadprompt/local-chat.json, and goes on with the next start(). It has one
+shape for all services (see local_agent), so the source can change in the
+middle of a project. Images are kept as paths in the project, never as data.
 """
 
+import base64
 import filecmp
 import json
 import os
@@ -17,9 +21,9 @@ import time
 import traceback
 
 import FreeCAD as App
-from PySide import QtCore
+from PySide import QtCore, QtGui
 
-from . import local_agent, local_prompt, local_tools, projects
+from . import backends, local_agent, local_prompt, local_tools, projects
 
 CHAT_FILE = "local-chat.json"
 MAX_STORED = 400                   # messages kept in the file; older requests are dropped whole
@@ -28,6 +32,9 @@ CHANGING = ("run_python", "make_drawing")     # tools that can change the docume
 BACKUPS = 10                       # copies kept of each model in model/.backup
 NOT_SAVED = ("*The model file was not saved, because this request did not end well. Look at the "
              "model in FreeCAD: save it yourself if it is good, or undo the steps.*")
+MAX_IMAGES = local_agent.MAX_IMAGES
+IMAGE_SIDE = 1568                  # longest side of an image that is sent, in pixels
+IMAGE_BYTES = 3_500_000            # a larger PNG goes as JPEG: the services take about 5 MB
 DOC_CLOSED = ('ERROR: the document "%s" was closed during this request. Nothing more can be done '
               "in it. Stop and tell the user.")
 
@@ -86,6 +93,8 @@ def history(project, limit=200):
         content = content if isinstance(content, str) else ""
         if role == "user" and not m.get("auto"):
             out.append(("user", m.get("shown") or content))
+            if m.get("images"):
+                out.append(("note", images_note(len(m["images"]))))
         elif role == "assistant":
             if content.strip():
                 out.append(("claude", content))
@@ -106,6 +115,98 @@ def clear(project):
     except OSError:
         pass
     local_tools.reset()
+
+
+# ---- images ------------------------------------------------------------------
+class ImageError(ValueError):
+    """A file that cannot go with a message as an image. The text is for the user;
+    `path` is the file as it was given."""
+
+    def __init__(self, text, path=""):
+        super().__init__(text)
+        self.path = path
+
+
+def images_note(n):
+    return "with %d image%s" % (n, "" if n == 1 else "s")
+
+
+def project_images(project, files):
+    """The images for one message, as paths in the project ("refs/photo.png").
+
+    A file outside the project is copied to refs/ first, so the conversation
+    never points out of its project. Raises ImageError for a file that is not
+    an image, and for more than MAX_IMAGES files.
+    """
+    out, root = [], os.path.realpath(project)
+    for f in files or []:
+        path = f if os.path.isabs(f) else os.path.join(project, f)
+        if not os.path.isfile(path) or not QtGui.QImageReader(path).canRead():
+            raise ImageError("`%s` is not an image that CADprompt can read (PNG or JPEG, for "
+                             "example). It was not sent." % os.path.basename(path), f)
+        try:
+            rel = os.path.relpath(os.path.realpath(path), root)
+        except ValueError:
+            rel = ".."                       # Windows: the file is on another drive
+        if rel.startswith(".."):
+            rel = os.path.join("refs", projects.add_refs(project, [path])[0])
+        rel = rel.replace(os.sep, "/")
+        if rel not in out:
+            out.append(rel)
+    if len(out) > MAX_IMAGES:
+        raise ImageError("At most %d images can go with one message." % MAX_IMAGES)
+    return out
+
+
+def _project_file(project, rel):
+    """The file of a stored image path. The stored text cannot point out of the project."""
+    root = os.path.realpath(project)
+    path = os.path.realpath(os.path.join(root, *str(rel).split("/")))
+    if not os.path.normcase(path).startswith(os.path.normcase(root) + os.sep):
+        raise ImageError("The image %s is not in the project." % rel, rel)
+    return path
+
+
+def _encoded(img, kind, quality=-1):
+    data = QtCore.QByteArray()
+    buf = QtCore.QBuffer(data)
+    buf.open(QtCore.QIODevice.WriteOnly)
+    ok = img.save(buf, kind, quality)
+    buf.close()
+    return bytes(data.data()) if ok else b""
+
+
+def encode_image(path):
+    """(media type, base64 text) of an image file, ready to send.
+
+    The longest side is at most IMAGE_SIDE pixels: more does not help a model
+    and costs tokens. A photo stays JPEG, everything else becomes PNG. Runs in
+    the worker thread: QImage is safe there (QPixmap is not).
+    """
+    reader = QtGui.QImageReader(path)
+    reader.setAutoTransform(True)            # a phone photo is stored turned
+    kind = bytes(reader.format().data()).decode("ascii", "replace").lower()
+    img = reader.read()
+    if img.isNull():
+        raise ImageError("The image %s could not be read." % os.path.basename(path), path)
+    if max(img.width(), img.height()) > IMAGE_SIDE:
+        img = img.scaled(IMAGE_SIDE, IMAGE_SIDE, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    photo = kind in ("jpeg", "jpg") and not img.hasAlphaChannel()
+    data = _encoded(img, "JPEG", 85) if photo else b""
+    if not data:                             # no photo, or a Qt that cannot write JPEG
+        data, photo = _encoded(img, "PNG"), False
+    if not photo and len(data) > IMAGE_BYTES:
+        flat = QtGui.QImage(img.size(), QtGui.QImage.Format_RGB32)
+        flat.fill(QtCore.Qt.white)           # JPEG has no transparency: white paper behind a drawing
+        painter = QtGui.QPainter(flat)
+        painter.drawImage(0, 0, img)
+        painter.end()
+        small = _encoded(flat, "JPEG", 85)
+        if small:
+            data, photo = small, True
+    if not data:
+        raise ImageError("The image %s could not be made ready to send." % os.path.basename(path), path)
+    return ("image/jpeg" if photo else "image/png"), base64.b64encode(data).decode("ascii")
 
 
 # ---- slash commands ----------------------------------------------------------
@@ -151,27 +252,32 @@ class _Call:
 class _Worker(QtCore.QThread):
     event = QtCore.Signal(int, str, object)     # run number, kind, data (see local_agent.Agent)
     need_tool = QtCore.Signal(int, object)      # run number, _Call
+    need_leave = QtCore.Signal(int, object)     # run number, _Call(kind, url): may this request go out?
     done = QtCore.Signal(int, object)           # run number, the dict for LocalRun.finished
 
-    def __init__(self, number, config, system, messages, text, shown):
+    def __init__(self, number, project, config, system, messages, text, shown, images):
         super().__init__()     # no parent: the thread must be able to outlive a closed panel
-        self.number, self.ask_text, self.shown = number, text, shown
+        self.number, self.ask_text, self.shown, self.images = number, text, shown, images
         extra = {k: config[k] for k in ("max_steps", "max_tokens", "temperature", "timeout", "context_chars")
                  if config.get(k) is not None}
         self.agent = local_agent.Agent(
             config.get("url", ""), config.get("model", ""), self._tool, key=config.get("key", ""),
             system=system, tools=local_prompt.TOOLS, messages=messages,
-            on_event=lambda kind, data: self.event.emit(self.number, kind, data), **extra)
+            on_event=lambda kind, data: self.event.emit(self.number, kind, data),
+            kind=config.get("kind") or "openai", may_contact=self._may_contact,
+            load_image=lambda rel: encode_image(_project_file(project, rel)), **extra)
 
     def run(self):
         try:
-            res = {"is_error": False, "result": self.agent.ask(self.ask_text, self.shown)}
+            res = {"is_error": False, "result": self.agent.ask(self.ask_text, self.shown, self.images)}
         except local_agent.Stopped:
             return                               # stop() already told the panel
+        except local_agent.NoVision as exc:
+            res = {"is_error": True, "result": str(exc), "no_vision": True}
         except local_agent.AgentError as exc:
             res = {"is_error": True, "result": str(exc)}
         except Exception:
-            res = {"is_error": True, "result": "The local engine failed:\n" + traceback.format_exc(limit=-4)}
+            res = {"is_error": True, "result": "The built-in engine failed:\n" + traceback.format_exc(limit=-4)}
         if self.agent.incomplete and not res["is_error"]:
             res["incomplete"] = True             # the step limit, or a problem that was not repaired
         if not self.agent.stopped():
@@ -183,8 +289,15 @@ class _Worker(QtCore.QThread):
         The wait looks at the stop flag, so it cannot hang when the run was
         stopped or the panel is gone and nobody will ever answer.
         """
-        call = _Call(name, args)
-        self.need_tool.emit(self.number, call)
+        return self._ask_main(self.need_tool, _Call(name, args))
+
+    def _may_contact(self, kind, url):
+        """Called in this thread before every request. The main thread decides
+        (backends.may_contact), so a question to the user can be asked there."""
+        return self._ask_main(self.need_leave, _Call(kind, url)) is True
+
+    def _ask_main(self, signal, call):
+        signal.emit(self.number, call)
         while not call.done.wait(0.05):
             if self.agent.stopped():
                 raise local_agent.Stopped()
@@ -235,10 +348,13 @@ class LocalRun(QtCore.QObject):
     def running(self):
         return self._worker is not None
 
-    def start(self, project, prompt, config):
+    def start(self, project, prompt, config, images=None):
+        """Send one message. `config` is backends.engine_config(); `images` are
+        files that go with the message (see project_images, which can raise ImageError)."""
         global _quit_hooked
         if self.running():
             return
+        images = project_images(project, images)
         _reap()
         app = QtCore.QCoreApplication.instance()
         if app is not None and not _quit_hooked:
@@ -254,13 +370,15 @@ class LocalRun(QtCore.QObject):
         messages = _load(project)
         self._number += 1
         self._project, self._changed = project, False
-        self._safe = messages + [local_agent.user_message(text, prompt)]
+        self._safe = messages + [local_agent.user_message(text, prompt, images)]
         self._ran, self._backed = [], set()
-        worker = _Worker(self._number, config, local_prompt.system_prompt(projects.get_mode(project)),
-                         messages, text, prompt)
+        worker = _Worker(self._number, project, config,
+                         local_prompt.system_prompt(projects.get_mode(project)),
+                         messages, text, prompt, images)
         queued = QtCore.Qt.QueuedConnection
         worker.event.connect(self._on_event, queued)
         worker.need_tool.connect(self._on_tool, queued)
+        worker.need_leave.connect(self._on_leave, queued)
         worker.done.connect(self._on_done, queued)
         self._worker = worker
         self._live[:] = [worker]
@@ -317,6 +435,13 @@ class LocalRun(QtCore.QObject):
             self.tool.emit(data["name"], _tool_detail(data["args"]))
         elif kind == "tool_result" and data["problem"]:
             self.tool_error.emit(data["name"])
+
+    def _on_leave(self, number, call):
+        """The worker is about to send a request: the gate of all outgoing requests decides."""
+        try:
+            call.result = number == self._number and bool(backends.may_contact(call.name, call.args))
+        finally:
+            call.done.set()
 
     def _on_tool(self, number, call):
         if number != self._number:

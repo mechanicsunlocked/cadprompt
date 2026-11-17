@@ -57,6 +57,7 @@ def check(name, ok, detail=""):
 class _Fake(http.server.BaseHTTPRequestHandler):
     """A pretend model server for 'Find models'."""
     seen = []                    # (port, path, Authorization header) of every request
+    keys = []                    # the x-api-key header of the requests to /anthropic
 
     def log_message(self, *a):
         pass
@@ -72,7 +73,15 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         _Fake.seen.append((self.server.server_address[1], self.path, self.headers.get("Authorization")))
         try:
-            if self.path == "/v1/models":
+            if self.path.startswith("/anthropic/v1/models"):
+                _Fake.keys.append(self.headers.get("x-api-key"))
+                if (self.headers.get("x-api-key") or "").startswith("sk-ant-"):
+                    self._json({"data": [{"type": "model", "id": "claude-fake-1"},
+                                         {"type": "model", "id": "claude-fake-2"}], "has_more": False})
+                else:
+                    self.send_response(401)
+                    self.end_headers()
+            elif self.path == "/v1/models":
                 self._json({"data": [{"id": "google/gemma-4-e4b"}, {"id": "other-model"}]})
             elif self.path == "/slow/models":
                 time.sleep(2)
@@ -223,10 +232,11 @@ def main():
               (b == "apikey", b == "local", b == "custom"),
               str((see(dlg.apikey_box), see(dlg.local_box), see(dlg.custom_box))))
         claude_fields = [see(w) for w in (dlg.web, dlg.claude, dlg.uvx)]
-        check(f"{b}: web toggle, claude and uvx program " + ("hidden" if b == "local" else "shown"),
-              claude_fields == [b != "local"] * 3, str(claude_fields))
-        check(f"{b}: Claude model " + ("shown" if b in ("account", "apikey") else "hidden"),
-              see(dlg.model_override) == (b in ("account", "apikey")))
+        code = b in ("account", "custom")        # the API key and the local model need no Claude Code
+        check(f"{b}: web toggle, claude and uvx program " + ("shown" if code else "hidden"),
+              claude_fields == [code] * 3, str(claude_fields))
+        check(f"{b}: Claude Code model " + ("shown" if b == "account" else "hidden"),
+              see(dlg.model_override) == (b == "account"))
         check(f"{b}: projects folder is always there", see(dlg.projects))
         dlg.deleteLater()
 
@@ -245,8 +255,15 @@ def main():
           dlg.local_url.text() == "http://127.0.0.1:1234/v1" and dlg.local_model.isEditable()
           and dlg.local_model.currentText() == "")
     dlg.apikey.click()
-    check("clicking 'Anthropic API key' swaps again",
-          see(dlg.apikey_box) and not see(dlg.local_box) and see(dlg.claude_box))
+    check("clicking 'Anthropic API key' swaps again: a key and a model, nothing of Claude Code",
+          see(dlg.apikey_box) and not see(dlg.local_box) and not see(dlg.claude_box)
+          and see(dlg.api_model) and see(dlg.api_find))
+    items = [dlg.api_model.itemText(i) for i in range(dlg.api_model.count())]
+    check("API key: the model is an editable list that starts with the default, without asking Anthropic",
+          dlg.api_model.isEditable() and dlg.api_model.currentText() == "claude-opus-5-5"
+          and items == list(backends.API_MODELS), f"{dlg.api_model.currentText()} {items}")
+    check("API key: the hint says what goes to Anthropic", "go to Anthropic" in dlg.hint.text(), dlg.hint.text())
+    dlg.api_model.setEditText("claude-haiku-5-5")
     check("API key field hides what is typed and says nothing is saved yet",
           dlg.api_key.edit.echoMode() == QtWidgets.QLineEdit.Password
           and dlg.api_key.edit.placeholderText() != "saved" and not dlg.api_key.drop.isEnabled())
@@ -264,6 +281,8 @@ def main():
     dlg._save()
     check("OK saves the source and the local server", (p.GetString("Backend"), p.GetString("LocalUrl"),
           p.GetString("LocalModel")) == ("local", "http://127.0.0.1:1/v1", "some-model"))
+    check("OK saves the model for the API key", p.GetString("ApiModel") == "claude-haiku-5-5"
+          and backends.engine_config("apikey")["model"] == "claude-haiku-5-5")
     check("OK saves the old fields too", (p.GetBool("AllowWeb"), p.GetString("ModelOverride"),
           p.GetString("BaseUrl"), p.GetString("Model"), p.GetString("AuthToken"), p.GetString("claudePath"),
           p.GetString("uvxPath")) == (True, "sonnet", "http://localhost:11434", "endpoint-model",
@@ -412,6 +431,74 @@ def main():
           {"url": base + "/other/v1", "model": backends.local_config()["model"], "key": "KEY-FOR-A-2"},
           str(backends.local_config()))
     backends.set_local_key("")
+
+    # ---- Find models for the API key: asks Anthropic, only on the click ----
+    real_url, backends.ANTHROPIC_URL = backends.ANTHROPIC_URL, base + "/anthropic"
+    backends.set_local_key("LOCAL-KEY-made-up")
+    n = len(_Fake.seen)
+    dlg = SettingsDialog()
+    dlg.apikey.click()
+    spin(300)
+    check("API key: opening Settings and choosing the source sends nothing", len(_Fake.seen) == n)
+
+    def find_api(dlg, seconds=10):
+        dlg.api_find.click()
+        wait_for(lambda: dlg._asking is None, seconds)
+
+    dlg.api_key.drop.click()
+    find_api(dlg)
+    check("API key: Find models without a key asks for the key and sends nothing",
+          dlg.api_find_msg.text() == "Enter your API key first." and len(_Fake.seen) == n, dlg.api_find_msg.text())
+    dlg.api_key.edit.setText("sk-ant-typed-made-up")
+    find_api(dlg)
+    items = [dlg.api_model.itemText(i) for i in range(dlg.api_model.count())]
+    check("API key: Find models fills the list from Anthropic and keeps the chosen model",
+          items == ["claude-fake-1", "claude-fake-2"] and dlg.api_model.currentText() == "claude-haiku-5-5"
+          and dlg.api_find_msg.text().startswith("Found 2 models") and dlg.api_find.isEnabled(),
+          f"{items} {dlg.api_model.currentText()} {dlg.api_find_msg.text()}")
+    check("API key: one request, the typed key in x-api-key, no Bearer header, not the local key",
+          _Fake.seen[n:] == [(port_a, "/anthropic/v1/models?limit=100", None)]
+          and _Fake.keys[-1] == "sk-ant-typed-made-up" and "LOCAL-KEY" not in str(_Fake.seen[n:]),
+          f"{_Fake.seen[n:]} {_Fake.keys[-1:]}")
+    dlg.reject()
+    dlg.deleteLater()
+    dlg = SettingsDialog()
+    dlg.apikey.click()
+    find_api(dlg)
+    check("API key: Find models uses the saved key when none is typed", _Fake.keys[-1] == "sk-ant-made-up-2",
+          str(_Fake.keys[-1:]))
+    backends.set_api_key("not-a-key-made-up")
+    find_api(dlg)
+    check("API key: a refused key is said in plain words",
+          dlg.api_find_msg.text() == "Anthropic did not accept the key.", dlg.api_find_msg.text())
+    backends.set_api_key("sk-ant-made-up-2")
+    backends.ANTHROPIC_URL = "http://127.0.0.1:1"
+    find_api(dlg)
+    check("API key: no connection is said in plain words, without 'server'",
+          dlg.api_find_msg.text().startswith("No answer from Anthropic."), dlg.api_find_msg.text())
+    backends.ANTHROPIC_URL = base + "/anthropic"
+
+    # ---- the gate: may_contact() is asked before Find models sends anything ----
+    gate, real_gate = [], backends.may_contact
+    backends.may_contact = lambda kind, url: gate.append((kind, url)) or False
+    n = len(_Fake.seen)
+    find_api(dlg)
+    dlg.local.click()
+    find(dlg, base + "/v1")
+    check("may_contact() says no: Find models sends nothing, for both sources, and says so",
+          gate == [("anthropic", base + "/anthropic"), ("openai", base + "/v1")] and len(_Fake.seen) == n
+          and dlg.find_msg.text().startswith("Nothing was sent") and dlg.api_find_msg.text().startswith("Nothing was sent")
+          and dlg._asking is None, f"{gate} {_Fake.seen[n:]} {dlg.find_msg.text()!r}")
+    backends.may_contact = lambda kind, url: gate.append((kind, url)) or True
+    find(dlg, base + "/v1")
+    check("may_contact() says yes: asked first, then one request",
+          gate[-1] == ("openai", base + "/v1") and len(_Fake.seen) == n + 1, f"{gate} {_Fake.seen[n:]}")
+    backends.may_contact = real_gate
+    backends.ANTHROPIC_URL = real_url
+    backends.set_local_key("")
+    dlg.reject()
+    dlg.deleteLater()
+
     server_b.shutdown()
     server_b.server_close()
     ticker.stop()
@@ -486,10 +573,10 @@ def main():
                       ("finished", {"is_error": False, "result": "A box 10 x 20 x 30 mm."})]
     pan.input.setPlainText("make a box 10 x 20 x 30")
     pan.send()
-    check("local: send() goes to LocalRun.start(project, text, local_config())",
+    check("local: send() goes to LocalRun.start(project, text, engine_config()), with no image",
           [c for c in stub.calls if c[0] == "start"] == [("start", project, "make a box 10 x 20 x 30",
-           {"url": "http://127.0.0.1:1234/v1", "model": "google/gemma-4-e4b", "key": ""})],
-          str(stub.calls))
+           {"kind": "openai", "url": "http://127.0.0.1:1234/v1", "model": "google/gemma-4-e4b", "key": ""})]
+          and stub.images[-1] == [], str(stub.calls))
     check("local: ClaudeRun.start is not called, the bridge is not asked",
           not starts and len(bridge_calls) == n_bridge)
     check("local: while it works: 'The local model is working…', the button says Stop, the input is empty",
@@ -580,6 +667,79 @@ def main():
     check("local: tooltips name the local model", pan.build_btn.toolTip() == "The local model builds the whole part"
           and pan.refs_btn.toolTip().endswith("for the local model"))
 
+    # images that were added go with the next message; other files stay references only
+    def drop(*names, text=None):
+        """Drop files with these names on the panel. Returns their names in refs/."""
+        files = []
+        for name in names:
+            path = os.path.join(home, name)
+            if text is None:
+                picture = QtGui.QImage(12, 8, QtGui.QImage.Format_RGB32)
+                picture.fill(QtCore.Qt.white)
+                picture.save(path, "PNG")
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            files.append(path)
+        before = set(os.listdir(os.path.join(project, "refs")))
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(f) for f in files])
+        pan.take_mime(mime)
+        return sorted(set(os.listdir(os.path.join(project, "refs"))) - before)
+
+    def sent_with(text, replay=None):
+        """Send a message; (the images the engine got or None when nothing was sent, new entries)."""
+        stub.replay[:] = replay or [("finished", {"is_error": False, "result": ""})]
+        n, e = len(stub.images), len(pan.entries)
+        pan.input.setPlainText(text)
+        pan.send()
+        wait_for(lambda: pan.send_btn.text() == "Send", 3)
+        return (stub.images[-1] if len(stub.images) > n else None), pan.entries[e:]
+
+    (png,) = drop("sketch photo.png")
+    check("local: a dropped image goes to refs/, and the note says it goes with the next message",
+          pan.entries[-1] == ("note", f"In refs/: `{png}`. The image goes to the local model with your next message."),
+          str(pan.entries[-1]))
+    drop("datasheet.pdf", text="%PDF-1.4 made up")
+    check("local: a PDF stays a reference only",
+          pan.entries[-1][1].endswith("Tell the local model what to do with them."), str(pan.entries[-1]))
+    got, new = sent_with("what is this part?")
+    check("local: the image goes with the next message, the PDF and the text file do not",
+          got == ["refs/" + png], str(got))
+    check("local: the chat shows a small note under the message: 'with 1 image'",
+          new[:2] == [("user", "what is this part?"), ("note", "with 1 image")], str(new))
+    got, new = sent_with("and its size?")
+    check("local: the image goes one time only", got == [] and ("note", "with 1 image") not in new, str((got, new)))
+    six = drop(*["view %d.png" % i for i in range(6)])
+    got, new = sent_with("six views")
+    check("local: at most 4 images go with a message, the newest ones, and the panel says so",
+          got == ["refs/" + n for n in six[2:]] and ("note", "with 4 images") in new
+          and any(k == "note" and "Only the newest 4 images" in t for k, t in new), str((got, new)))
+    (bad,) = drop("not a picture.png", text="this is text")
+    got, new = sent_with("look at this")
+    check("local: a file that is no image: a plain error, nothing is sent, the text stays in the input",
+          got is None and len(new) == 1 and new[0][0] == "error" and "is not an image" in new[0][1]
+          and "Traceback" not in new[0][1] and pan.input.toPlainText() == "look at this", str((got, new)))
+    pan.send()
+    wait_for(lambda: pan.send_btn.text() == "Send", 3)
+    check("local: Send again sends the message without that file",
+          stub.calls[-1][:3] == ("start", project, "look at this") and stub.images[-1] == [], str(stub.calls[-1]))
+    drop("flange.png")
+    hint = "This model cannot read images. Send your message again and it goes without the images."
+    got, new = sent_with("which flange is this?", [("finished", {"is_error": True, "result": hint, "no_vision": True})])
+    check("local, a model without vision: the hint is shown and the message is back in the input",
+          len(got) == 1 and new[-1] == ("error", hint) and pan.input.toPlainText() == "which flange is this?",
+          str((got, new, pan.input.toPlainText())))
+    n = len(stub.images)
+    spin(100)
+    check("local, a model without vision: nothing is sent again by itself", len(stub.images) == n)
+    stub.replay[:] = [("finished", {"is_error": False, "result": ""})]
+    pan.send()
+    wait_for(lambda: pan.send_btn.text() == "Send", 3)
+    check("local, a model without vision: Send again sends the message without the images",
+          stub.calls[-1][:3] == ("start", project, "which flange is this?") and stub.images[-1] == []
+          and pan.input.toPlainText() == "", str(stub.calls[-1]))
+
     # history and New chat
     stub.past[project] = [("user", "earlier question"), ("tool", "`run_python` x"), ("claude", "earlier answer")]
     del stub.calls[:]
@@ -661,15 +821,61 @@ def main():
     check("switch to API key without a key: says where to put it",
           setup_errors(pan) == ["No Anthropic API key is saved. Open Settings and paste your key."]
           and backends.api_key() == "", str(setup_errors(pan)))
+    check("the API key goes on with the conversation of the built-in engine, the same as the local model",
+          ("user", "local question") in pan.entries, str(pan.entries))
+    del stub.calls[:]
     pan.send("hello")
     spin(50)
     check("API key without a key: nothing is sent, the message is shown once",
-          not starts and len(setup_errors(pan)) == 1 and not kinds(pan, "user"))
+          not starts and not [c for c in stub.calls if c[0] == "start"]
+          and len(setup_errors(pan)) == 1 and "hello" not in kinds(pan, "user"))
+    paths.find_tool = lambda name: None          # no Claude Code, no uv on this computer
     settings(lambda d: d.api_key.edit.setText("sk-ant-made-up-3"))
     spin(300)
-    check("API key saved: ready; 'not signed in' is not checked and not shown",
+    check("API key saved: ready without Claude Code and uv; no program is started, no sign-in is checked",
           not setup_errors(pan) and len(claude_calls()) == n_claude
-          and pan.source.full == "Anthropic API key · sonnet", str(setup_errors(pan)) + pan.source.full)
+          and pan.source.full == "Anthropic API key · claude-haiku-5-5", str(setup_errors(pan)) + pan.source.full)
+    check("API key: tooltips name Claude", pan.build_btn.toolTip() == "Claude builds the whole part")
+    paths.in_flatpak = lambda: True
+    check("API key in a Flatpak: ready too, no program has to be started", pan.check_setup() is True
+          and not setup_errors(pan), str(setup_errors(pan)))
+    paths.in_flatpak = real_flatpak
+
+    # a message with the API key goes to the built-in engine; Claude Code is not started
+    n_bridge, n_err = len(bridge_calls), len(kinds(pan, "error"))
+    del stub.calls[:]
+    stub.replay[:] = [("tool", "run_python", "shaft()"), ("tool_error", "run_python"),
+                      ("text", "A shaft."), ("finished", {"is_error": False, "result": "A shaft."})]
+    pan.input.setPlainText("make a shaft")
+    pan.send()
+    working = pan.status.text()
+    wait_for(lambda: pan.send_btn.text() == "Send", 3)
+    check("apikey: send() goes to LocalRun.start with the Anthropic config: fixed address, the model, the API key",
+          [c for c in stub.calls if c[0] == "start"] == [("start", project, "make a shaft", {
+              "kind": "anthropic", "url": "https://api.anthropic.com", "model": "claude-haiku-5-5",
+              "key": "sk-ant-made-up-3"})], str(stub.calls))
+    check("apikey: Claude Code is not started and the bridge is not asked",
+          not starts and len(claude_calls()) == n_claude and len(bridge_calls) == n_bridge,
+          f"{starts} {len(claude_calls()) - n_claude} {len(bridge_calls) - n_bridge}")
+    check("apikey: the words name Claude, never 'the local model'",
+          working == "Claude is working…" and kinds(pan, "error")[n_err:] == ["`run_python` failed, Claude is looking at why"]
+          and ("claude", "A shaft.") in pan.entries, f"{working!r} {kinds(pan, 'error')[n_err:]}")
+    stub.replay[:] = [("finished", {"is_error": True, "result": ""})]
+    pan.send("hello")
+    wait_for(lambda: pan.send_btn.text() == "Send", 3)
+    check("apikey: an error without a text names Claude", pan.entries[-1] == ("error", "Claude stopped without an answer."),
+          str(pan.entries[-1]))
+    (png,) = drop("bracket.png")
+    check("apikey: an added image goes with the next message to Claude",
+          pan.entries[-1][1].endswith("The image goes to Claude with your next message."), str(pan.entries[-1]))
+    got, new = sent_with("what is this?")
+    check("apikey: the image goes to the engine with the message", got == ["refs/" + png]
+          and ("note", "with 1 image") in new, str((got, new)))
+    [b for b in pan.findChildren(QtWidgets.QToolButton) if b.text() == "New chat"][0].click()
+    check("apikey: New chat clears the engine's conversation, not the Claude Code session",
+          stub.calls[-1] == ("clear", project) and projects.get_session(project) == "claude-session-keep",
+          str(stub.calls[-1]))
+    paths.find_tool = real_find_tool
     os.environ["PANEL_FAKE_LOGGED_IN"] = "1"
 
     # =====================================================================
@@ -711,12 +917,11 @@ def main():
     check("account: FreeCAD's own PYTHONHOME is not handed on",
           not pe.contains("PYTHONHOME") or not real_roots, pe.value("PYTHONHOME"))
 
+    stub.replay[:] = [("finished", {"is_error": False, "result": ""})]
     args, pe = send_recorded("apikey", "make a shaft")
-    check("apikey: also goes to ClaudeRun.start", args is not None and args[:3] == (fake_claude, project, "make a shaft"))
-    check("apikey: the process environment has the saved key, not the shell's",
-          pe.value("ANTHROPIC_API_KEY") == "sk-ant-made-up-3", pe.value("ANTHROPIC_API_KEY"))
-    check("apikey: the shell's token and endpoint are removed",
-          not pe.contains("ANTHROPIC_AUTH_TOKEN") and not pe.contains("ANTHROPIC_BASE_URL"))
+    check("apikey: does not go to ClaudeRun.start", args is None and stub.calls[-1][:3] == ("start", project, "make a shaft"),
+          str((args, stub.calls[-1])))
+    wait_for(lambda: pan.send_btn.text() == "Send", 3)
 
     args, pe = send_recorded("custom", "make a pin")
     check("custom: goes to ClaudeRun.start with the endpoint from Settings and no API key",
@@ -762,7 +967,7 @@ def main():
     paths.in_flatpak = lambda: True
     check("account in a Flatpak: the old message, plus the way out",
           pan.check_setup() is False and len(setup_errors(pan)) == 1 and "Flatpak" in setup_errors(pan)[0]
-          and "local model in Settings" in setup_errors(pan)[0], str(setup_errors(pan)))
+          and "a local model or an API key in Settings" in setup_errors(pan)[0], str(setup_errors(pan)))
     paths.in_flatpak = real_flatpak
     paths.find_tool = lambda name: None
     check("account without Claude Code: the install hint is still shown",
@@ -807,11 +1012,14 @@ def main():
           ("claude", "fake answer to: make a bracket") in pan.entries
           and ("tool", "`execute_code` doc.recompute()") in pan.entries
           and projects.get_session(project) == "fake-session-1", str(pan.entries[-3:]))
-    rec = run_fake("apikey", "make a lever")
-    check("apikey: the started program has the saved key, resumes the session",
-          rec["env"].get("ANTHROPIC_API_KEY") == "sk-ant-made-up-3" and "ANTHROPIC_BASE_URL" not in rec["env"]
-          and "ANTHROPIC_AUTH_TOKEN" not in rec["env"] and rec["argv"][4:6] == ["--resume", "fake-session-1"],
-          str(rec))
+    n = len(claude_calls())
+    p.SetString("Backend", "apikey")
+    pan.check_setup()
+    got, new = sent_with("make a lever")
+    spin(300)
+    check("apikey: no program is started, the saved key is in no program's environment",
+          got == [] and len(claude_calls()) == n and projects.get_session(project) == "fake-session-1"
+          and "sk-ant-made-up-3" not in json.dumps(claude_calls()), str(claude_calls()[n:]))
     rec = run_fake("custom", "make a knob")
     check("custom: the started program has the endpoint and no API key, and no Claude model argument",
           rec["env"].get("ANTHROPIC_BASE_URL") == "http://localhost:11434" and "ANTHROPIC_API_KEY" not in rec["env"]

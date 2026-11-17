@@ -56,10 +56,10 @@ def say(line):
 
 
 # show what the server used, for the report only
-_message = local_agent.Agent._message
+_message = local_agent.OpenAIWire.answer
 
 
-def _spy(self, status, raw):
+def _spy(self, status, headers, raw, pictures):
     try:
         data = json.loads(raw)
         msg = data["choices"][0]["message"]
@@ -68,10 +68,10 @@ def _spy(self, status, raw):
             len(msg.get("reasoning_content") or ""), len(msg.get("content") or ""), len(msg.get("tool_calls") or [])))
     except Exception:
         say("   server: HTTP %d, %s" % (status, raw[:300]))
-    return _message(self, status, raw)
+    return _message(self, status, headers, raw, pictures)
 
 
-local_agent.Agent._message = _spy
+local_agent.OpenAIWire.answer = _spy
 
 
 def main():

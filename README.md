@@ -37,14 +37,21 @@ in the panel and choose where the AI runs:
 | Source | You need | What leaves the computer |
 |---|---|---|
 | **Local model** | a model server that speaks the OpenAI API: LM Studio, Ollama, llama.cpp. On this computer or on another one in your network. Nothing else. | nothing, when the server is on this computer; else to that server |
+| **Anthropic API key** | a key from the Anthropic Console. Nothing else. | your messages, the images that you send with them, and what the tools report (the objects of your model, the output of the code, text files of the project that the AI reads): to `api.anthropic.com`, billed per use |
 | **Claude account** | the Claude Code program, signed in, and the `uv` program | your messages, the project files that Claude reads, screenshots of FreeCAD: to Anthropic, on your subscription |
-| **Anthropic API key** | the Claude Code program, `uv`, and a key | the same, to Anthropic, billed per use |
 
 **Local model, step by step.** In Settings choose "Local model or other server",
 type the server address (LM Studio: `http://127.0.0.1:1234/v1`, Ollama:
 `http://127.0.0.1:11434/v1`), press **Find models**, pick one, OK.
 For a classroom: run one model server on a computer in the room and let the
 students type its address, for example `http://192.168.1.20:1234/v1`.
+
+**API key, step by step.** In Settings choose "Anthropic API key", paste the
+key, OK. The model is `claude-opus-5-5` until you pick another one: **Find
+models** asks Anthropic which models your key can use.
+
+The local model and the API key share one conversation in a project. You can
+change between them in the middle of the work.
 
 ## Using it
 
@@ -53,7 +60,10 @@ students type its address, for example `http://192.168.1.20:1234/v1`.
 - **Build / Teach**: Build makes the whole part. Teach goes one feature at a time
   and says which tool a person would use and why.
 - **Add reference…**, or drop a photo, a PDF or a link on the panel: it goes into
-  `refs/` for the AI.
+  `refs/` for the AI. With a local model or an API key, an image (PNG, JPEG) also
+  goes with your next message, at most 4 for each message, made smaller to
+  1568 pixels. The model must be able to read images; if it cannot, the panel
+  tells you and you can send the message again without them.
 - **Drawing**: a workshop drawing on an ISO sheet (A4 to A2): three views, an
   isometric view, the overall dimensions, the title block, and a PDF in
   `drawings/`. The sheet is made by fixed rules, not by the AI. Tolerances,
@@ -84,19 +94,22 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 - **Nothing is sent to an AI service until you send a message or press Find models.**
   With the Claude account source, the panel asks the Claude Code program on this
   computer whether you are signed in when it opens. No telemetry.
-- With the Claude account and API key sources, the panel downloads the
-  freecad-mcp bridge from GitHub the first time, after it asks you.
+- With the API key source, each step of a request is one HTTPS request to
+  `api.anthropic.com`: the conversation of the project (up to about 300,000
+  characters of it), the images of that conversation and the key. Find models is
+  one more request with the key. Nothing else is contacted.
+- With the Claude account source, the panel downloads the freecad-mcp bridge
+  from GitHub the first time, after it asks you.
 
 ## What is not done yet
 
-- The **API key** source still needs the Claude Code program. A version without
-  it is planned.
 - The **Claude account** source still needs `uv` and the freecad-mcp download.
   A bridge built into the addon is planned.
 - The AI's code runs **without asking first**. A "show the code, then Run or
   Skip" step, with a switch for "run without asking", is planned. The official
   FreeCAD addon list requires it, so CADprompt is not in that list yet.
-- **Pictures for the local model** (a photo of a sketch) are planned.
+- A question "may CADprompt contact this service?" before the first request to
+  each AI service is planned (the place for it is `backends.may_contact`).
 - No person has tested Windows and macOS.
 - A fine-tuned small model for FreeCAD is planned.
 

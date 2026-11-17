@@ -11,6 +11,8 @@ calls = []      # what the panel asked for, in order: ("start", project, prompt,
 replay = []     # what the next start() sends back: ("text", t), ("tool", name, detail),
                 # ("tool_error", name), ("finished", dict). No "finished": the run keeps going.
 past = {}       # project -> [(kind, text), ...], what history() gives
+images = []     # the images of every start(), in order: a list of project paths each
+MAX_IMAGES = 4
 
 
 class LocalRun(QtCore.QObject):
@@ -27,8 +29,9 @@ class LocalRun(QtCore.QObject):
     def running(self):
         return self._on
 
-    def start(self, project, prompt, config):
+    def start(self, project, prompt, config, images=None):
         calls.append(("start", project, prompt, dict(config)))
+        globals()["images"].append(list(images or []))
         self._on = True
         self._todo = list(replay)
         QtCore.QTimer.singleShot(0, self._play)     # like the real one: start() returns at once
@@ -56,3 +59,26 @@ def history(project, limit=200):
 def clear(project):
     calls.append(("clear", project))
     past.pop(project, None)
+
+
+class ImageError(ValueError):
+    def __init__(self, text, path=""):
+        super().__init__(text)
+        self.path = path
+
+
+def images_note(n):
+    return "with %d image%s" % (n, "" if n == 1 else "s")
+
+
+def project_images(project, files):
+    """Like the real one, without Qt: a file is an image when it starts like a PNG."""
+    import os
+    out = []
+    for f in files or []:
+        with open(f, "rb") as fh:
+            if fh.read(4) != b"\x89PNG":
+                raise ImageError("`%s` is not an image that CADprompt can read (PNG or JPEG, for "
+                                 "example). It was not sent." % os.path.basename(f), f)
+        out.append(os.path.relpath(f, project).replace(os.sep, "/"))
+    return out

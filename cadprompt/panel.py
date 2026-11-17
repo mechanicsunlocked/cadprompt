@@ -1,8 +1,8 @@
 """The chat panel: a dock in FreeCAD where the user says what to build.
 
 Who does the work is chosen in Settings (backends.py): Claude Code with the
-user's account, an API key or another endpoint, or the built-in engine with a
-local model. The panel looks and works the same for all of them.
+user's account or another endpoint, or the built-in engine with a local model
+or an Anthropic API key. The panel looks and works the same for all of them.
 """
 
 import os
@@ -14,6 +14,7 @@ from PySide import QtCore, QtGui, QtWidgets
 from . import backends, bridge, paths, projects, runner
 
 NEW = "+ New project…"
+IMAGES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")   # references that can go with a message
 
 INSTALL_CLAUDE = {
     "win": "In PowerShell: `irm https://claude.ai/install.ps1 | iex`",
@@ -76,9 +77,11 @@ class _Source(QtWidgets.QLabel):
 class Panel(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.run = runner.ClaudeRun(self)     # Claude Code: account, API key, other endpoint
+        self.run = runner.ClaudeRun(self)     # Claude Code: account, other endpoint
         self.local_run = None                 # the built-in engine, made when first needed
         self._engine = self.run               # the one that got the last message
+        self._sent_to = backends.current()    # the source that got the last message
+        self._images = []                     # image references added since the last message
         self._connect(self.run)
         self._check = 0                       # counts check_setup runs: late answers are dropped
         self._stop_asked = False
@@ -121,23 +124,27 @@ class Panel(QtWidgets.QWidget):
         if self.local_run is not None and self.local_run.running():
             self.local_run.stop()
 
-    def _who(self, start=False):
-        """Who is working on the message that was sent."""
-        if self._engine is self.run:
+    @staticmethod
+    def _name(backend, start=False):
+        """What the AI of a source is called in messages: every source but the local one is Claude."""
+        if backend != "local":
             return "Claude"
         return "The local model" if start else "the local model"
 
+    def _who(self, start=False):
+        """Who is working on the message that was sent."""
+        return self._name(self._sent_to, start)
+
     def _ai(self, start=False):
         """Who the next message goes to."""
-        if backends.uses_claude_code():
-            return "Claude"
-        return "The local model" if start else "the local model"
+        return self._name(backends.current(), start)
 
     def _show_source(self):
         """The label next to the mode buttons, and the tooltips that name the AI."""
         b = backends.current()
         p = paths.params()
         model = {"local": p.GetString("LocalModel", "").strip() or "no model yet",
+                 "apikey": backends.api_model(),
                  "custom": p.GetString("Model", "").strip()}.get(b, p.GetString("ModelOverride", "").strip())
         self.source.show_text(backends.label(b) + (" · " + model if model else ""))
         self.build_btn.setToolTip(f"{self._ai(start=True)} builds the whole part")
@@ -251,17 +258,22 @@ class Panel(QtWidgets.QWidget):
         if any(kind.startswith("setup") for kind, _ in self.entries):
             self.entries = [e for e in self.entries if not e[0].startswith("setup")]
             self._render()
-        if backends.current() == "local":
-            return self._check_local()
+        if not backends.uses_claude_code():
+            return self._check_engine()
         return self._check_claude_code()
 
-    def _check_local(self):
-        """The built-in engine needs no Claude Code, no uv and no bridge: only a server and a model."""
+    def _check_engine(self):
+        """The built-in engine needs no Claude Code, no uv and no bridge: a local
+        model needs a server and a model, the API key source a key and a model."""
         if not paths.template_dir():
             self._setup("The project template is missing: install the whole cadprompt repository.")
             return False
-        cfg = backends.local_config()
-        if not cfg["url"]:
+        cfg = backends.engine_config()
+        if cfg["kind"] == "anthropic":
+            if not cfg["key"]:
+                self._setup("No Anthropic API key is saved. Open Settings and paste your key.")
+                return False
+        elif not cfg["url"]:
             self._setup("No server address is set for the local model. Open Settings and enter it, "
                         f"for example `{backends.LOCAL_URL}` for LM Studio.")
             return False
@@ -271,26 +283,24 @@ class Panel(QtWidgets.QWidget):
         try:
             self._local_engine()
         except Exception as e:
-            self._setup(f"The part of CADprompt that talks to local models did not load: {e}")
+            self._setup(f"The built-in engine of CADprompt did not load: {e}")
             return False
         return True
 
     def _check_claude_code(self):
         k = _os_key()
-        backend = backends.current()
         if paths.in_flatpak():
             self._setup("This FreeCAD runs as a Flatpak and cannot start Claude Code from inside "
                         "its sandbox. Use the FreeCAD package or AppImage, or the terminal launcher, "
-                        "or choose a local model in Settings.")
+                        "or choose a local model or an API key in Settings.")
             return False
         if not paths.template_dir():
             self._setup("The project template is missing: install the whole cadprompt repository.")
             return False
         self.claude = paths.find_tool("claude")
         if not self.claude:
-            then = " Then restart FreeCAD." if backend == "apikey" else \
-                   " Then sign in once by running `claude` and restart FreeCAD."
-            self._setup("Claude Code is not installed. " + INSTALL_CLAUDE[k] + then)
+            self._setup("Claude Code is not installed. " + INSTALL_CLAUDE[k] +
+                        " Then sign in once by running `claude` and restart FreeCAD.")
             return False
         if not paths.find_tool("uvx"):
             self._setup("uv is not installed (it runs the FreeCAD bridge). " + INSTALL_UV[k] +
@@ -317,12 +327,7 @@ class Panel(QtWidgets.QWidget):
         except Exception as e:
             self._setup(f"The FreeCAD bridge did not start: {e}")
             return False
-        if backend == "apikey":
-            # the key signs in, so whether Claude Code has a login of its own does not matter
-            if not backends.api_key():
-                self._setup("No Anthropic API key is saved. Open Settings and paste your key.")
-                return False
-        elif not runner.backend_env():
+        if not runner.backend_env():
             runner.auth_status(self.claude, lambda st, n=self._check: self._on_auth(st, n), self)
         return True
 
@@ -380,6 +385,7 @@ class Panel(QtWidgets.QWidget):
         runner.allow_web_in_project(self.project)
         self._sync_mode()
         self.entries = []
+        self._images = []             # they are in the refs/ of the project that was open
         self._add("note", f"Project **{name}**.")
         self._load_history()
         if open_model:
@@ -394,11 +400,11 @@ class Panel(QtWidgets.QWidget):
         """The earlier conversation of this project with the source chosen now."""
         if not self.project:
             return
-        if backends.current() == "local":
+        if not backends.uses_claude_code():
             try:
                 old = self._local_engine().history(self.project)
             except Exception as e:
-                App.Console.PrintWarning(f"CADprompt: could not read the local conversation: {e}\n")
+                App.Console.PrintWarning(f"CADprompt: could not read the conversation: {e}\n")
                 return
         else:
             sid = projects.get_session(self.project)
@@ -455,9 +461,22 @@ class Panel(QtWidgets.QWidget):
         names = projects.add_refs(self.project, files) if files else []
         for url in links:
             projects.add_link(self.project, url)
-        what = [f"`{n}`" for n in names] + [f"<{u}>" for u in links]
-        self._add("note", "In refs/: " + ", ".join(what) + f". Tell {self._ai()} what to do with them.")
+        self._added(names, links)
         return True
+
+    def _added(self, names, links=()):
+        """Say what went into refs/. An image also goes with the next message to the
+        built-in engine; Claude Code opens the files in refs/ itself."""
+        what = [f"`{n}`" for n in names] + [f"<{u}>" for u in links]
+        text = "In refs/: " + ", ".join(what) + "."
+        images = [n for n in names if n.lower().endswith(IMAGES)]
+        self._images += [os.path.join(self.project, "refs", n) for n in images]
+        if images and not backends.uses_claude_code():
+            text += (" The image goes" if len(images) == 1 else " The images go") + \
+                    f" to {self._ai()} with your next message."
+        else:
+            text += f" Tell {self._ai()} what to do with them."
+        self._add("note", text)
 
     def _on_mode(self, _checked):
         if self.project:
@@ -465,8 +484,8 @@ class Panel(QtWidgets.QWidget):
 
     def _new_chat(self):
         if self.project:
-            if backends.current() == "local":
-                # each source keeps its own conversation: this one is the engine's file
+            if not backends.uses_claude_code():
+                # Claude Code keeps its own conversation: this one is the engine's file
                 try:
                     if self.local_run is not None and self.local_run.running():
                         self.local_run.stop()     # or it would write the old conversation back
@@ -477,6 +496,7 @@ class Panel(QtWidgets.QWidget):
             else:
                 projects.set_session(self.project, None)
             self.entries = []
+            self._images = []
             self._add("note", "New conversation.")
 
     def _open_folder(self):
@@ -490,9 +510,7 @@ class Panel(QtWidgets.QWidget):
             self, "Add references", os.path.expanduser("~"),
             "References (*.png *.jpg *.jpeg *.webp *.pdf *.dxf *.step *.stp *.txt *.md);;All files (*)")
         if files:
-            added = projects.add_refs(self.project, files)
-            self._add("note", "In refs/: " + ", ".join(f"`{a}`" for a in added) +
-                      f". Tell {self._ai()} what to do with them.")
+            self._added(projects.add_refs(self.project, files))
 
     def _settings(self):
         from .settings_dialog import SettingsDialog
@@ -520,28 +538,50 @@ class Panel(QtWidgets.QWidget):
             self._add("error", "Pick or create a project first.")
             return
         backend = backends.current()
-        token = None
-        if backend == "local":
+        engine = not backends.uses_claude_code(backend)
+        token, images = None, []
+        if engine:
             if not self.check_setup():
                 return
+            images = self._take_images()
+            if images is None:
+                return
         else:
-            key_missing = backend == "apikey" and not backends.api_key()
-            if (not self.claude or key_missing) and not self.check_setup():
+            if not self.claude and not self.check_setup():
                 return
             try:
                 token, _ = bridge.ensure()
             except Exception as e:
                 self._add("error", f"FreeCAD bridge: {e}")
                 return
+        self._images = []
         if typed:
             self.input.clear()
         self._add("user", text)
         self._last_prompt, self._retried = text, False
         self._stop_asked = False
-        if backend == "local":
-            self._start_local(text)
+        self._sent_to = backend
+        if engine:
+            self._start_local(text, backend, images)
         else:
             self._start(text, token)
+
+    def _take_images(self):
+        """The images that go with this message, as paths in the project.
+        None when one of them is no image: the message is not sent then."""
+        files = [f for f in self._images if os.path.isfile(f)]
+        left = len(files) - self._local_engine().MAX_IMAGES
+        if left > 0:
+            files = files[left:]
+            self._add("note", f"Only the newest {len(files)} images go with a message. "
+                              "The others stay in refs/.")
+        try:
+            return self._local_engine().project_images(self.project, files)
+        except ValueError as e:
+            bad = getattr(e, "path", None)
+            self._images = [f for f in files if f != bad]
+            self._add("error", f"{e} Press Send again to send your message without it.")
+            return None
 
     def _start(self, text, token):
         # the source's own variables (key, endpoint) are added by the runner: backends.claude_env
@@ -552,16 +592,18 @@ class Panel(QtWidgets.QWidget):
         self._busy(True, f"{self._who(start=True)} is working…")
         self.run.start(self.claude, self.project, text, projects.get_session(self.project), env)
 
-    def _start_local(self, text):
+    def _start_local(self, text, backend, images=()):
         """No Claude Code, no bridge, no session id: the engine keeps its own conversation."""
         try:
             run = self._local_run()
             self._engine = run
             self._busy(True, f"{self._who(start=True)} is working…")
-            run.start(self.project, text, backends.local_config())
+            if images:
+                self._add("note", self._local_engine().images_note(len(images)))
+            run.start(self.project, text, backends.engine_config(backend), images=list(images))
         except Exception as e:
             self._busy(False)
-            self._add("error", f"The local model could not be started: {e}")
+            self._add("error", f"{self._who(start=True)} could not be started: {e}")
 
     def _on_tool(self, name, detail):
         self._add("tool", f"`{name}` {detail}".strip())
@@ -602,7 +644,10 @@ class Panel(QtWidgets.QWidget):
         if not res.get("is_error"):
             return
         if local:
-            self._add("error", str(res.get("result") or "The local model stopped without an answer."))
+            self._add("error", str(res.get("result") or f"{self._who(start=True)} stopped without an answer."))
+            if res.get("no_vision") and self._last_prompt and not self.input.toPlainText().strip():
+                # the message is back in the input: Send now sends it without the images
+                self.input.setPlainText(self._last_prompt)
             return
         msg = str(res.get("result") or res.get("subtype") or "Claude Code stopped.")
         if (not self._retried and projects.get_session(self.project)
@@ -613,10 +658,7 @@ class Panel(QtWidgets.QWidget):
             self._start(self._last_prompt, bridge.ensure()[0])
             return
         if "login" in msg.lower() or "authenticat" in msg.lower():
-            if backends.current() == "apikey":
-                msg += "\n\nCheck the API key in Settings."
-            else:
-                msg += "\n\nSign in: open a terminal, run `claude`, and sign in with your Claude account."
+            msg += "\n\nSign in: open a terminal, run `claude`, and sign in with your Claude account."
         self._add("error", msg)
 
 

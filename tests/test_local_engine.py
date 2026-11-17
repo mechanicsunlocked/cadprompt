@@ -8,6 +8,7 @@ The report goes to stdout and to <FREECAD_USER_HOME>/test_local_engine.log.
 FREECAD_USER_HOME keeps the test away from the user's real FreeCAD settings.
 """
 
+import base64
 import json
 import os
 import re
@@ -30,15 +31,15 @@ sys.path.insert(0, ADDON)
 sys.path.insert(0, HERE)
 
 import FreeCAD as App                                   # noqa: E402
-from PySide import QtCore, QtWidgets                    # noqa: E402
+from PySide import QtCore, QtGui, QtWidgets             # noqa: E402
 
 # Without a display Qt warns "This plugin does not support raise()" when FreeCAD
 # shows a notification, and FreeCAD 1.1 deadlocks while it reports that warning
 # (NotificationArea locks its mutex twice). Mute the warning: a test-only problem.
 QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
-from cadprompt import local_agent, local_engine, local_tools, projects    # noqa: E402
-from local_fake_server import FakeServer, answer, call, error, slow       # noqa: E402
+from cadprompt import backends, local_agent, local_engine, local_tools, projects    # noqa: E402
+from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, error, slow   # noqa: E402
 
 HOME = os.environ["FREECAD_USER_HOME"]
 LOG = os.path.join(HOME, "test_local_engine.log")
@@ -113,17 +114,33 @@ def new_project(name):
     return path
 
 
-def run_once(project, prompt, config, timeout=10):
+def run_once(project, prompt, config, timeout=10, images=None):
     run = local_engine.LocalRun()
     rec = Recorder(run)
-    run.start(project, prompt, config)
+    run.start(project, prompt, config, images=images)
     pump(rec.done, timeout)
     return run, rec
 
 
 def chat(project):
-    with open(os.path.join(project, ".cadprompt", "local-chat.json")) as f:
+    with open(os.path.join(project, ".cadprompt", "local-chat.json"), encoding="utf-8") as f:
         return json.load(f)["messages"]
+
+
+def picture(path, width, height, kind):
+    """A test image file: grey, with a dark bar, so it is not one flat colour."""
+    img = QtGui.QImage(width, height, QtGui.QImage.Format_RGB32)
+    img.fill(QtGui.QColor(200, 200, 200))
+    for x in range(width // 4, width // 2):
+        for y in range(0, height, 7):
+            img.setPixelColor(x, y, QtGui.QColor(20, 20, 20))
+    return img.save(path, kind)
+
+
+def sent_image(data):
+    """(width, height) of an image as it was sent, from its base64 text."""
+    img = QtGui.QImage.fromData(base64.b64decode(data))
+    return img.width(), img.height()
 
 
 # like a small model, the code does not make a document first
@@ -632,17 +649,201 @@ def main():
     # a worker that waits for a tool when its LocalRun dies must not wait for ever
     parent = QtCore.QObject()
     run12 = local_engine.LocalRun(parent)
-    srv.add(call("run_python", {"code": "NEVER_RUN = 1"}, "g1"))
+    srv.add(slow(0.3, call("run_python", {"code": "NEVER_RUN = 1"}, "g1")))
     n = len(srv.requests)
     run12.start(project, "Bye again.", cfg)
-    end = time.time() + 5
-    while len(srv.requests) == n and time.time() < end:
-        time.sleep(0.01)                 # no event processing: the tool request stays in the queue
-    time.sleep(0.3)
+    # the main thread lets the request go out (the gate), then processes no event:
+    # the answer comes 0.3 s later, and the tool request stays in the queue
+    pump(lambda: len(srv.requests) > n, 5)
+    time.sleep(0.8)
     shiboken6.delete(parent)
     check("a worker that waits for a tool ends when its LocalRun is destroyed",
           pump(lambda: all(w.isFinished() for w in local_engine._threads), 2.0)
           and len(srv.requests) == n + 1 and "NEVER_RUN" not in local_tools._namespace)
+
+    # ---- 12: an Anthropic API key: the same engine, the other wire format ---------
+    say("--- 12 the Anthropic Messages API through the whole engine")
+    close_all()
+    local_tools.reset()
+    cl = FakeAnthropic()
+    acfg = {"kind": "anthropic", "url": cl.url, "model": "claude-fake-1", "key": "sk-ant-made-up"}
+    cfg12 = dict(cfg, kind="openai", key="LOCAL-KEY-made-up")
+    project12 = new_project("anthropic")
+    cl.add(claude("I make the plate.", [("run_python", {"code": BOX}, "toolu_1")], thinking="one"),
+           claude("A plate 100 x 50 x 10.", thinking="two"))
+    run, rec = run_once(project12, "Make a plate.", acfg)
+    doc = App.ActiveDocument
+    check("anthropic: the tool call built the plate, the answer arrived, the model was saved",
+          rec.done() and not rec.result()["is_error"] and rec.result()["result"] == "A plate 100 x 50 x 10."
+          and doc is not None and doc.getObject("Plate") is not None and bool(doc.FileName)
+          and no_backup(rec.kinds()) == ["text", "tool:run_python", "text", "tool:save", "finished"],
+          (rec.events, doc and doc.FileName))
+    first, second = cl.bodies()[-2:]
+    head = {k.lower(): v for k, v in cl.requests[-1]["headers"].items()}
+    check("anthropic: POST /v1/messages with x-api-key and the API version, no Authorization header",
+          cl.requests[-1]["path"] == "/v1/messages" and head.get("x-api-key") == "sk-ant-made-up"
+          and head.get("anthropic-version") == "2026-10-21" and "authorization" not in head, head)
+    check("anthropic: the system prompt is a field of its own, the four tools are in Anthropic's shape",
+          first["system"].startswith("You are CADprompt") and [t["name"] for t in first["tools"]] ==
+          ["run_python", "get_document_state", "read_project_file", "make_drawing"]
+          and all(set(t) == {"name", "description", "input_schema"} for t in first["tools"])
+          and first["max_tokens"] > 0 and "temperature" not in first, str(first)[:300])
+    check("anthropic: the tool result goes back as a tool_result, the thinking block unchanged before the call",
+          [m["role"] for m in second["messages"]] == ["user", "assistant", "user"]
+          and [b["type"] for b in second["messages"][1]["content"]] == ["thinking", "text", "tool_use"]
+          and second["messages"][1]["content"][0]["signature"] == "SIGNATURE-one"
+          and second["messages"][2]["content"][0]["type"] == "tool_result"
+          and second["messages"][2]["content"][0]["tool_use_id"] == "toolu_1", str(second["messages"])[:600])
+    stored = chat(project12)
+    check("anthropic: the stored conversation is the neutral one, without any thinking",
+          [m["role"] for m in stored] == ["user", "assistant", "tool", "assistant"]
+          and stored[1]["tool_calls"][0]["function"]["name"] == "run_python"
+          and stored[2]["tool_call_id"] == "toolu_1" and "SIGNATURE" not in json.dumps(stored)
+          and "_native" not in json.dumps(stored) and "sk-ant" not in json.dumps(stored), str(stored)[:400])
+
+    # the source changes in the middle of the project, and back
+    n = len(srv.requests)
+    srv.add(answer("It is a plate."))
+    run, rec = run_once(project12, "What did you make?", cfg12)
+    body = srv.requests[-1]["body"]["messages"]
+    check("the same conversation goes on with a local server (OpenAI format)",
+          rec.done() and not rec.result()["is_error"] and len(srv.requests) == n + 1
+          and [m["role"] for m in body] == ["system", "user", "assistant", "tool", "assistant", "user"]
+          and body[2]["tool_calls"][0]["id"] == "toolu_1" and body[3]["tool_call_id"] == "toolu_1"
+          and "thinking" not in json.dumps(body), [m["role"] for m in body])
+    cl.add(claude("Yes, a plate."))
+    run, rec = run_once(project12, "Sure?", acfg)
+    body = cl.bodies()[-1]["messages"]
+    check("... and goes on with Anthropic again",
+          rec.done() and rec.result()["result"] == "Yes, a plate."
+          and [m["role"] for m in body] == ["user", "assistant", "user", "assistant", "user", "assistant", "user"]
+          and body[5]["content"] == [{"type": "text", "text": "It is a plate."}], [m["role"] for m in body])
+    local_wire, remote_wire = json.dumps(srv.requests[n:]), json.dumps(cl.requests)
+    check("each key went to its own service only",
+          "Bearer LOCAL-KEY-made-up" in local_wire and "sk-ant" not in local_wire
+          and "x-api-key" not in local_wire.lower() and "sk-ant-made-up" in remote_wire
+          and "LOCAL-KEY" not in remote_wire and "authorization" not in remote_wire.lower())
+    cl.add(("error", 401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))
+    run, rec = run_once(project12, "Once more.", acfg)
+    check("anthropic: a refused key is a plain error without 'local model' and without the key",
+          rec.result()["is_error"] and "Anthropic did not accept the API key" in rec.result()["result"]
+          and "local" not in rec.result()["result"] and "sk-ant" not in rec.result()["result"], rec.result())
+
+    # ---- 13: images ------------------------------------------------------------------
+    say("--- 13 images go with a message: sent small, stored as a path")
+    jpeg = any(bytes(f.data()).lower() == b"jpeg" for f in QtGui.QImageWriter.supportedImageFormats())
+    photo = os.path.join(HOME, "big photo.jpg" if jpeg else "big photo.png")
+    os.makedirs(os.path.join(project12, "refs"), exist_ok=True)
+    part = os.path.join(project12, "refs", "part.png")
+    check("(setup) the two test images are written",
+          picture(photo, 3136, 1000, "JPEG" if jpeg else "PNG") and picture(part, 40, 30, "PNG"))
+    cl.add(claude("A grey plate with a dark bar."))
+    run, rec = run_once(project12, "What is this?", acfg, images=[photo, "refs/part.png"])
+    last = cl.bodies()[-1]["messages"][-1]["content"]
+    blocks = [b for b in last if b["type"] == "image"]
+    check("anthropic: two image blocks before the text of the message",
+          rec.done() and not rec.result()["is_error"] and [b["type"] for b in last] == ["image", "image", "text"]
+          and last[2]["text"] == "What is this?" and all(b["source"]["type"] == "base64" for b in blocks),
+          [b["type"] for b in last])
+    check("a large photo is sent with its longest side at 1568 px" + (", as JPEG" if jpeg else ""),
+          len(blocks) == 2 and sent_image(blocks[0]["source"]["data"]) == (1568, 500)
+          and blocks[0]["source"]["media_type"] == ("image/jpeg" if jpeg else "image/png"),
+          len(blocks) == 2 and (sent_image(blocks[0]["source"]["data"]), blocks[0]["source"]["media_type"]))
+    check("a small PNG is sent as it is, as PNG",
+          len(blocks) == 2 and sent_image(blocks[1]["source"]["data"]) == (40, 30)
+          and blocks[1]["source"]["media_type"] == "image/png")
+    stored = chat(project12)
+    asked = [m for m in stored if m.get("images")]
+    copied = asked[0]["images"][0] if asked else ""
+    check("the stored conversation has the paths in the project, never the image data",
+          len(asked) == 1 and asked[0]["content"] == "What is this?" and asked[0]["images"][1] == "refs/part.png"
+          and copied.startswith("refs/") and copied.endswith(os.path.basename(photo))
+          and os.path.isfile(os.path.join(project12, *copied.split("/")))
+          and blocks[0]["source"]["data"][:60] not in json.dumps(stored) and len(json.dumps(stored)) < 20000,
+          str(asked)[:300])
+    check("the history shows the note 'with 2 images' under the message",
+          [e for e in local_engine.history(project12) if e[1] in ("What is this?", "with 2 images")] ==
+          [("user", "What is this?"), ("note", "with 2 images")], local_engine.history(project12)[-4:])
+    srv.add(answer("Still the plate."))
+    run, rec = run_once(project12, "And now?", cfg12)
+    seen = [m for m in srv.requests[-1]["body"]["messages"] if isinstance(m.get("content"), list)]
+    urls = [c["image_url"]["url"] for c in seen[0]["content"] if c["type"] == "image_url"] if seen else []
+    check("a local server gets the same images, read again from the files, as image_url data",
+          len(seen) == 1 and seen[0]["content"][0] == {"type": "text", "text": "What is this?"}
+          and len(urls) == 2 and urls[0].startswith("data:image/%s;base64," % ("jpeg" if jpeg else "png"))
+          and urls[1].startswith("data:image/png;base64,")
+          and sent_image(urls[0].split(",", 1)[1]) == (1568, 500), [u[:40] for u in urls])
+    os.remove(part)
+    srv.add(answer("One image is gone."))
+    run, rec = run_once(project12, "Go on.", cfg12)
+    seen = [m for m in srv.requests[-1]["body"]["messages"] if isinstance(m.get("content"), list)]
+    check("an image whose file was deleted becomes a line of text; the other one is still sent",
+          not rec.result()["is_error"] and len(seen) == 1
+          and "An image was attached here: refs/part.png" in seen[0]["content"][0]["text"]
+          and len([c for c in seen[0]["content"] if c["type"] == "image_url"]) == 1, str(seen)[:300])
+
+    notes = os.path.join(HOME, "notes.png")
+    with open(notes, "w", encoding="utf-8") as f:
+        f.write("this is text, not an image\n")
+    before, n = chat(project12), (len(cl.requests), len(srv.requests))
+    run13 = local_engine.LocalRun()
+    said = ""
+    try:
+        run13.start(project12, "Look.", acfg, images=[notes])
+    except local_engine.ImageError as exc:
+        said = str(exc)
+    check("a file that is no image: a plain error before anything starts",
+          "`notes.png` is not an image" in said and not run13.running() and chat(project12) == before
+          and (len(cl.requests), len(srv.requests)) == n, said)
+    five = []
+    for i in range(5):
+        five.append(os.path.join(project12, "refs", "view%d.png" % i))
+        picture(five[-1], 20, 20, "PNG")
+    try:
+        said = ""
+        run13.start(project12, "Look.", acfg, images=five)
+    except local_engine.ImageError as exc:
+        said = str(exc)
+    check("more than 4 images with one message: a plain error", said == "At most 4 images can go with one message."
+          and not run13.running(), said)
+    outside = os.path.join(HOME, "outside.png")
+    picture(outside, 20, 20, "PNG")
+    stolen = dict(before[0], images=["../../outside.png"])
+    with open(os.path.join(project12, ".cadprompt", "local-chat.json"), "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "messages": [stolen] + before[1:]}, f)
+    cl.add(claude("ok"))
+    run, rec = run_once(project12, "Go on.", acfg)
+    check("a stored path that leaves the project is never read or sent",
+          not rec.result()["is_error"] and '"type": "image"' not in json.dumps(cl.bodies()[-1]["messages"][0])
+          and "The file is not there any more" in json.dumps(cl.bodies()[-1]["messages"][0]),
+          str(cl.bodies()[-1]["messages"][0])[:300])
+
+    # ---- 14: the gate of all outgoing requests ---------------------------------------
+    say("--- 14 backends.may_contact() is asked in the main thread before every request")
+    gate, real_gate = [], backends.may_contact
+    backends.may_contact = lambda kind, url: gate.append(
+        (kind, url, threading.get_ident() == main_thread, cl.connections)) or True
+    cl.add(claude("", [("get_document_state", {}, "toolu_9")]), claude("Checked."))
+    c0 = cl.connections
+    run, rec = run_once(project12, "Check it.", acfg)
+    check("asked before each of the two requests, in the main thread, before the connection is opened",
+          rec.result()["result"] == "Checked." and gate == [("anthropic", cl.url, True, c0),
+                                                             ("anthropic", cl.url, True, c0 + 1)], gate)
+    backends.may_contact = lambda kind, url: gate.append((kind, url)) and False
+    before, c0, c1 = chat(project12), cl.connections, srv.connections
+    results = []
+    for config in (acfg, cfg12):
+        run, rec = run_once(project12, "Once more.", config)
+        results.append(rec.result() if rec.done() else {})
+    pump(timeout=0.3)
+    check("may_contact() says no: a plain error for both services, no connection is opened, nothing is stored",
+          all(r.get("is_error") and r.get("result", "").startswith("Nothing was sent") for r in results)
+          and "Anthropic" in results[0]["result"] and (cl.connections, srv.connections) == (c0, c1)
+          and gate[-2:] == [("anthropic", cl.url), ("openai", srv.url)] and chat(project12) == before,
+          (results, cl.connections - c0, srv.connections - c1, gate[-2:]))
+    backends.may_contact = real_gate
+    check("the Anthropic script was used exactly", cl.overrun == 0 and not cl.script, (cl.overrun, len(cl.script)))
+    cl.close()
 
     timer.stop()
     check("the fake server's script was used exactly", srv.overrun == 0 and not srv.script,

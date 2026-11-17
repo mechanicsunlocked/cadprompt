@@ -32,6 +32,7 @@ REPO = ADDON
 sys.path[:0] = [ADDON, HERE]
 
 from utf8_output import utf8_output            # noqa: E402
+import hang_report                              # noqa: E402
 
 utf8_output()
 
@@ -87,9 +88,15 @@ def main():
     QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
     def spin(ms=50):
-        loop = QtCore.QEventLoop()
-        QtCore.QTimer.singleShot(ms, loop.quit)
-        loop.exec()
+        # No event loop of our own: on macOS a QEventLoop that is started here never
+        # came back once a document had its 3D view (the run itself had ended and the
+        # model was saved). processEvents() is what test_local_engine.py uses there.
+        end = time.monotonic() + ms / 1000.0
+        while True:
+            QtWidgets.QApplication.processEvents()
+            if time.monotonic() >= end:
+                return
+            time.sleep(0.005)
 
     def wait_for(cond, seconds=10):
         end = time.time() + seconds
@@ -377,7 +384,7 @@ def real_run(App, QtCore, pan, model, Pulse, wait_for, idle, backends, local_eng
           seen["samples"] > 0 and seen["stop"] == seen["samples"], str(seen))
     check("real model: the panel shows the request and no traceback of our own code",
           ("user", prompt) in pan.entries
-          and not any("The local engine failed" in t or "ERROR in tool" in t for _, t in pan.entries))
+          and not any("The built-in engine failed" in t or "ERROR in tool" in t for _, t in pan.entries))
     check("real model: no Claude Code session file", not os.path.exists(os.path.join(project, ".cadprompt", "session")))
     wait_for(lambda: not [w for w in local_engine._threads if not w.isFinished()], 10)
     check("real model: no worker thread is left running",
@@ -417,6 +424,7 @@ if not os.environ.get("FREECAD_USER_HOME"):
     os._exit(2)
 open(LOG, "w", encoding="utf-8").close()
 sys.excepthook = _hook
+hang_report.watch(240, os.environ["FREECAD_USER_HOME"], say)
 faulthandler.dump_traceback_later(295, exit=True, file=OUT)
 try:
     main()

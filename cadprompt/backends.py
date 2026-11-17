@@ -2,7 +2,7 @@
 
 Four sources, chosen in Settings (parameter "Backend"):
   account  the user's Claude account, through Claude Code
-  apikey   an Anthropic API key, through Claude Code
+  apikey   an Anthropic API key, through the built-in engine
   local    a local or other OpenAI-compatible server, through the built-in engine
   custom   Claude Code pointed at another Anthropic-compatible endpoint
 
@@ -23,6 +23,11 @@ BACKENDS = ("account", "apikey", "local", "custom")
 LABELS = {"account": "Claude account", "apikey": "Anthropic API key",
           "local": "Local model", "custom": "Other endpoint"}
 LOCAL_URL = "http://127.0.0.1:1234/v1"   # LM Studio's default; Ollama is http://127.0.0.1:11434/v1
+ANTHROPIC_URL = "https://api.anthropic.com"   # fixed: the saved API key goes to this service only
+ANTHROPIC_VERSION = "2026-10-21"         # the same API version as local_agent.AnthropicWire
+API_MODEL = "claude-opus-5-5"            # used until the user picks another one in Settings
+API_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")   # offered before Find models
+ENGINE = ("apikey", "local")             # the sources of the built-in engine: no Claude Code
 
 
 def current():
@@ -31,7 +36,20 @@ def current():
 
 
 def uses_claude_code(backend=None):
-    return (backend or current()) != "local"
+    return (backend or current()) not in ENGINE
+
+
+def may_contact(kind, url):
+    """True when CADprompt may send a request to this service now.
+
+    The one gate for everything the addon itself sends to an AI service:
+    kind is "openai" or "anthropic", url the address of the service. The
+    built-in engine asks before every request (local_engine: in the GUI
+    thread, also for requests that its worker thread sends), and Settings asks
+    before "Find models". On False nothing is sent and no connection is
+    opened. A consent question of the user belongs here.
+    """
+    return True
 
 
 def label(backend=None):
@@ -149,6 +167,25 @@ def local_config():
             "key": local_key()}
 
 
+def api_model():
+    return paths.params().GetString("ApiModel", "").strip() or API_MODEL
+
+
+def engine_config(backend=None):
+    """What the built-in engine needs for a source: {"kind", "url", "model", "key"}.
+
+    kind is the wire format, "openai" or "anthropic". Each key goes with its
+    own service only: the Anthropic key to ANTHROPIC_URL, the local key to
+    the local server. None for the sources that run Claude Code.
+    """
+    b = backend or current()
+    if b == "apikey":
+        return {"kind": "anthropic", "url": ANTHROPIC_URL, "model": api_model(), "key": api_key()}
+    if b == "local":
+        return dict(local_config(), kind="openai")
+    return None
+
+
 # ---- Claude Code ------------------------------------------------------------
 
 def custom_env():
@@ -177,16 +214,14 @@ def claude_env():
     bill the API when the user picked the subscription.
     """
     b = current()
-    if b == "apikey":
-        return {"ANTHROPIC_API_KEY": api_key()}, ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+    if not uses_claude_code(b):
+        return {}, []        # the built-in engine does the work, not Claude Code
     if b == "custom":
         return custom_env(), ["ANTHROPIC_API_KEY"]
-    if b == "local":
-        return {}, []        # the built-in engine does the work, not Claude Code
     return {}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 
 
-# ---- local server -----------------------------------------------------------
+# ---- asking a service for its models ---------------------------------------
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """The key goes only to the address the user typed, never to a redirect target."""
@@ -195,14 +230,21 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def list_models(url, key="", timeout=5):
-    """Model ids from GET <url>/models. Raises OSError or ValueError."""
+def list_models(url, key="", timeout=5, kind="openai"):
+    """Model ids from GET <url>/models (kind "anthropic": <url>/v1/models).
+
+    Raises OSError or ValueError. The caller asks may_contact() first.
+    """
     url = (url or "").strip().rstrip("/")
     if not url.lower().startswith(("http://", "https://")):
         raise ValueError("the server address must start with http:// or https://")
-    req = urllib.request.Request(url + "/models", headers={"Accept": "application/json"})
-    if key:
-        req.add_header("Authorization", "Bearer " + key)
+    if kind == "anthropic":
+        req = urllib.request.Request(url + "/v1/models?limit=100", headers={
+            "Accept": "application/json", "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION})
+    else:
+        req = urllib.request.Request(url + "/models", headers={"Accept": "application/json"})
+        if key:
+            req.add_header("Authorization", "Bearer " + key)
     with urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout) as r:
         data = json.loads(r.read(4_000_000).decode("utf-8", "replace"))
     rows = data.get("data", data.get("models")) if isinstance(data, dict) else data

@@ -160,7 +160,7 @@ class ClaudeRun(QtCore.QObject):
         if session:
             args += ["--resume", session]
         model = paths.params().GetString("ModelOverride", "")
-        if model and backends.current() in ("account", "apikey"):
+        if model and backends.current() == "account":
             args += ["--model", model]
         if paths.params().GetBool("AllowWeb", False):
             args += ["--allowedTools", "WebSearch", "WebFetch"]

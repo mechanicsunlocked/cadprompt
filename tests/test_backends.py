@@ -46,13 +46,22 @@ def check(name, ok, detail=""):
 class _Fake(http.server.BaseHTTPRequestHandler):
     """A pretend model server: /v1 answers like LM Studio, the other paths misbehave."""
     seen = []
+    claude = []       # (x-api-key, anthropic-version) of the requests to /anthropic
 
     def log_message(self, *a):
         pass
 
     def do_GET(self):
         _Fake.seen.append((self.path, self.headers.get("Authorization")))
-        if self.path == "/v1/models":
+        if self.path.startswith("/anthropic/v1/models"):
+            _Fake.claude.append((self.headers.get("x-api-key"), self.headers.get("anthropic-version")))
+            if self.headers.get("x-api-key") != "sk-ant-made-up":
+                self.send_response(401)
+                self.end_headers()
+                return
+            body = {"data": [{"type": "model", "id": "claude-fake-1"}, {"type": "model", "id": "claude-fake-2"}],
+                    "has_more": False}
+        elif self.path == "/v1/models":
             body = {"object": "list", "data": [{"id": "google/gemma-4-e4b", "object": "model"},
                                                {"id": "other-model"}, {"id": "google/gemma-4-e4b"}]}
         elif self.path == "/ollama/models":
@@ -109,7 +118,7 @@ def raises(kinds, fn):
 
 def main():
     import FreeCAD as App
-    from cadprompt import backends, paths
+    from cadprompt import backends, local_agent, paths
 
     home = os.environ["FREECAD_USER_HOME"]
     data = App.getUserAppDataDir()
@@ -125,8 +134,9 @@ def main():
     for b in ("account", "apikey", "local", "custom"):
         p.SetString("Backend", b)
         check(f"current() gives {b}", backends.current() == b)
-        check(f"uses_claude_code({b})", backends.uses_claude_code() == (b != "local")
-              and backends.uses_claude_code(b) == (b != "local"))
+        # the API key and the local model are the built-in engine: no Claude Code
+        check(f"uses_claude_code({b})", backends.uses_claude_code() == (b in ("account", "custom"))
+              and backends.uses_claude_code(b) == (b in ("account", "custom")))
     p.SetString("Backend", "nonsense")
     check("an unknown source counts as the account", backends.current() == "account")
     check("labels", [backends.label(b) for b in ("account", "apikey", "local", "custom")] ==
@@ -240,13 +250,49 @@ def main():
     p.SetString("LocalUrl", "")
     check("a cleared address stays empty, so the panel can ask for it", backends.local_config()["url"] == "")
 
+    # ---- engine_config: what the built-in engine gets for a source ----
+    p.SetString("LocalUrl", "http://example.invalid:8080/v1")
+    backends.set_api_key("AAA-made-up")
+    p.RemString("ApiModel")
+    p.SetString("Backend", "local")
+    check("engine_config local: the OpenAI format, the local address and the local key",
+          backends.engine_config() == {"kind": "openai", "url": "http://example.invalid:8080/v1",
+                                       "model": "google/gemma-4-e4b", "key": "BBB-made-up"},
+          str(backends.engine_config()))
+    check("engine_config(apikey): the Anthropic format, the fixed address, the default model, the API key",
+          backends.engine_config("apikey") == {"kind": "anthropic", "url": "https://api.anthropic.com",
+                                               "model": "claude-opus-5-5", "key": "AAA-made-up"},
+          str(backends.engine_config("apikey")))
+    p.SetString("Backend", "apikey")
+    p.SetString("ApiModel", " claude-haiku-5-5 ")
+    check("engine_config follows the source and the model chosen in Settings",
+          backends.engine_config()["kind"] == "anthropic" and backends.engine_config()["model"] == "claude-haiku-5-5")
+    p.SetString("ApiModel", "")
+    check("a cleared API model is the default again", backends.api_model() == backends.API_MODEL == "claude-opus-5-5"
+          and backends.API_MODEL in backends.API_MODELS)
+    both = json.dumps([backends.engine_config("apikey"), backends.engine_config("local")])
+    check("each key is in the config of its own service only",
+          both.count("AAA-made-up") == 1 and both.count("BBB-made-up") == 1
+          and backends.engine_config("apikey")["key"] == "AAA-made-up"
+          and backends.engine_config("local")["key"] == "BBB-made-up")
+    for name in ("LocalUrl", "BaseUrl"):
+        p.SetString(name, "http://evil.invalid/v1")
+    check("no setting moves the Anthropic key to another address",
+          backends.engine_config("apikey")["url"] == backends.ANTHROPIC_URL == "https://api.anthropic.com")
+    p.SetString("BaseUrl", "")
+    check("engine_config is None for the sources that run Claude Code",
+          backends.engine_config("account") is None and backends.engine_config("custom") is None)
+    check("may_contact(kind, url) is the gate, and it is open for now",
+          backends.may_contact("anthropic", backends.ANTHROPIC_URL) is True
+          and backends.may_contact("openai", "http://127.0.0.1:1234/v1") is True)
+    p.SetString("LocalUrl", "")
+
     # ---- claude_env ----
     p.SetString("Backend", "account")
     check("claude_env account: sets nothing, removes key, token and endpoint", backends.claude_env() ==
           ({}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]), str(backends.claude_env()))
     p.SetString("Backend", "apikey")
-    check("claude_env apikey: sets the saved key, removes token and endpoint", backends.claude_env() ==
-          ({"ANTHROPIC_API_KEY": "AAA-made-up"}, ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]),
+    check("claude_env apikey: nothing, the key never goes to Claude Code", backends.claude_env() == ({}, []),
           str(backends.claude_env()))
     p.SetString("Backend", "custom")
     p.SetString("BaseUrl", "http://localhost:11434")
@@ -291,9 +337,8 @@ def main():
               "ANTHROPIC_API_KEY"))
     p.SetString("Backend", "apikey")
     pe = runner.claude_environment("/nowhere/bin/claude", {})
-    check("apikey process: the saved key wins over the shell's, token and endpoint removed",
-          pe.value("ANTHROPIC_API_KEY") == "AAA-made-up" and not pe.contains("ANTHROPIC_AUTH_TOKEN")
-          and not pe.contains("ANTHROPIC_BASE_URL"))
+    check("apikey: a program environment never gets the saved key (the engine sends it itself)",
+          "AAA-made-up" not in [pe.value(k) for k in pe.keys()])
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
         del os.environ[k]
 
@@ -419,6 +464,15 @@ def main():
     check("list_models: file:// and empty addresses are refused",
           raises(ValueError, lambda: backends.list_models("file:///etc")) == "ValueError"
           and raises(ValueError, lambda: backends.list_models("")) == "ValueError")
+    got = backends.list_models(base + "/anthropic", "sk-ant-made-up", kind="anthropic")
+    check("list_models anthropic: GET /v1/models, the ids of the list",
+          got == ["claude-fake-1", "claude-fake-2"] and _Fake.seen[-1][0] == "/anthropic/v1/models?limit=100",
+          f"{got} {_Fake.seen[-1]}")
+    check("list_models anthropic: the key is in x-api-key with the API version, never a Bearer header",
+          _Fake.seen[-1][1] is None and _Fake.claude[-1] == ("sk-ant-made-up", backends.ANTHROPIC_VERSION)
+          and backends.ANTHROPIC_VERSION == local_agent.AnthropicWire.version, f"{_Fake.seen[-1]} {_Fake.claude}")
+    check("list_models anthropic: a refused key is an OSError (HTTP 401)",
+          raises(OSError, lambda: backends.list_models(base + "/anthropic", "wrong", kind="anthropic")) == "HTTPError")
     other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Fake)
     threading.Thread(target=other.serve_forever, daemon=True).start()
     port = other.server_address[1]

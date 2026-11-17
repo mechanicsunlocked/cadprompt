@@ -14,15 +14,25 @@ KEY_PLACE = "a file only you can read" if backends.POSIX else "a file in your ow
 HINTS = {
     "account": "Uses your Claude subscription. Sign in once: run `claude` in a terminal.",
     "apikey": "Uses your key from console.anthropic.com; Anthropic bills what you use. "
-              "The key is kept in %s, not in FreeCAD's settings." % KEY_PLACE,
+              "Nothing else to install. Your messages, the images you send with them and what "
+              "the tools report go to Anthropic. The key is kept in %s, not in FreeCAD's "
+              "settings." % KEY_PLACE,
     "local": "A model on this computer or another server that speaks the OpenAI API. "
              "Nothing else to install: start the server, press Find models, pick one.",
     "custom": "Claude Code, sent to a server that speaks the Anthropic Messages API.",
 }
 
 
-def _why(exc):
+def _why(exc, kind="openai"):
     """A failed 'Find models' in words a student can follow."""
+    if kind == "anthropic":
+        if isinstance(exc, urllib.error.HTTPError):
+            if exc.code in (401, 403):
+                return "Anthropic did not accept the key."
+            return f"Anthropic answered with error {exc.code}. Try again later."
+        if isinstance(exc, ValueError):
+            return "The answer of Anthropic was not a list of models. Try again later."
+        return "No answer from Anthropic. Check the internet connection of this computer."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in (401, 403):
             return "The server did not accept the key."
@@ -30,6 +40,18 @@ def _why(exc):
     if isinstance(exc, ValueError):
         return "That address did not answer with a list of models. Check it (it usually ends in /v1)."
     return "No answer from the server. Is it running, and is the address right?"
+
+
+def _model_box(text, hint):
+    """An editable list of models: the user can also type a name the list does not have."""
+    box = QtWidgets.QComboBox()
+    box.setEditable(True)
+    box.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+    box.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    box.setMinimumContentsLength(24)
+    box.setEditText(text)
+    box.lineEdit().setPlaceholderText(hint)
+    return box
 
 
 class _KeyRow(QtWidgets.QWidget):
@@ -121,6 +143,19 @@ class SettingsDialog(QtWidgets.QDialog):
         f.setContentsMargins(0, 0, 0, 0)
         self.api_key = _KeyRow(bool(backends.api_key()), "sk-ant-…")
         f.addRow("API key", self.api_key)
+        row = QtWidgets.QHBoxLayout()
+        self.api_model = _model_box("", backends.API_MODEL)
+        self.api_model.addItems(backends.API_MODELS)
+        self.api_model.setEditText(backends.api_model())
+        self.api_find = QtWidgets.QPushButton("Find models")
+        self.api_find.setToolTip("Ask Anthropic which models your key can use. This sends the key to Anthropic.")
+        self.api_find.clicked.connect(lambda: self.find_models("apikey"))
+        row.addWidget(self.api_model, 1)
+        row.addWidget(self.api_find)
+        f.addRow("Model", row)
+        self.api_find_msg = QtWidgets.QLabel("")
+        self.api_find_msg.setWordWrap(True)
+        f.addRow("", self.api_find_msg)
         box.addWidget(self.apikey_box)
 
         # local or other OpenAI-compatible server
@@ -131,16 +166,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.local_url.setPlaceholderText(backends.LOCAL_URL + "  (Ollama: http://127.0.0.1:11434/v1)")
         f.addRow("Server address", self.local_url)
         row = QtWidgets.QHBoxLayout()
-        self.local_model = QtWidgets.QComboBox()
-        self.local_model.setEditable(True)
-        self.local_model.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
-        self.local_model.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.local_model.setMinimumContentsLength(24)
-        self.local_model.setEditText(p.GetString("LocalModel", ""))
-        self.local_model.lineEdit().setPlaceholderText("model name on that server")
+        self.local_model = _model_box(p.GetString("LocalModel", ""), "model name on that server")
         self.find = QtWidgets.QPushButton("Find models")
         self.find.setToolTip("Ask the server which models it has")
-        self.find.clicked.connect(self.find_models)
+        self.find.clicked.connect(lambda: self.find_models("local"))
         row.addWidget(self.local_model, 1)
         row.addWidget(self.find)
         f.addRow("Model", row)
@@ -221,7 +250,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.claude_box.setVisible(backends.uses_claude_code(b))
         # another endpoint has its own model field: the Claude model names mean nothing there
         for w in (self.model_label, self.model_override):
-            w.setVisible(b in ("account", "apikey"))
+            w.setVisible(b == "account")
         self.adjustSize()
 
     def _browse(self):
@@ -235,58 +264,74 @@ class SettingsDialog(QtWidgets.QDialog):
                                     paths.params().GetString("LocalUrl", backends.LOCAL_URL))
 
     # ---- Find models --------------------------------------------------------
-    def find_models(self):
+    def find_models(self, source="local"):
+        """Ask the service of a source for its models. Only on the user's click:
+        this is a request to that service, with the key when there is one."""
         if self._asking:
             return
-        url = self.local_url.text().strip()
-        if not url:
-            self.find_msg.setText("Enter the server address first, for example " + backends.LOCAL_URL)
+        if source == "apikey":
+            kind, url, box, button, msg = "anthropic", backends.ANTHROPIC_URL, self.api_model, self.api_find, \
+                self.api_find_msg
+            key = self.api_key.typed()
+            if not key and not self.api_key.remove:
+                key = backends.api_key()
+            if not key:
+                msg.setText("Enter your API key first.")
+                return
+        else:
+            kind, url, box, button, msg = "openai", self.local_url.text().strip(), self.local_model, self.find, \
+                self.find_msg
+            if not url:
+                msg.setText("Enter the server address first, for example " + backends.LOCAL_URL)
+                return
+            if not url.lower().startswith(("http://", "https://")):
+                msg.setText("Start the address with http:// or https://, for example " + backends.LOCAL_URL)
+                return
+            key = self.local_key.typed()
+            if not key and not self.local_key.remove and self._key_fits():
+                key = backends.local_key()
+        if not backends.may_contact(kind, url):
+            msg.setText("Nothing was sent: CADprompt is not allowed to contact this service.")
             return
-        if not url.lower().startswith(("http://", "https://")):
-            self.find_msg.setText("Start the address with http:// or https://, for example "
-                                  + backends.LOCAL_URL)
-            return
-        key = self.local_key.typed()
-        if not key and not self.local_key.remove and self._key_fits():
-            key = backends.local_key()
-        box = {}
+        answer = {}
 
         def ask():
             try:
-                box["models"] = backends.list_models(url, key, timeout=5)
+                answer["models"] = backends.list_models(url, key, timeout=5, kind=kind)
             except Exception as e:
-                box["error"] = e
+                answer["error"] = e
 
         # the deadline is ours: a server that answers one byte at a time never trips the socket timeout
-        self._asking = (box, time.monotonic() + 6)
-        self.find.setEnabled(False)
-        self.find_msg.setText("Asking the server…")
+        self._asking = (answer, time.monotonic() + 6, kind, box, button, msg)
+        button.setEnabled(False)
+        msg.setText("Asking Anthropic…" if kind == "anthropic" else "Asking the server…")
         threading.Thread(target=ask, daemon=True).start()
         self._poll.start()
 
     def _find_poll(self):
-        box, deadline = self._asking
-        if not box and time.monotonic() < deadline:
+        answer, deadline, kind, box, button, msg = self._asking
+        if not answer and time.monotonic() < deadline:
             return
         self._poll.stop()
         self._asking = None
-        self.find.setEnabled(True)
-        if "models" not in box:
-            self.find_msg.setText(_why(box.get("error")))
+        button.setEnabled(True)
+        if "models" not in answer:
+            msg.setText(_why(answer.get("error"), kind))
             return
-        models = box["models"]
+        models = answer["models"]
         if not models:
-            self.find_msg.setText("The server answered, but it has no models. Load one there first.")
+            msg.setText("Anthropic answered, but your key can use no model." if kind == "anthropic" else
+                        "The server answered, but it has no models. Load one there first.")
             return
-        keep = self.local_model.currentText().strip()
-        self.local_model.clear()
-        self.local_model.addItems(models)
+        keep = box.currentText().strip()
+        box.clear()
+        box.addItems(models)
         if keep in models:
-            self.local_model.setCurrentIndex(models.index(keep))
+            box.setCurrentIndex(models.index(keep))
         elif keep:
-            self.local_model.setEditText(keep)
+            box.setEditText(keep)
         n = len(models)
-        self.find_msg.setText(f"Found {n} model{'' if n == 1 else 's'}. Pick one from the list.")
+        msg.setText(f"Found {n} model{'' if n == 1 else 's'}. Pick one from the list.")
 
     def done(self, result):
         self._poll.stop()        # a late answer has nowhere to go once the dialog is closed
@@ -306,6 +351,7 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("Backend", self.backend())
         p.SetString("LocalUrl", self.local_url.text().strip())
         p.SetString("LocalModel", self.local_model.currentText().strip())
+        p.SetString("ApiModel", self.api_model.currentText().strip())
         p.SetBool("AllowWeb", self.web.isChecked())
         p.SetString("ModelOverride", self.model_override.text().strip())
         p.SetString("BaseUrl", self.url.text().strip())
