@@ -361,6 +361,48 @@ def main():
     check("account process: a key handed in by the caller is removed too",
           not runner.claude_environment("/nowhere/bin/claude", {"ANTHROPIC_API_KEY": "x"}).contains(
               "ANTHROPIC_API_KEY"))
+    # ---- a proxy of the user must not get the requests of Claude Code to the bridge ----
+    # Claude Code sends them through HTTP_PROXY / HTTPS_PROXY unless NO_PROXY names 127.0.0.1.
+    proxy_names = ("NO_PROXY", "no_proxy", "HTTP_PROXY")
+    saved = {k: os.environ.pop(k, None) for k in proxy_names}
+
+    def no_proxy(**given):
+        """(NO_PROXY, no_proxy) of the process, for these values in the user's environment."""
+        for k in ("NO_PROXY", "no_proxy"):
+            os.environ.pop(k, None)
+        os.environ.update(given)
+        pe = runner.claude_environment("/nowhere/bin/claude", bridge_env)
+        return pe.value("NO_PROXY", ""), pe.value("no_proxy", "")
+
+    os.environ["HTTP_PROXY"] = "http://proxy.school.example:3128"
+    here = "127.0.0.1,localhost"
+    check("account process: the proxy of the user stays, and this computer is in NO_PROXY and no_proxy",
+          no_proxy() == (here, here)
+          and runner.claude_environment("/nowhere/bin/claude", bridge_env).value("HTTP_PROXY")
+          == "http://proxy.school.example:3128", str(no_proxy()))
+    check("account process: the entries that the user has in NO_PROXY are kept, in both spellings",
+          no_proxy(NO_PROXY=".school.example, intranet") == ((".school.example,intranet," + here,) * 2)
+          and no_proxy(no_proxy="intranet") == (("intranet," + here,) * 2),
+          str((no_proxy(NO_PROXY=".school.example, intranet"), no_proxy(no_proxy="intranet"))))
+    both = no_proxy(NO_PROXY=".a.example", no_proxy=".b.example")      # Windows: one variable, the second value
+    check("account process: two spellings with different entries give one list for both",
+          both[0] == both[1] and both[0].endswith("," + here) and ".b.example" in both[0].split(",")
+          and (os.name == "nt" or ".a.example" in both[0].split(",")), str(both))
+    check("account process: an entry that is there already is not added a second time",
+          no_proxy(NO_PROXY="localhost,127.0.0.1,.x") == (("localhost,127.0.0.1,.x",) * 2),
+          str(no_proxy(NO_PROXY="localhost,127.0.0.1,.x")))
+    star = no_proxy(NO_PROXY="*")
+    check("account process: NO_PROXY=* (no proxy for anything) stays as it is",
+          star[0] == "*" and star[1] in ("", "*"), str(star))
+    p.SetString("Backend", "custom")
+    check("custom process: the same, for a model server on this computer",
+          no_proxy(NO_PROXY=".x") == ((".x," + here,) * 2), str(no_proxy(NO_PROXY=".x")))
+    p.SetString("Backend", "account")
+    for k in proxy_names:
+        os.environ.pop(k, None)
+        if saved[k] is not None:
+            os.environ[k] = saved[k]
+
     p.SetString("Backend", "apikey")
     pe = runner.claude_environment("/nowhere/bin/claude", {})
     check("apikey: a program environment never gets the saved key (the engine sends it itself)",

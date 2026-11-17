@@ -86,6 +86,7 @@ class Panel(QtWidgets.QWidget):
         self._stop_asked = False
         self._closed = False                  # the dock is hidden: the bridge is not kept open
         self._project_notes = []              # what projects.migrate() says about this project
+        self._migrated = False                # projects.migrate() ran for this project
         self.entries = []
         self.project = None
         self.claude = None
@@ -381,20 +382,13 @@ class Panel(QtWidgets.QWidget):
         self._stop()
         self.project = projects.path_of(name)
         paths.params().SetString("LastProject", name)
-        try:
-            # a project made by an earlier version: its files name tools that are gone
-            self._project_notes = projects.migrate(self.project)
-        except Exception as e:
-            self._project_notes = []
-            App.Console.PrintWarning(f"CADprompt: could not bring the project up to date: {e}\n")
+        self._project_notes, self._migrated = [], False      # see _migrate: not when a project is picked
         runner.allow_web_in_project(self.project)
         self._sync_mode()
         self.entries = []
         self._images = []             # they are in the refs/ of the project that was open
         self._add("note", f"Project **{name}**.")
         self._load_history()
-        if backends.uses_claude_code():
-            self._show_project_notes()
         if open_model:
             model = projects.newest_model(self.project)
             if model:
@@ -402,6 +396,29 @@ class Panel(QtWidgets.QWidget):
                     projects.open_model(model)
                 except Exception as e:
                     self._add("error", f"Could not open {os.path.basename(model)}: {e}")
+
+    def _migrate(self):
+        """Bring a project from an older template up to date, and say what was replaced.
+
+        Only before the first message to Claude Code, not when a project is
+        picked: the built-in engine reads none of these files, and the terminal
+        launcher, which shares the projects folder, works with the old ones.
+        """
+        if self._migrated:
+            return
+        self._migrated = True
+        replaced = []
+        try:
+            self._project_notes = projects.migrate(self.project, replaced)
+        except Exception as e:
+            self._project_notes = []
+            App.Console.PrintWarning(f"CADprompt: could not bring the project up to date: {e}\n")
+        if replaced:
+            self._add("note", "This project came from an older CADprompt. These files were replaced by the "
+                              "new ones, which name the FreeCAD tools of this version: %s. Each old file is "
+                              "kept beside the new one as `<name>.old`."
+                              % ", ".join("`%s`" % rel for rel in replaced))
+        self._show_project_notes()
 
     def _show_project_notes(self):
         """Say what a file of the project that was left alone means for Claude Code."""
@@ -564,6 +581,7 @@ class Panel(QtWidgets.QWidget):
         else:
             if not self.claude and not self.check_setup():
                 return
+            self._migrate()       # a project made by an earlier version: its files name tools that are gone
             try:
                 where = bridge.ensure(self.project, backend, self._bridge_note)
             except Exception as e:
@@ -602,6 +620,12 @@ class Panel(QtWidgets.QWidget):
         """`url` and `token`: where Claude Code finds the FreeCAD tools (bridge.ensure)."""
         # the source's own variables (endpoint) are added by the runner: backends.claude_env
         env = runner.mcp_env(url, token)
+        # /build and /teach: the panel writes the mode file, as the built-in engine does.
+        # Claude Code may not change a file of the project without a question.
+        word = text.split(None, 1)[0] if text.strip() else ""
+        if word in ("/build", "/teach"):
+            projects.set_mode(self.project, word[1:])
+            self._sync_mode()
         self._engine = self.run
         self._busy(True, f"{self._who(start=True)} is working…")
         self.run.start(self.claude, self.project, text, projects.get_session(self.project), env)
@@ -657,7 +681,9 @@ class Panel(QtWidgets.QWidget):
                 self._add("error", f"`{name}` was blocked: web access is off. "
                                    "Turn it on in Settings, then ask again.")
             else:
-                self._add("error", f"`{name}` was blocked by this project's permission rules.")
+                # Claude Code's own Write and Edit, for example: see ClaudeRun.start
+                self._add("error", f"`{name}` was blocked: Claude Code must ask you before it uses this tool, "
+                                   "and it cannot ask in this panel.")
         if not res.get("is_error"):
             return
         if local:

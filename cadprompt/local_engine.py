@@ -34,6 +34,7 @@ IMAGE_PIXELS = 64 * 1024 * 1024    # a larger image is refused: Qt needs 4 bytes
 IMAGE_BYTES = 3_500_000            # a larger PNG goes as JPEG: the services take about 5 MB
 DOC_CLOSED = ('ERROR: the document "%s" was closed during this request. Nothing more can be done '
               "in it. Stop and tell the user.")
+STOPPED_STEP = "ERROR: this request was stopped. Nothing was done."      # the text of bridge.GONE
 
 _COMMAND = re.compile(r"^/([A-Za-z0-9_-]+)(?:\s+(.*))?$", re.S)
 
@@ -508,23 +509,38 @@ class LocalRun(QtCore.QObject):
     def _run_tool(self, name, args):
         """Run one tool in the document of this run, whatever the user looks at now."""
         works_in_document = name != "read_project_file"
-        if works_in_document and self._doc:
-            if _document(self._doc) is None:
-                # never go on in the document that happens to be active: it is other work
-                return DOC_CLOSED % self._doc
-            if self._doc != _active_name():
-                # the user can click another document while the model thinks: go back to ours
-                App.setActiveDocument(self._doc)
+        closed = works_in_document and self._go_to_document()
+        if closed:
+            return closed
         if name in CHANGING:
+            number = self._number
             # the user decides, in this thread, before anything of the step happens
             if not approval.request(name, args, self._source):
                 return approval.DECLINED
+            # The question lets events through: Stop, a new chat, a click on another document.
+            if number != self._number:
+                return STOPPED_STEP          # a yes to a run that is over runs nothing
+            closed = self._go_to_document()
+            if closed:
+                return closed
             self._changed = True
             self._backup()
         result = local_tools.run_tool(self._project, name, args)
         if works_in_document:
             self._doc = _active_name()       # the code can make the document, or go to another
         return result
+
+    def _go_to_document(self):
+        """Make the document of this run the active one. Returns the error text when it was closed."""
+        if not self._doc:
+            return ""
+        if _document(self._doc) is None:
+            # never go on in the document that happens to be active: it is other work
+            return DOC_CLOSED % self._doc
+        if self._doc != _active_name():
+            # the user can click another document while the model thinks: go back to ours
+            App.setActiveDocument(self._doc)
+        return ""
 
     def _backup(self):
         """Before the first change of a request, keep the model file as it is on disk."""

@@ -1,10 +1,6 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
     "blockReadsOutsideWorkingDirectories": true,
-    "allow": [
-      "mcp__freecad__*"
-    ],
     "deny": [
       "Bash",
       "Edit(/.claude/**)",

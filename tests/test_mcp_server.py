@@ -9,10 +9,12 @@ Claude Code, a web page, and a program that guesses.
 
 import base64
 import http.client
+import io
 import json
 import os
 import signal
 import socket
+import struct
 import sys
 import threading
 import time
@@ -522,6 +524,51 @@ class LifeCycle(Base):
             self.assertLess(time.time() - t0, 3)
         finally:
             idle.close()
+
+    def gone_clients(self):
+        """Clients that go away before their request is read. Returns what the server printed."""
+        def client(sent, reset):
+            conn = socket.create_connection(("127.0.0.1", self.srv.port), timeout=5)
+            if sent:
+                conn.sendall(sent)
+                time.sleep(0.05)
+            if reset:                # close with a reset, as a program that was killed
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh" if os.name == "nt" else "ii", 1, 0))
+            conn.close()
+
+        printed, real = io.StringIO(), sys.stderr
+        sys.stderr = printed
+        try:
+            for sent in (b"", b"POST /mcp HT", b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Le"):
+                client(sent, reset=True)
+            for sent in (b"POST /mcp HT", b"GARBAGE\r\n"):
+                client(sent, reset=False)
+            end = time.time() + 5
+            while self.srv._open and time.time() < end:
+                time.sleep(0.02)
+            time.sleep(0.3)          # the thread of a request prints after it closed its connection
+        finally:
+            sys.stderr = real
+        return printed.getvalue()
+
+    def test_a_client_that_goes_away_early_prints_nothing(self):
+        # The standard server prints "Exception occurred during processing of request" and a
+        # traceback for each of these. In FreeCAD that is red text in the Report view, which
+        # any program on this computer could put there, without the token.
+        self.assertEqual(self.gone_clients(), "")
+        self.assertEqual(self.rpc("ping")[0], 200)
+
+    def test_a_mistake_of_the_server_itself_is_still_printed(self):
+        real = mcp_server._Handler.setup
+
+        def setup(handler):
+            raise RuntimeError("a mistake in the server")
+        mcp_server._Handler.setup = setup
+        try:
+            printed = self.gone_clients()
+        finally:
+            mcp_server._Handler.setup = real
+        self.assertIn("RuntimeError: a mistake in the server", printed)
 
 
 class Registry(unittest.TestCase):

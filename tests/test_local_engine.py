@@ -279,7 +279,7 @@ def main():
     body = srv.requests[n]["body"]["messages"]
     check("/teach writes the mode file", projects.get_mode(project) == "teach")
     check("/teach is expanded from teach.md without the front matter",
-          body[-1]["content"].startswith("Write `teach` into `.cadprompt/mode`, then work in teach mode")
+          body[-1]["content"].startswith("The mode is `teach` now.") and "Work in teach mode" in body[-1]["content"]
           and "description:" not in body[-1]["content"] and "---" not in body[-1]["content"]
           and "$ARGUMENTS" not in body[-1]["content"], body[-1]["content"])
     check("the system prompt is in teach mode", "Mode: teach" in body[0]["content"]
@@ -1050,6 +1050,26 @@ def main():
         check("the answer True: the step runs and the model is saved",
               len(asked) == 3 and App.ActiveDocument is not None and App.ActiveDocument.getObject("Wanted") is not None
               and "tool:save" in rec.kinds(), rec.events)
+
+        # Stop while the question is open, and then a yes: the step belongs to a run that is over
+        run16 = local_engine.LocalRun()
+        rec16 = Recorder(run16)
+
+        def stopping(tool_name, args, source):
+            run16.stop()                         # what the Stop button of the panel does
+            return True
+        approval.request = stopping
+        srv.add(call("run_python", {"code": 'doc.addObject("Part::Box", "AfterStop")'}, "a4"))
+        n = len(srv.requests)
+        run16.start(project16, "One more box.", cfg)
+        check("Stop while the question is open: no deadlock", pump(rec16.done, 5), rec16.events)
+        pump(lambda: all(w.isFinished() for w in local_engine._threads), 2.0)
+        pump(timeout=0.3)
+        check("... a yes after Stop runs nothing: no object, finished once with stopped=True, no further request",
+              App.ActiveDocument.getObject("AfterStop") is None
+              and no_backup(rec16.kinds()) == ["tool:run_python", "finished"]
+              and rec16.result().get("stopped") is True and len(srv.requests) == n + 1
+              and "AfterStop" not in json.dumps(chat(project16)[-1:]), (rec16.events, len(srv.requests) - n))
     finally:
         approval.request = real_request
     check("approval.request says yes for now, for every tool and source",

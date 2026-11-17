@@ -94,15 +94,20 @@ def main():
           '"command": "uvx"' in before[".mcp.json"] and b"CADPROMPT_MCP_URL" in new(".mcp.json")
           and b"uvx" not in new(".mcp.json"))
     check("every old version in the test data is known to migrate()",
-          all(projects._digest(before[rel].encode("utf-8")) in projects.OLD[rel] for rel in changed
-              if rel != ".claude/settings.json")           # that file is in its second version since long
+          all(projects._digest(before[rel].encode("utf-8")) in projects.OLD[rel] for rel in changed)
           and all(projects._digest(text.encode("utf-8")) in projects.OLD[rel] for rel, text in older.items()),
           str(changed))
     check("no file of the template of today counts as old",
           not [rel for rel in changed if projects._digest(new(rel)) in projects.OLD[rel]])
-    check("the files that changed: .mcp.json, CLAUDE.md, two commands, and the first settings.json",
-          changed == [".claude/commands/check.md", ".claude/commands/drawing.md", ".claude/settings.json",
-                      ".mcp.json", "CLAUDE.md"], str(changed))
+    check("the files that changed: .mcp.json, CLAUDE.md, four commands, and settings.json",
+          changed == [".claude/commands/build.md", ".claude/commands/check.md", ".claude/commands/drawing.md",
+                      ".claude/commands/teach.md", ".claude/settings.json", ".mcp.json", "CLAUDE.md"], str(changed))
+    perms = json.loads(new(".claude/settings.json").decode("utf-8"))["permissions"]
+    check("the settings of today switch no question of Claude Code off: no mode, no allow list; no shell",
+          "defaultMode" not in perms and "allow" not in perms and "Bash" in perms["deny"], str(perms))
+    check("... and the two mode commands do not tell Claude Code to write the mode file first",
+          not [rel for rel in (".claude/commands/build.md", ".claude/commands/teach.md")
+               if new(rel).split(b"---")[2].lstrip().startswith(b"Write")])
     check("the new template names the new tools and none of the old ones",
           all(t.encode() in new("CLAUDE.md") for t in ("run_python", "get_document_state", "make_drawing", "get_view"))
           and not [t for t in projects.OLD_TOOLS if t.encode() in new("CLAUDE.md")]
@@ -115,9 +120,8 @@ def main():
     now = files(project)
     check("old project: .mcp.json is the new one, the old one is kept as .mcp.json.old",
           now[".mcp.json"] == new(".mcp.json") and now.get(".mcp.json.old") == was[".mcp.json"])
-    check("old project: CLAUDE.md and the two commands are replaced too, each with its .old",
-          all(now[rel] == new(rel) and now.get(rel + ".old") == was[rel]
-              for rel in ("CLAUDE.md", ".claude/commands/check.md", ".claude/commands/drawing.md")))
+    check("old project: CLAUDE.md, the commands and settings.json are replaced too, each with its .old",
+          all(now[rel] == new(rel) and now.get(rel + ".old") == was[rel] for rel in changed), str(changed))
     check("old project: a file that did not change in the template is left as it is, without a copy",
           all(now[rel] == was[rel] and rel + ".old" not in now for rel in same), str(same))
     check("old project: nothing else in the project is touched (model, references, mode, session)",
@@ -127,8 +131,15 @@ def main():
     check("old project: Claude Code does not read a command file with .old at its end",
           not [n for n in os.listdir(os.path.join(project, ".claude", "commands"))
                if n.endswith(".md") and n[:-3] not in ("build", "check", "drawing", "refs", "teach")])
-    notes = projects.migrate(project)
-    check("a second run changes nothing and makes no second copy", files(project) == now and notes == [])
+    replaced = []
+    notes = projects.migrate(project, replaced)
+    check("a second run changes nothing and makes no second copy", files(project) == now and notes == []
+          and replaced == [])
+    project = make("old-told")
+    replaced = []
+    projects.migrate(project, replaced)
+    check("migrate(project, replaced) names the files that it replaced, for the note in the chat",
+          sorted(replaced) == changed, str(replaced))
 
     # ---- Windows: git wrote the template with CRLF line ends, and so has the project ----
     project = make("old-crlf", crlf=True)
@@ -155,17 +166,22 @@ def main():
           and now[".claude/commands/drawing.md.old"] == was[".claude/commands/drawing.md"] and notes == [], str(notes))
     project = make("oldest-opened", older)
     runner.allow_web_in_project(project)                 # what the panel did to such a project before
-    check("a first settings.json that the panel rewrote before is the settings.json of today already",
-          read(os.path.join(project, ".claude", "settings.json")) == new(".claude/settings.json"))
+    rewritten = read(os.path.join(project, ".claude", "settings.json"))
+    check("a first settings.json that the panel rewrote before is the second version (it accepted edits)",
+          rewritten == before[".claude/settings.json"].encode("utf-8") and b"acceptEdits" in rewritten)
     projects.migrate(project)
-    check("... and is left alone", not os.path.exists(os.path.join(project, ".claude", "settings.json.old")))
+    check("... and is replaced too, with its .old",
+          read(os.path.join(project, ".claude", "settings.json")) == new(".claude/settings.json")
+          and read(os.path.join(project, ".claude", "settings.json.old")) == rewritten)
 
     # ---- files that the user changed: never touched ----
     mine = {".mcp.json": before[".mcp.json"].replace('"mcpServers": {', '"mcpServers": {\n    "other": {"command": "x"},'),
             "CLAUDE.md": before["CLAUDE.md"] + "\n## My shop\n\nWe only have M6 and M8 screws.\n",
             ".claude/settings.json": before[".claude/settings.json"].replace('"Bash",', '"Bash", "WebFetch",'),
             ".claude/commands/drawing.md": before[".claude/commands/drawing.md"] + "Always A4.\n",
-            ".claude/commands/check.md": before[".claude/commands/check.md"].replace("7.85", "2.70")}
+            ".claude/commands/check.md": before[".claude/commands/check.md"].replace("7.85", "2.70"),
+            ".claude/commands/build.md": before[".claude/commands/build.md"] + "Steel S235 if I say nothing.\n",
+            ".claude/commands/teach.md": before[".claude/commands/teach.md"] + "In German.\n"}
     project = make("edited", mine)
     was = files(project)
     notes = projects.migrate(project)
@@ -173,15 +189,14 @@ def main():
     check("(setup) each of these files differs from the old template", all(mine[rel] != before[rel] for rel in mine))
     check("edited project: not one byte of the project changed, and no .old file was made", now == was,
           str(sorted(set(now) ^ set(was))))
-    check("edited project: two notes, in plain words", len(notes) == 2 and all("Traceback" not in n for n in notes),
+    check("edited project: one note, in plain words", len(notes) == 1 and all("Traceback" not in n for n in notes),
           str(notes))
-    check("edited project: one note says that Claude cannot reach FreeCAD with this .mcp.json, and what to do",
-          len(notes) == 2 and "`.mcp.json`" in notes[0] and "cannot reach FreeCAD" in notes[0]
-          and "Delete the file" in notes[0], str(notes[:1]))
-    check("edited project: the other says that CLAUDE.md names old tools, and names the new ones",
-          len(notes) == 2 and "`CLAUDE.md`" in notes[1] and "old" in notes[1] and "`list_documents`" in notes[1]
-          and all(t in notes[1] for t in ("run_python", "get_document_state", "make_drawing", "get_view")),
-          str(notes[1:]))
+    check("edited project: no note about the .mcp.json: the panel gives Claude Code the one of the addon",
+          not [n for n in notes if ".mcp.json" in n], str(notes))
+    check("edited project: the note says that CLAUDE.md names old tools, and names the new ones",
+          len(notes) == 1 and "`CLAUDE.md`" in notes[0] and "old" in notes[0] and "`list_documents`" in notes[0]
+          and all(t in notes[0] for t in ("run_python", "get_document_state", "make_drawing", "get_view")),
+          str(notes))
     check("edited project: asked again, the same notes and still no change",
           projects.migrate(project) == notes and files(project) == was)
 
@@ -201,10 +216,11 @@ def main():
     for rel in (".mcp.json", "CLAUDE.md", ".claude/commands/check.md"):
         os.remove(os.path.join(project, *rel.split("/")))
     notes = projects.migrate(project)
-    check("a project without .mcp.json and CLAUDE.md gets the new ones (the notes say: delete it to get the new one)",
-          read(os.path.join(project, ".mcp.json")) == new(".mcp.json")
-          and read(os.path.join(project, "CLAUDE.md")) == new("CLAUDE.md") and notes == []
-          and not os.path.exists(os.path.join(project, ".mcp.json.old")), str(notes))
+    check("a project without CLAUDE.md gets the new one (the note says: delete it to get the new one)",
+          read(os.path.join(project, "CLAUDE.md")) == new("CLAUDE.md") and notes == []
+          and not os.path.exists(os.path.join(project, "CLAUDE.md.old")), str(notes))
+    check("a .mcp.json that the user deleted does not come back: the panel does not need it",
+          not os.path.lexists(os.path.join(project, ".mcp.json")))
     check("a command that the user deleted does not come back",
           not os.path.exists(os.path.join(project, ".claude", "commands", "check.md")))
 
@@ -238,7 +254,79 @@ def main():
         os.replace = real_replace
     check("a file that cannot be replaced: no error, the old file stays whole, and the note says it is old",
           read(path) == before[".mcp.json"].encode() and not os.path.exists(path + ".new")
-          and not os.path.exists(path + ".old") and any("`.mcp.json`" in n for n in notes), str(notes))
+          and not os.path.exists(path + ".old") and any("`CLAUDE.md`" in n for n in notes)
+          and read(os.path.join(project, "CLAUDE.md")) == before["CLAUDE.md"].encode()
+          and not [n for n in files(project) if n.endswith((".new", ".old"))], str(notes))
+
+    # ---- a project folder from another person: names that are taken, and links that lead out ----
+    project = make("draft")
+    with open(os.path.join(project, "CLAUDE.md.new"), "w", encoding="utf-8") as f:
+        f.write("my draft of the next CLAUDE.md")
+    projects.migrate(project)
+    check("a file <name>.new of the user is not written over and not moved away: the update uses a free name",
+          read(os.path.join(project, "CLAUDE.md.new")) == b"my draft of the next CLAUDE.md"
+          and read(os.path.join(project, "CLAUDE.md")) == new("CLAUDE.md")
+          and read(os.path.join(project, "CLAUDE.md.old")) == before["CLAUDE.md"].encode()
+          and not os.path.lexists(os.path.join(project, "CLAUDE.md.new-2")))
+
+    outside = os.path.join(home, "outside")
+    os.makedirs(outside)
+
+    def link(target, name, folder=False):
+        """A link, or False where this system or this user cannot make one (Windows)."""
+        try:
+            os.symlink(target, name, target_is_directory=folder)
+            return True
+        except (OSError, NotImplementedError, AttributeError):
+            return False
+
+    keys = os.path.join(outside, "authorized_keys")
+    with open(keys, "w", encoding="utf-8") as f:
+        f.write("the user's own file outside the project")
+    project = make("links")
+    can_link = (link(keys, os.path.join(project, "CLAUDE.md.new"))
+                and link(os.path.join(outside, "not-there-yet"), os.path.join(project, ".mcp.json.new"))
+                and link(keys, os.path.join(project, ".claude", "settings.json.old")))
+    if not can_link:
+        print("skip  links: this system or this user cannot make a symbolic link", flush=True)
+    else:
+        projects.migrate(project)
+        check("<name>.new is a link to a file outside the project: that file is not written",
+              read(keys) == b"the user's own file outside the project"
+              and os.path.islink(os.path.join(project, "CLAUDE.md.new")))
+        check("... and the project still gets its new files, which are files and not links",
+              read(os.path.join(project, "CLAUDE.md")) == new("CLAUDE.md")
+              and not os.path.islink(os.path.join(project, "CLAUDE.md"))
+              and read(os.path.join(project, "CLAUDE.md.old")) == before["CLAUDE.md"].encode()
+              and read(os.path.join(project, ".mcp.json")) == new(".mcp.json")
+              and not os.path.islink(os.path.join(project, ".mcp.json")))
+        check("a link to a file that is not there makes no file outside the project",
+              os.listdir(outside) == ["authorized_keys"], str(os.listdir(outside)))
+        check("<name>.old is a link: the old file is kept under the next free name",
+              read(os.path.join(project, ".claude", "settings.json.old-2")) == before[".claude/settings.json"].encode()
+              and read(os.path.join(project, ".claude", "settings.json")) == new(".claude/settings.json"))
+
+        # the .claude folder of the project is a link to a folder somewhere else
+        shared = os.path.join(outside, "shared-claude")
+        project = make("linked-folder")
+        shutil.move(os.path.join(project, ".claude"), shared)
+        was_shared = files(shared)
+        link(shared, os.path.join(project, ".claude"), folder=True)
+        projects.migrate(project)
+        check("a .claude folder that is a link to another folder: nothing is changed or made there",
+              files(shared) == was_shared and b"acceptEdits" in was_shared["settings.json"],
+              str(sorted(set(files(shared)) ^ set(was_shared))))
+        check("... the files in the project's own folder are still brought up to date",
+              read(os.path.join(project, "CLAUDE.md")) == new("CLAUDE.md"))
+
+        # the project folder itself is a link in the projects folder: that is the user's own choice
+        real_place = make("real-place")
+        shutil.move(real_place, os.path.join(outside, "real-place"))
+        link(os.path.join(outside, "real-place"), real_place, folder=True)
+        projects.migrate(real_place)
+        check("a project folder that is a link itself is brought up to date as every other",
+              read(os.path.join(real_place, ".claude", "settings.json")) == new(".claude/settings.json")
+              and read(os.path.join(real_place, "CLAUDE.md")) == new("CLAUDE.md"))
     shutil.rmtree(os.path.join(home, "projects"), ignore_errors=True)
 
 

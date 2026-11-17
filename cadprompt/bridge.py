@@ -1,6 +1,7 @@
 """The bridge between Claude Code and this FreeCAD: an MCP server in this process.
 
-Claude Code needs nothing but itself: the project's .mcp.json points it at
+Claude Code needs nothing but itself: the .mcp.json of the addon (never the
+one of a project folder, see runner.mcp_config) points it at
 http://127.0.0.1:<port>/mcp (mcp_server.py), and the panel hands it the
 address and the token in its environment. Every tool call arrives in a thread
 of the server and is handed to FreeCAD's main thread, the same way the
@@ -27,6 +28,8 @@ INSTRUCTIONS = ("The tools work in the user's open FreeCAD. run_python: App, Par
                 "between calls, each call is one undo step, and a call that fails is taken back. Check with "
                 "get_document_state. For a drawing call make_drawing first.")
 GONE = "ERROR: this request was stopped. Nothing was done."
+DOC_CLOSED = ('ERROR: the document "%s" was closed during this request. Nothing more can be done '
+              "in it. Stop and tell the user.")       # the text of local_engine.DOC_CLOSED
 
 _host = None          # made with the first server, lives in the main thread
 _server = None
@@ -41,6 +44,8 @@ class _Host(QtCore.QObject):
         super().__init__()
         self.project, self.source, self.note = "", "account", None
         self._serial = 0          # counts requests of the user; a call of an earlier one is not run
+        self._active = False      # True from begin() to end(): between two requests no call runs
+        self._doc = None          # name of the document this request works on
         self._backed = set()      # model files that have their backup copy for this request
         self._in_tool = False
         self.need_tool.connect(self._on_tool, QtCore.Qt.QueuedConnection)
@@ -48,14 +53,19 @@ class _Host(QtCore.QObject):
     def begin(self, project, source, note):
         """A new request of the user starts: Claude Code is about to run."""
         self._serial += 1
+        self._active = True
         from . import local_tools
         self.project, self.source, self.note = project or "", source or "account", note
         self._backed = set()
+        self._doc = _active_name()
         local_tools.begin_request()
 
     def end(self):
-        """Claude Code is not running any more: a call that still waits must not run."""
+        """Claude Code is not running any more: a call that still waits, or that comes in
+        later, must not run. The token stays good while the panel is open, and a program
+        that Claude Code started can outlive it."""
         self._serial += 1
+        self._active = False
 
     # ---- in a thread of the server ----------------------------------------------
     def call(self, name, args):
@@ -69,9 +79,14 @@ class _Host(QtCore.QObject):
         return call.result
 
     # ---- in the main thread -----------------------------------------------------
+    def _wanted(self, call):
+        """This call belongs to the request that runs now. False after Stop, after the end
+        of Claude Code and after stop(), also for a call that came in later."""
+        return self._active and call.serial == self._serial and running()
+
     def _on_tool(self, call):
         from . import mcp_server
-        if call.serial != self._serial or not running():
+        if not self._wanted(call):
             call.result = ([mcp_server.text_item(GONE)], True)
             call.done.set()
             return
@@ -81,27 +96,55 @@ class _Host(QtCore.QObject):
             return
         self._in_tool = True
         try:
-            call.result = self._run(call.name, call.args)
+            call.result = self._run(call)
         except Exception:
             call.result = ([mcp_server.text_item("ERROR in tool:\n" + traceback.format_exc(limit=3))], True)
         finally:
             self._in_tool = False
             call.done.set()
 
-    def _run(self, name, args):
+    def _run(self, call):
+        """Run one tool in the document of this request, whatever the user looks at now."""
         from . import approval, local_agent, local_prompt, local_tools, mcp_server
+        name, args = call.name, call.args
+        closed = self._go_to_document()
+        if closed:
+            return [mcp_server.text_item(closed)], True
         if name in local_prompt.CHANGING:
             # the user decides, in this thread, before anything of the step happens
             if not approval.request(name, args, self.source):
                 return [mcp_server.text_item(approval.DECLINED)], False
+            # The question lets events through: Stop, the end of Claude Code, a closed panel,
+            # a click on another document. A yes to a request that is over runs nothing.
+            if not self._wanted(call):
+                return [mcp_server.text_item(GONE)], True
+            closed = self._go_to_document()
+            if closed:
+                return [mcp_server.text_item(closed)], True
             self._backup()
-        if name == "get_view":
-            try:
-                return [mcp_server.image_item(local_tools.get_view(), "image/png")], False
-            except local_tools.NoView as exc:
-                return [mcp_server.text_item("ERROR: %s" % exc)], True
-        text = local_tools.run_tool(self.project, name, args)
-        return [mcp_server.text_item(text)], bool(local_agent.find_problem(name, text))
+        try:
+            if name == "get_view":
+                try:
+                    return [mcp_server.image_item(local_tools.get_view(), "image/png")], False
+                except local_tools.NoView as exc:
+                    return [mcp_server.text_item("ERROR: %s" % exc)], True
+            text = local_tools.run_tool(self.project, name, args)
+            return [mcp_server.text_item(text)], bool(local_agent.find_problem(name, text))
+        finally:
+            self._doc = _active_name()       # the code can make the document, or go to another
+
+    def _go_to_document(self):
+        """Make the document of this request the active one. Every tool of the bridge works
+        in the active document. Returns the error text when that document was closed."""
+        if not self._doc:
+            return ""                        # no document yet: the first tool makes or picks it
+        if self._doc not in App.listDocuments():
+            # never go on in the document that happens to be active: it is other work
+            return DOC_CLOSED % self._doc
+        if self._doc != _active_name():
+            # the user can click another document while Claude thinks: go back to ours
+            App.setActiveDocument(self._doc)
+        return ""
 
     def _backup(self):
         """Before the first change of a request, keep the model file as it is on disk."""
@@ -118,6 +161,11 @@ class _Host(QtCore.QObject):
             return
         if copy and self.note:
             self.note("backup", "model/.backup/" + copy.replace("\\", "/").rsplit("/", 1)[-1])
+
+
+def _active_name():
+    doc = App.ActiveDocument
+    return doc.Name if doc is not None else None
 
 
 def ensure(project="", source="account", note=None):
@@ -145,7 +193,8 @@ def ensure(project="", source="account", note=None):
 
 
 def idle():
-    """Claude Code ended or was stopped: its calls that did not start yet are dropped."""
+    """Claude Code ended or was stopped: a call that did not start yet is dropped, and so is
+    every call that comes in before the next ensure()."""
     if _host is not None:
         _host.end()
 
@@ -162,3 +211,8 @@ def stop():
 
 def running():
     return _server is not None and _server.running()
+
+
+def token():
+    """The token of the server that runs now, or "". local_tools keeps it out of tool results."""
+    return _server.token if _server is not None else ""

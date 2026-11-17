@@ -20,13 +20,16 @@ BACKUPS = 10      # copies kept of each model in model/.backup
 # is one of these was never changed by the user, so the new version can take its place.
 OLD = {
     ".mcp.json": ("6063d993d17936e86554387b2560345a050f21a6991c99a9a02c30a15727de37",),
-    ".claude/settings.json": ("d3560e37dc1c09c85651280b7f99fc0d2495d8099d67d26d07f616ffeea27d8a",),
+    ".claude/settings.json": ("d3560e37dc1c09c85651280b7f99fc0d2495d8099d67d26d07f616ffeea27d8a",
+                              "a31d13aa5ba48ed15399043c7d22f35d11ac8474649037519f5098fe805592c3"),
+    ".claude/commands/build.md": ("0fce8d988123bb0985d324be50108406971d07e62d7ed6ded8851411de347482",),
+    ".claude/commands/teach.md": ("0dcc70e27f67736f2f41b03ccc3519fd33f7c02e3adf0ad2240b3d62bf41e9ae",),
     ".claude/commands/check.md": ("30c6d72929571ce50254aeaf724c4663621613291de25cc7d398c4d5035538e9",),
     ".claude/commands/drawing.md": ("c2ed1b666962393bb6cdc796370c6c9f49a2508d110aad2a2ffaef45f59ea83a",
                                     "beb50d4d7805f7832553ef1e1c5cfe5d3f08c5ba0d92f94cb9cc7141dd07b5ce"),
     "CLAUDE.md": ("16c69921f8375c6c42958a3adf148432d7ceb8b6accb1f85b945c7a2a43a4817",),
 }
-NEEDED = (".mcp.json", "CLAUDE.md")      # Claude Code cannot work in a project without these
+NEEDED = ("CLAUDE.md",)       # Claude Code cannot work in a project without it
 # tools of the bridge that CADprompt used before it had its own
 OLD_TOOLS = ("execute_code", "list_documents", "get_object", "get_objects", "create_object", "edit_object",
              "delete_object", "create_document", "insert_part_from_library", "get_parts_list")
@@ -186,26 +189,41 @@ def _digest(data):
     return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
-def _kept_name(path):
-    """A free name for the old version of a file: x.old, then x.old-2, x.old-3, ..."""
-    name, n = path + ".old", 2
+def _free_name(path, end):
+    """A name beside a file that nothing has yet: x.old, then x.old-2, x.old-3, ..."""
+    name, n = path + end, 2
     while os.path.lexists(name):
-        name, n = "%s.old-%d" % (path, n), n + 1
+        name, n = "%s%s-%d" % (path, end, n), n + 1
     return name
+
+
+def _copy(src, dest, made):
+    """Copy to a name that must be free. "x" refuses a file or a link that is there: a link
+    can lead out of the project, and the copy would go into the file at its end."""
+    with open(src, "rb") as f, open(dest, "xb") as out:
+        made.append(dest)
+        shutil.copyfileobj(f, out)
+
+
+def _in_project(project, rel):
+    """Is the folder of this file a real folder of the project? `.claude` can be a link (on
+    Windows a junction) to a folder somewhere else, and that folder is not ours to change."""
+    folder = os.path.join(*rel.split("/")[:-1]) if "/" in rel else ""
+    here = os.path.realpath(project)
+    return (os.path.normcase(os.path.realpath(os.path.join(project, folder)))
+            == os.path.normcase(os.path.join(here, folder) if folder else here))
 
 
 def _put(new, path, keep=True):
     """Put the template file `new` at `path`. The file that was there stays as <name>.old."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    kept = _kept_name(path) if keep and os.path.lexists(path) else None
-    part = path + ".new"
+    kept = _free_name(path, ".old") if keep and os.path.lexists(path) else None
+    part = _free_name(path, ".new")      # never a name that is there: it can be the user's file, or a link
     made = []
     try:
         if kept:
-            made.append(kept)
-            shutil.copyfile(path, kept)
-        made.append(part)
-        shutil.copyfile(new, part)
+            _copy(path, kept, made)
+        _copy(new, part, made)
         os.replace(part, path)
     except OSError:
         # Windows: a file that another program has open cannot be replaced. Leave no half work.
@@ -217,13 +235,18 @@ def _put(new, path, keep=True):
         raise
 
 
-def migrate(project):
+def migrate(project, replaced=None):
     """Bring the files that a project got from an older template up to date.
 
     Only a file that is still exactly an earlier version of the template is
     replaced, and the old one is kept beside it as <name>.old. A file that
-    the user changed is never touched. Returns notes for the user: what a
-    file that was left alone means for the work with Claude Code.
+    the user changed is never touched, and nothing is written through a link
+    that leads out of the project. The names of the files that were replaced
+    are added to the list `replaced`. Returns notes for the user: what a file
+    that was left alone means for the work with Claude Code.
+
+    The .mcp.json of a project gets no note: the panel gives Claude Code the
+    one of the addon (runner.mcp_config).
     """
     tpl = template_dir()
     if not tpl or not os.path.isdir(project):
@@ -231,7 +254,7 @@ def migrate(project):
     for rel, old in OLD.items():
         new = os.path.join(tpl, *rel.split("/"))
         path = os.path.join(project, *rel.split("/"))
-        if not os.path.isfile(new):
+        if not os.path.isfile(new) or not _in_project(project, rel):
             continue
         data = _read(path)
         try:
@@ -240,18 +263,15 @@ def migrate(project):
                     _put(new, path, keep=False)
             elif _digest(data) in old:
                 _put(new, path)
+                if replaced is not None:
+                    replaced.append(rel)
         except OSError as exc:
             App.Console.PrintWarning(f"CADprompt: could not bring {rel} of the project up to date: {exc}\n")
     notes = []
-    data = _read(os.path.join(project, ".mcp.json"))
-    if data is not None and b"CADPROMPT_MCP_URL" not in data:
-        notes.append("This project has its own `.mcp.json`, so CADprompt did not replace it. It does not "
-                     "name the FreeCAD tools of this version, and Claude cannot reach FreeCAD with it. "
-                     "Delete the file and pick the project again to get the new one.")
     text = (_read(os.path.join(project, "CLAUDE.md")) or b"").decode("utf-8", "replace")
     named = [t for t in OLD_TOOLS if re.search(r"\b%s\b" % t, text)]
     if named:
         notes.append("This project has its own `CLAUDE.md`, so CADprompt did not replace it. It names old "
-                     "tools (%s). The tools are now %s. Correct the file, or delete it and pick the "
-                     "project again to get the new one." % (", ".join("`%s`" % t for t in named[:3]), NEW_TOOLS))
+                     "tools (%s). The tools are now %s. Correct the file, or delete it and send your "
+                     "message again to get the new one." % (", ".join("`%s`" % t for t in named[:3]), NEW_TOOLS))
     return notes

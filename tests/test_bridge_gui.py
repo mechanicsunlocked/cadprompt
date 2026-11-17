@@ -151,9 +151,10 @@ def main():
         return real_wait(call, gone, step)
     main_thread.wait = recording_wait
 
-    def sent_and_waiting(client, seconds=20):
-        """Without one look at FreeCAD's events: wait until the call is in and waits for the main thread."""
-        n, end = len(waiting), time.time() + seconds
+    def sent_and_waiting(client, n, seconds=20):
+        """Without one look at FreeCAD's events: wait until the call is in and waits for the main thread.
+        `n` is len(waiting) from before the client was made: its thread can be faster than this one."""
+        end = time.time() + seconds
         while len(waiting) == n and not client.done() and time.time() < end:
             time.sleep(0.01)
         return len(waiting) > n
@@ -219,6 +220,12 @@ def main():
           and doc.getObject("Lost") is None, c.text())
     c = tool("run_python", {"code": "import subprocess"})
     check("the guard of run_python holds for Claude Code too", c.failed() is True and "not allowed" in c.text(), c.text())
+    c = tool("run_python", {"code": "import cadprompt.bridge as b\nprint('T', b._server.token)\n"
+                                    "raise ValueError(b._server.token)"})
+    check("the token of the bridge never leaves in a tool result: not in the output, not in an error text",
+          c.status == 200 and len(token) >= 43 and token not in json.dumps(c.body)
+          and c.text().count("(the token of the bridge, hidden)") >= 2, c.text())
+    check("... and bridge.token() is the token of the server that runs", bridge.token() == token)
     del ran[:]
     c = tool("read_project_file", {"path": "refs/INDEX.md"})
     check("read_project_file is not offered: an error, and nothing runs",
@@ -298,13 +305,35 @@ def main():
     # ---- 5: Claude Code is gone: its call that did not start is dropped ----------
     say("--- 5 a call of a run that ended")
     del ran[:]
+    n = len(waiting)
     c = Client(url, token, "tools/call", {"name": "run_python", "arguments": {"code": "doc.addObject('Part::Box', 'Late')"}})
-    check("(setup) the call is in and waits for the main thread", sent_and_waiting(c), c.text())
+    check("(setup) the call is in and waits for the main thread", sent_and_waiting(c, n), c.text())
     bridge.idle()                                # what the panel does when Claude Code ends or is stopped
     pump(c.done, 10)
     check("idle(): a call that still waited does not run", c.done() and not ran and doc.getObject("Late") is None
           and c.failed() is True and "stopped" in c.text(), f"{c.text()} {ran}")
     check("idle() leaves the server running", bridge.running() and port_open(port))
+    # Windows ends Claude Code a moment after Stop, and a program that Claude Code started can
+    # live longer than it: they have the token, and the server is open while the panel is.
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'AfterStop')"})
+    check("idle(): a call that comes in later does not run either", not ran and doc.getObject("AfterStop") is None
+          and c.status == 200 and c.failed() is True and c.text() == bridge.GONE, f"{c.text()} {ran}")
+    c = tool("get_document_state")
+    check("... also not a tool that only looks", not ran and c.failed() is True and c.text() == bridge.GONE, c.text())
+    c = ask("tools/list", {})
+    check("... the server itself still answers", c.status == 200 and len(c.body["result"]["tools"]) == 4, c.text())
+
+    def stopping_request(tool_name, args, source):
+        """Stop, or the end of Claude Code, while the question is open. Then the user says yes."""
+        bridge.idle()
+        return True
+    approval.request = stopping_request
+    bridge.ensure(project, "account")
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'YesAfterStop')"})
+    check("a yes to a question of a request that was stopped meanwhile runs nothing",
+          not ran and doc.getObject("YesAfterStop") is None and c.failed() is True and c.text() == bridge.GONE,
+          f"{c.text()} {ran}")
+    approval.request = recording_request
     bridge.ensure(project, "account")
     c = tool("run_python", {"code": "x = 1"})
     check("the next request of the user works again", c.failed() is False and len(ran) == 1, c.text())
@@ -327,6 +356,61 @@ def main():
     check("one copy for each request, not for each step",
           sorted(os.listdir(folder)) == copies and len(notes) == 1, str(notes))
 
+    # ---- 6b: the document of the request, whatever the user looks at ---------------
+    say("--- 6b the document of the request")
+    import FreeCADGui as Gui
+    other = App.newDocument("Other")
+    other.addObject("Part::Box", "Theirs")
+    other.recompute()
+    other_file = os.path.join(HOME, "other.FCStd")       # not in the project
+    other.saveAs(other_file)
+    stamp = (os.path.getsize(other_file), os.path.getmtime(other_file))
+    App.setActiveDocument(doc.Name)
+    bridge.ensure(project, "account")
+    tool("run_python", {"code": "doc.addObject('Part::Box', 'One')"})
+    App.setActiveDocument("Other")               # the user clicks the other document while Claude thinks
+    c = tool("run_python", {"code": "doc.addObject('Part::Cylinder', 'Two'); doc.recompute(); doc.save(); print(doc.Name)"})
+    check("the user clicked another document: the next step still goes to the document of the request",
+          c.failed() is False and doc.getObject("Two") is not None and doc.Name in c.text()
+          and [o.Name for o in other.Objects] == ["Theirs"], c.text())
+    check("... and the other document is not saved",
+          (os.path.getsize(other_file), os.path.getmtime(other_file)) == stamp)
+    check("... and FreeCAD's window is in that document too (get_view, make_drawing)",
+          App.ActiveDocument.Name == doc.Name and Gui.ActiveDocument.Document.Name == doc.Name)
+
+    def clicking_request(tool_name, args, source):
+        App.setActiveDocument("Other")           # the user looks at the other document while the question is open
+        return True
+    approval.request = clicking_request
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'Three'); print(doc.Name)"})
+    check("the user clicked another document while the question was open: the same",
+          c.failed() is False and doc.getObject("Three") is not None and [o.Name for o in other.Objects] == ["Theirs"],
+          c.text())
+    approval.request = recording_request
+    c = tool("run_python", {"code": "d2 = App.newDocument('Second'); d2.addObject('Part::Box', 'B'); d2.recompute()"})
+    App.setActiveDocument("Other")
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'C'); print(doc.Name)"})
+    check("the code went to a document of its own: the request goes on there",
+          c.failed() is False and App.getDocument("Second").getObject("C") is not None
+          and [o.Name for o in other.Objects] == ["Theirs"], c.text())
+    App.closeDocument("Second")                  # the user closes the document of the request
+    App.setActiveDocument("Other")
+    del ran[:]
+    n_asked = len(asked)
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'D')"})
+    check("the document of the request was closed: no tool runs in another one, the user is not asked, "
+          "and the answer says why", c.failed() is True and c.text() == bridge.DOC_CLOSED % "Second" and not ran
+          and len(asked) == n_asked and [o.Name for o in other.Objects] == ["Theirs"], f"{c.text()} {ran}")
+    c = tool("get_document_state")
+    check("... also for a tool that only looks", c.failed() is True and c.text() == bridge.DOC_CLOSED % "Second", c.text())
+    App.setActiveDocument(doc.Name)
+    bridge.ensure(project, "account")
+    c = tool("run_python", {"code": "print(doc.Name)"})
+    check("the next request of the user works in the document that is active then",
+          c.failed() is False and doc.Name in c.text(), c.text())
+    App.closeDocument("Other")
+    App.setActiveDocument(doc.Name)
+
     # ---- 7: stop() -----------------------------------------------------------------
     say("--- 7 stop")
 
@@ -342,6 +426,8 @@ def main():
     took = time.time() - t0
     check("stop() in the middle of a call does not lock up: the call ends, the client gets an end",
           c.done() and took < 5, f"{took:.1f} s, {c.text()}")
+    check("... and the step does not run: the client is told that nothing was done, and that is true",
+          not ran and "y" not in local_tools._namespace, f"{ran} {c.text()}")
     check("after stop() nothing listens: the port is closed", not bridge.running() and not port_open(port))
     approval.request = recording_request
 
@@ -354,8 +440,9 @@ def main():
     pump(old.done, 10)
     check("the token of the server before does not open the new one", old.status == 401, old.text())
     del ran[:]
+    n = len(waiting)
     c = Client(url2, token2, "tools/call", {"name": "run_python", "arguments": {"code": "doc.addObject('Part::Box', 'AfterStop')"}})
-    check("(setup) the call is in and waits for the main thread", sent_and_waiting(c), c.text())
+    check("(setup) the call is in and waits for the main thread", sent_and_waiting(c, n), c.text())
     t0 = time.time()
     bridge.stop()                                # the panel closes now
     took = time.time() - t0

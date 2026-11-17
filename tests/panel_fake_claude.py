@@ -7,10 +7,14 @@ file named in PANEL_FAKE_CLAUDE_LOG, then answers like Claude Code would:
 A session id that starts with "gone" is one it does not have any more.
 A prompt that starts with "slow" is one it works on for a minute: it writes
 its process id to the log first, so the test can see that Stop ends it.
-A prompt that starts with "mcp:" makes it do what Claude Code does with the
-project's .mcp.json: it reads the file, fills in the variables, and calls the
-FreeCAD tools at that address; the rest of the prompt is the code for
-run_python. What the server answered goes into the log as "mcp".
+A prompt that starts with "mcp:" makes it do what Claude Code does with its
+MCP servers: it takes them from the .mcp.json of the folder it runs in, and
+from the file named after --mcp-config; with --strict-mcp-config only from
+that file. It fills in the variables and calls the FreeCAD tools of the
+server `freecad`; the rest of the prompt is the code for run_python. What the
+server answered goes into the log as "mcp". A server that is a program
+("command") is not started: what Claude Code would start, with which
+arguments and environment, goes into the log as "started".
 """
 
 import http.client
@@ -51,12 +55,31 @@ def post(url, headers, message):
         conn.close()
 
 
+def servers():
+    """The MCP servers as Claude Code started with these arguments takes them: {name: (where from, config)}."""
+    found = {}
+    if "--strict-mcp-config" not in args:
+        try:                         # with -p, the file of the folder is used without a question
+            with open(".mcp.json", encoding="utf-8") as f:
+                found.update({name: ("project", one) for name, one in json.load(f)["mcpServers"].items()})
+        except (OSError, ValueError, KeyError):
+            pass
+    if "--mcp-config" in args[:-1]:
+        with open(args[args.index("--mcp-config") + 1], encoding="utf-8") as f:
+            found.update({name: ("argument", one) for name, one in json.load(f)["mcpServers"].items()})
+    return found
+
+
 def use_tools(code):
     """What Claude Code does at its start and for one tool call, as a dict for the log."""
     out = {}
     try:
-        with open(".mcp.json", encoding="utf-8") as f:
-            server = json.load(f)["mcpServers"]["freecad"]
+        found = servers()
+        out["servers"] = {name: origin for name, (origin, _) in found.items()}
+        out["started"] = [[expand(one["command"])] + [expand(a) for a in one.get("args", [])]
+                          + sorted(expand(v) for v in one.get("env", {}).values())
+                          for _origin, one in found.values() if "command" in one]
+        out["from"], server = found["freecad"]
         url = expand(server["url"])
         headers = {k: expand(v) for k, v in server.get("headers", {}).items()}
         out["type"], out["url"] = server.get("type"), url

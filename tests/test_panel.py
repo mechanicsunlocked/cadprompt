@@ -978,6 +978,14 @@ def main():
     check("account: a blocked web tool still points to Settings",
           pan.entries[-1] == ("error", "`WebSearch` was blocked: web access is off. "
                                        "Turn it on in Settings, then ask again."), str(pan.entries[-1]))
+    pan.send("more")
+    pan.run.finished.emit({"is_error": False, "result": "", "permission_denials": [
+        {"tool_name": "Write"}, {"tool_name": "Write"}, {"tool_name": "mcp__other__thing"}]})
+    check("account: a file tool of Claude Code that was refused: one plain line for each tool, which says why",
+          pan.entries[-2:] == [("error", "`Write` was blocked: Claude Code must ask you before it uses this tool, "
+                                         "and it cannot ask in this panel."),
+                               ("error", "`thing` was blocked: Claude Code must ask you before it uses this tool, "
+                                         "and it cannot ask in this panel.")], str(pan.entries[-3:]))
     check("account: tooltips and notes name Claude", pan.build_btn.toolTip() == "Claude builds the whole part"
           and pan.refs_btn.toolTip() == "Copy photos, PDFs or drawings into refs/ for Claude")
     mime = QtCore.QMimeData()
@@ -1009,29 +1017,76 @@ def main():
     for rel in (".mcp.json", "CLAUDE.md"):
         with open(os.path.join(aged, rel), "w", encoding="utf-8", newline="") as f:
             f.write(old_files[rel])
+
+    def aged_files():
+        out = {}
+        for name in sorted(os.listdir(aged)):
+            if os.path.isfile(os.path.join(aged, name)):
+                with open(os.path.join(aged, name), encoding="utf-8", newline="") as f:
+                    out[name] = f.read()
+        return out
+
+    def send_to_claude(text):
+        """One message to Claude Code (ClaudeRun.start is the recorder), and its end."""
+        pan.send(text)
+        pan.run.finished.emit({"is_error": False, "result": "ok"})
+
+    was = aged_files()
+    for backend in ("local", "apikey", "account"):
+        p.SetString("Backend", backend)
+        pan._select("aged-part", open_model=False)
+        pan.check_setup()
+        spin(300)
+    check("a project with the old files: picking it changes no file, with any source. The terminal launcher "
+          "shares the projects folder and works with the old files",
+          aged_files() == was and "uvx" in was[".mcp.json"] and not kinds(pan, "setup-note"),
+          str(sorted(set(aged_files()) ^ set(was))) + str(kinds(pan, "setup-note")))
+    p.SetString("Backend", "local")
+    pan.check_setup()
+    sent_with("what is this part?")
+    check("... a message to the local model changes none either: the built-in engine reads none of these files",
+          aged_files() == was, str(sorted(set(aged_files()) ^ set(was))))
     p.SetString("Backend", "account")
-    pan._select("aged-part", open_model=False)
-    with open(os.path.join(aged, ".mcp.json"), encoding="utf-8") as f:
-        now = f.read()
-    check("a project with the old files: picking it brings .mcp.json and CLAUDE.md up to date, the old ones are kept",
-          "CADPROMPT_MCP_URL" in now and "uvx" not in now and os.path.isfile(os.path.join(aged, ".mcp.json.old"))
-          and os.path.isfile(os.path.join(aged, "CLAUDE.md.old")) and not kinds(pan, "setup-note"),
-          now[:200] + str(kinds(pan, "setup-note")))
+    pan.check_setup()
+    spin(300)
+    check("... and a change of the source to the Claude account alone changes none", aged_files() == was)
+    n = len(pan.entries)
+    send_to_claude("make it longer")
+    now = aged_files()
+    check("the first message to Claude brings .mcp.json and CLAUDE.md up to date, the old ones are kept",
+          "CADPROMPT_MCP_URL" in now[".mcp.json"] and "uvx" not in now[".mcp.json"]
+          and now.get(".mcp.json.old") == was[".mcp.json"] and now.get("CLAUDE.md.old") == was["CLAUDE.md"]
+          and "run_python" in now["CLAUDE.md"] and not kinds(pan, "setup-note"),
+          now[".mcp.json"][:200] + str(kinds(pan, "setup-note")))
+    told = [i for i, (k, t) in enumerate(pan.entries) if k == "note" and "older CADprompt" in t]
+    check("... and the chat names the files that were replaced, one time, before the message",
+          len(told) == 1 and told[0] >= n and "`.mcp.json`, `CLAUDE.md`" in pan.entries[told[0]][1]
+          and "`<name>.old`" in pan.entries[told[0]][1] and pan.entries[told[0] + 1] == ("user", "make it longer"),
+          str(pan.entries[n:]))
+    send_to_claude("and wider")
+    check("the second message: no second note and no second copy",
+          aged_files() == now and len([t for k, t in pan.entries if k == "note" and "older CADprompt" in t]) == 1,
+          str(sorted(set(aged_files()) ^ set(now))))
     edited = projects.create("Edited part")
     mine = old_files["CLAUDE.md"] + "\n## My shop\n\nOnly M6 and M8 screws.\n"
     with open(os.path.join(edited, "CLAUDE.md"), "w", encoding="utf-8", newline="") as f:
         f.write(mine)
     pan._select("edited-part", open_model=False)
+    check("a CLAUDE.md that the user changed: the panel looks at it only when a message goes to Claude",
+          not kinds(pan, "setup-note"), str(kinds(pan, "setup-note")))
+    send_to_claude("make a pin")
     notes = kinds(pan, "setup-note")
     with open(os.path.join(edited, "CLAUDE.md"), encoding="utf-8", newline="") as f:
         check("a CLAUDE.md that the user changed is left alone", f.read() == mine
               and not os.path.exists(os.path.join(edited, "CLAUDE.md.old")))
     check("... and the panel says one time, in plain words, that it names old tools",
           len(notes) == 1 and "`CLAUDE.md`" in notes[0] and "old tools" in notes[0] and "`run_python`" in notes[0]
-          and pan.entries[0] == ("note", "Project **edited-part**."), str(notes))
+          and pan.entries[0] == ("note", "Project **edited-part**.")
+          and not [t for k, t in pan.entries if k == "note" and "older CADprompt" in t], str(notes))
+    send_to_claude("and a second pin")
     pan.check_setup()
     spin(300)
-    check("the note is still there after the next setup check, one time",
+    check("the note is still there after the next message and the next setup check, one time",
           kinds(pan, "setup-note") == notes and "names old tools" in pan.view.toPlainText().replace("\n", " "),
           str(kinds(pan, "setup-note")))
     p.SetString("Backend", "local")
@@ -1080,7 +1135,13 @@ def main():
     check("account: arguments: stream-json, the model, and the tools that need no question of Claude Code: "
           "the four FreeCAD tools by name, and the web tools because they are on in Settings",
           rec["argv"] == ["-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
+                          "--mcp-config", runner.mcp_config(), "--strict-mcp-config",
+                          "--permission-mode", "default", "--disallowedTools", "Bash",
                           "--allowedTools"] + freecad_tools + ["WebSearch", "WebFetch"], str(rec["argv"]))
+    addon_file = os.path.join(os.path.dirname(HERE), "template", ".mcp.json")
+    check("account: the file after --mcp-config is the .mcp.json of the addon, not one of a project",
+          os.path.samefile(runner.mcp_config(), addon_file)
+          and not os.path.samefile(runner.mcp_config(), os.path.join(project, ".mcp.json")), str(runner.mcp_config()))
     check("account: the started program has no ANTHROPIC_API_KEY, _AUTH_TOKEN, _BASE_URL",
           not [k for k in shell if k in rec["env"]], str(rec["env"]))
     url1, token1 = rec["env"].get("CADPROMPT_MCP_URL", ""), rec["env"].get("CADPROMPT_MCP_TOKEN", "")
@@ -1118,8 +1179,9 @@ def main():
     rec = run_fake("account", "mcp: box = doc.addObject('Part::Box', 'FromClaude')\nbox.Length = 20")
     mcp = rec.get("mcp") or {}
     made = App.ActiveDocument.getObject("FromClaude") if App.ActiveDocument is not None else None
-    check("during the run the started program reaches the bridge with the project's .mcp.json and its environment",
-          mcp.get("type") == "http" and mcp.get("url") == rec["env"].get("CADPROMPT_MCP_URL")
+    check("during the run the started program reaches the bridge with the .mcp.json of the addon and its environment",
+          mcp.get("from") == "argument" and mcp.get("servers") == {"freecad": "argument"}
+          and mcp.get("type") == "http" and mcp.get("url") == rec["env"].get("CADPROMPT_MCP_URL")
           and (mcp.get("initialize") or [0])[0] == 200 and mcp.get("initialized") == [202, None]
           and "error" not in mcp, str(mcp)[:600])
     check("... it gets the four tools", mcp.get("tools") == ["run_python", "get_document_state", "make_drawing", "get_view"],
@@ -1134,6 +1196,46 @@ def main():
           rec["argv"][-5:] == ["--allowedTools"] + freecad_tools, str(rec["argv"]))
     check("the panel shows the tool call and the answer as before",
           ("tool", "`run_python` doc.recompute()") in pan.entries and pan.send_btn.text() == "Send")
+    at = rec["argv"].index("--permission-mode") if "--permission-mode" in rec["argv"] else -1
+    check("Claude Code is started in its asking mode and without a shell, whatever the project's settings say",
+          at > 0 and rec["argv"][at:at + 4] == ["--permission-mode", "default", "--disallowedTools", "Bash"],
+          str(rec["argv"]))
+    projects.set_mode(project, "build")
+    rec = run_fake("account", "/teach a bracket")
+    check("/teach to Claude Code: the panel writes the mode file itself, and the command goes on as typed",
+          projects.get_mode(project) == "teach" and pan.teach_btn.isChecked() and rec["stdin"] == "/teach a bracket",
+          projects.get_mode(project) + " " + rec["stdin"])
+    rec = run_fake("account", "/build")
+    check("/build to Claude Code: the same", projects.get_mode(project) == "build" and pan.build_btn.isChecked())
+    rec = run_fake("account", "teach me /teach")
+    check("a message that only names /teach changes no mode", projects.get_mode(project) == "build")
+
+    # a project folder from another person: its .mcp.json names a program and wants the token
+    foreign = projects.create("From a teacher")
+    theirs = json.dumps({"mcpServers": {
+        "freecad": {"command": "their-program", "args": ["${CADPROMPT_MCP_URL}"], "env": {"T": "${CADPROMPT_MCP_TOKEN}"}},
+        "extra": {"command": "another-program"}}})
+    with open(os.path.join(foreign, ".mcp.json"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(theirs)
+    pan._select("from-a-teacher", open_model=False)
+    rec = run_fake("account", "mcp: theirs = doc.addObject('Part::Box', 'InTheirProject')")
+    mcp = rec.get("mcp") or {}
+    at = rec["argv"].index("--mcp-config") if "--mcp-config" in rec["argv"] else -1
+    check("a project with its own .mcp.json: Claude Code is told to use the file of the addon and no other",
+          os.path.realpath(rec["cwd"]) == os.path.realpath(foreign) and at > 0
+          and rec["argv"][at:at + 3] == ["--mcp-config", runner.mcp_config(), "--strict-mcp-config"],
+          str(rec["argv"]))
+    check("... so no program of that file is started, and the token goes to no other server",
+          mcp.get("servers") == {"freecad": "argument"} and mcp.get("started") == [], str(mcp)[:400])
+    made = App.ActiveDocument.getObject("InTheirProject") if App.ActiveDocument is not None else None
+    check("... and the server `freecad`, whose tools are allowed by name, is this FreeCAD",
+          mcp.get("url") == rec["env"].get("CADPROMPT_MCP_URL") and ((mcp.get("call") or [0])[0]) == 200
+          and made is not None and "error" not in mcp, str(mcp)[:400])
+    with open(os.path.join(foreign, ".mcp.json"), encoding="utf-8") as f:
+        check("... the file of the project is left as it is, and the panel has no note about it",
+              f.read() == theirs and not kinds(pan, "setup-note")
+              and not os.path.exists(os.path.join(foreign, ".mcp.json.old")), str(kinds(pan, "setup-note")))
+    pan._select("test-part", open_model=False)
 
     # a session id that Claude Code does not have any more (transcript deleted, other computer)
     projects.set_session(project, "gone-session")

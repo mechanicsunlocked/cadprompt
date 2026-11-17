@@ -130,11 +130,17 @@ def _not_allowed(code):
 
 
 def _hide_keys(text):
-    """Take saved keys out of a tool result.
+    """Take saved keys and the token of the bridge out of a tool result.
 
     The result goes to the model server and into the chat file of the project,
     and project folders are shared and synced.
     """
+    # The token lets any program on this computer run the tools while the panel is open.
+    # Not imported here: the bridge is loaded only for Claude Code.
+    bridge = sys.modules.get((__package__ or "cadprompt") + ".bridge")
+    token = bridge.token() if bridge is not None else ""
+    if token:
+        text = text.replace(token, "(the token of the bridge, hidden)")
     try:
         from . import backends, paths
         secrets = (backends.api_key(), backends.local_key(), paths.params().GetString("AuthToken", ""))

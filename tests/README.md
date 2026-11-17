@@ -127,7 +127,7 @@ For the unpacked `.7z` archive, in PowerShell:
 | `test_backends` | freecadcmd | The AI sources, what the built-in engine gets for each, and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
-| `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays. `old_template.json` holds the old files. |
+| `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays, and nothing is written through a link that leads out of the project. `old_template.json` holds the old files. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |
 | `test_bridge_gui` | freecad-gui | The bridge for Claude Code in a real FreeCAD: tool calls from other threads run in the main thread, the approval question, start and stop of the server. Client threads play Claude Code. |
 | `test_drawing_gui` | freecad-gui | Drawings with pages, views and PDF files. |
@@ -144,9 +144,12 @@ Not run by `run_all.py`:
   starts a test, so it never calls a real model. It also removes
   `ANTHROPIC_*` and `OPENAI_API_KEY`, so no key of your computer gets into a test.
 - `claude_real_run.py`. It sends one message to the real Claude Code through
-  the real panel and checks that the tool call arrives in FreeCAD. It uses your
-  Claude account, so you switch it on yourself with `PANEL_REAL_CLAUDE=1` (the
-  file says how). Run it after an update of Claude Code.
+  the real panel and checks that the tool call arrives in FreeCAD. Its project
+  looks like one from another person (a `.mcp.json` that names a program,
+  settings that switch the questions of Claude Code off): it checks that
+  neither counts. It uses your Claude account, so you switch it on yourself
+  with `PANEL_REAL_CLAUDE=1` (the file says how). Run it after an update of
+  Claude Code.
 - `drawing_run.py`. It runs the two drawing tests and makes PNG pictures of the
   drawings to look at. Use it when you work on drawings.
 - The other files are helpers for the tests (fake servers, pretend `claude`,

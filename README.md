@@ -122,7 +122,22 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   panel, choose a local model or an API key, or quit FreeCAD.
 - Claude Code gets four tools from that server and may use them without a
   question of its own: `run_python`, `get_document_state`, `make_drawing` and
-  `get_view`. It gets no shell: the project's settings deny that.
+  `get_view`. CADprompt starts it with the shell tool off and in its asking
+  mode. In the panel nobody can answer a question of Claude Code, so its own
+  file tools (Write, Edit) are refused there; it can read the files of the
+  project.
+- **A project folder from another person** cannot give Claude Code other
+  tools. CADprompt tells Claude Code to use the server list of the addon and
+  no other, so a `.mcp.json` in the project folder is not read by the panel.
+  Its `CLAUDE.md` is read: look at it before you send a message in a project
+  that is not yours.
+- The tools work in the document that was active when you sent the message,
+  also when you click another document while Claude works. After Stop, and
+  after Claude Code has ended, the server runs no more tool calls until your
+  next message.
+- If your computer uses a proxy (`HTTP_PROXY`, `HTTPS_PROXY`), CADprompt adds
+  `127.0.0.1` and `localhost` to `NO_PROXY` for Claude Code, so the requests to
+  FreeCAD stay on this computer.
 
 ## What is not done yet
 
@@ -140,11 +155,15 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 The first test versions needed the `uv` program and the FreeCADMCP addon for the
 Claude account source. It needs neither now.
 
-- When you pick a project that an older CADprompt made, the files that came
-  from the template (`.mcp.json`, `CLAUDE.md`, two commands) are replaced by the
-  new ones, and the old ones stay beside them as `<name>.old`. This happens only
-  for a file that you never changed. A file that you changed is left alone, and
-  the panel tells you what to do.
+- When you send the first message to Claude in a project that an older
+  CADprompt made, the files that came from the template (`.mcp.json`,
+  `CLAUDE.md`, the commands, the settings of Claude Code) are replaced by the
+  new ones, and the old ones stay beside them as `<name>.old`. The panel names
+  the files. This happens only for a file that you never changed. A file that
+  you changed is left alone, and the panel tells you what to do. With a local
+  model or an API key nothing is replaced.
+- The older terminal launcher works with the old files. To use it again for
+  such a project, put the `.old` files back.
 - CADprompt does not remove the FreeCADMCP addon. If you do not use it for other
   things, remove it in the Addon Manager: as long as it is installed, it opens
   its own port when FreeCAD starts.

@@ -2,11 +2,15 @@
 
 One `claude -p` process per message, in the project folder, prompt on stdin,
 `--output-format stream-json --verbose`. The conversation continues with
-`--resume <session_id>`. Claude Code reads the project's .mcp.json,
-.claude/settings.json and CLAUDE.md exactly as it does in a terminal, and
-signs in with the user's own login, or with the endpoint chosen in Settings
-(backends.claude_env). The project's .mcp.json sends it to the FreeCAD tools
-of this process (bridge.py): mcp_env() is where and with which token.
+`--resume <session_id>`. Claude Code reads the project's CLAUDE.md and
+.claude/ folder as it does in a terminal, and signs in with the user's own
+login, or with the endpoint chosen in Settings (backends.claude_env).
+
+What does not come from the project folder, because a project can come from
+another person: the list of MCP servers (mcp_config: the file of the addon,
+which sends Claude Code to the FreeCAD tools of this process, bridge.py;
+mcp_env() is where and with which token), the permission mode and the shell
+(ClaudeRun.start).
 """
 
 import json
@@ -18,7 +22,8 @@ from . import backends, paths
 
 
 HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the user did
-MCP_SERVER = "freecad"           # the name of the bridge in the project's .mcp.json
+MCP_SERVER = "freecad"           # the name of the bridge in the .mcp.json of the addon
+LOCAL_HOSTS = ("127.0.0.1", "localhost")   # the bridge, and a model server on this computer
 WEB_TOOLS = ("WebSearch", "WebFetch")
 
 
@@ -41,12 +46,27 @@ def _tool_detail(inp):
 
 
 def mcp_env(url, token):
-    """The variables that the project's .mcp.json reads: where the FreeCAD tools are.
+    """The variables that the .mcp.json of the addon reads: where the FreeCAD tools are.
 
     Not names that start with ANTHROPIC_: Claude Code reads those as empty
     when it fills in the address and the headers of a server.
     """
     return {"CADPROMPT_MCP_URL": url, "CADPROMPT_MCP_TOKEN": token}
+
+
+def mcp_config():
+    """The file that tells Claude Code where the FreeCAD tools are: the one of the addon.
+
+    Never the .mcp.json of the project folder. A project can come from another
+    person, and Claude Code started with -p uses the .mcp.json of its folder
+    without a question: a program named there would start as the user, with
+    the token of the bridge in its environment. With --strict-mcp-config
+    Claude Code reads this file and no other, so `freecad` in allowed_tools()
+    is this FreeCAD. A file and not JSON text: _cmd_line() takes the quotes
+    out of an argument. The file holds no secret; see mcp_env().
+    """
+    folder = paths.template_dir()
+    return os.path.join(folder, ".mcp.json") if folder else None
 
 
 def allowed_tools():
@@ -100,6 +120,28 @@ def system_environment():
     return pe
 
 
+def _no_proxy_for_local(pe):
+    """Put this computer into NO_PROXY, and keep what the user has there.
+
+    Claude Code sends the requests to an http MCP server through the proxy of
+    HTTP_PROXY / HTTPS_PROXY, also for 127.0.0.1, unless NO_PROXY names the
+    host. The proxy would get the token of the bridge and the code of
+    run_python in clear text, and it cannot reach the 127.0.0.1 of this
+    computer: no FreeCAD tool would work. The two spellings get the same list:
+    Claude Code joins them, other programs read only one of them.
+    """
+    have = []
+    for name in ("no_proxy", "NO_PROXY"):
+        for entry in pe.value(name, "").replace(",", " ").split():
+            if entry not in have:
+                have.append(entry)
+    if "*" in have:      # "no proxy for anything": more entries would make it a list of host names
+        return
+    value = ",".join(have + [host for host in LOCAL_HOSTS if host not in have])
+    for name in ("no_proxy", "NO_PROXY"):
+        pe.insert(name, value)
+
+
 def claude_environment(claude, env=None):
     """The environment Claude Code starts with: the system's, our PATH, env, the source."""
     pe = system_environment()
@@ -107,6 +149,7 @@ def claude_environment(claude, env=None):
     for k, v in (env or {}).items():
         pe.insert(k, v)
     _apply_backend(pe)
+    _no_proxy_for_local(pe)
     return pe
 
 
@@ -186,6 +229,13 @@ class ClaudeRun(QtCore.QObject):
         model = paths.params().GetString("ModelOverride", "")
         if model and backends.current() == "account":
             args += ["--model", model]
+        # Three things that a file of the project folder must not decide (it can come from
+        # another person, and nobody can answer a question of Claude Code started with -p):
+        # the MCP servers are those of the addon's file and no others; with no file, none.
+        config = mcp_config()
+        args += (["--mcp-config", config] if config else []) + ["--strict-mcp-config"]
+        # Claude Code asks before it changes a file (that is a no here), and it has no shell.
+        args += ["--permission-mode", "default", "--disallowedTools", "Bash"]
         args += ["--allowedTools"] + allowed_tools()
 
         self._buf, self._err, self._result, self._tools = b"", b"", None, {}

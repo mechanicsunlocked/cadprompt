@@ -24,6 +24,7 @@ import re
 import secrets
 import socket
 import socketserver
+import sys
 import threading
 
 from . import main_thread
@@ -75,6 +76,13 @@ class _Listener(http.server.ThreadingHTTPServer):
         # some computers that takes seconds. start() is called in FreeCAD's main thread.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    def handle_error(self, request, client_address):
+        # A client that went away before its request was read (a reset, or a broken request line
+        # and then a close) is no news. The standard server prints a traceback for it, and in
+        # FreeCAD that is red text in the Report view. A mistake of ours is still printed.
+        if not isinstance(sys.exc_info()[1], OSError):
+            super().handle_error(request, client_address)
 
 
 _STRINGS = re.compile(rb'"(?:\\.|[^"\\])*"', re.S)
