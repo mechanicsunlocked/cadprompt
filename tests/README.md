@@ -129,6 +129,8 @@ For the unpacked `.7z` archive, in PowerShell:
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
 | `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays, and nothing is written through a link that leads out of the project. `old_template.json` holds the old files. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |
+| `test_approval_gui` | freecad-gui | The question before the AI's code runs, in the real dock with a new profile: the code is shown, Run runs exactly that text, Skip runs nothing, Stop and a closed panel end it, the keys, "Run all for this request", the switch "Run the AI's code without asking" with its warning and its marker. For the built-in engine and for Claude Code (the pretend `claude` and client threads call the real bridge). |
+| `test_consent_gui` | freecad-gui | The question before data leaves the computer, and a new installation. Counting servers and the pretend `claude` prove that nothing is contacted and nothing is started before Allow: a new profile, a model server on another computer, the API key, Find models, Claude Code and its sign-in check. Also: a server on this computer needs no question, a new host asks again, Forget, and the TechDraw checkbox. |
 | `test_bridge_gui` | freecad-gui | The bridge for Claude Code in a real FreeCAD: tool calls from other threads run in the main thread, the approval question, start and stop of the server. Client threads play Claude Code. |
 | `test_drawing_gui` | freecad-gui | Drawings with pages, views and PDF files. |
 | `test_integration_gui` | freecad-gui | The whole addon. A scripted server plays the model. |
@@ -139,7 +141,9 @@ For the unpacked `.7z` archive, in PowerShell:
 Not run by `run_all.py`:
 
 - `local_smoke.py` and the runs that you switch on with `INTEGRATION_REAL_MODEL`
-  or `PANEL_REAL_MODEL`. They need a real model server. `run_all.py` removes
+  or `PANEL_REAL_MODEL`. They need a real model server. `local_smoke.py` sends
+  one message through the real panel with the settings of a new installation:
+  the code of the model waits for Run, and the script presses it. `run_all.py` removes
   these variables (all names with `_REAL_`, and `CADPROMPT_SMOKE_*`) before it
   starts a test, so it never calls a real model. It also removes
   `ANTHROPIC_*` and `OPENAI_API_KEY`, so no key of your computer gets into a test.
@@ -149,11 +153,21 @@ Not run by `run_all.py`:
   settings that switch the questions of Claude Code off): it checks that
   neither counts. It uses your Claude account, so you switch it on yourself
   with `PANEL_REAL_CLAUDE=1` (the file says how). Run it after an update of
-  Claude Code.
+  Claude Code. The code of Claude waits in the panel for Run; with
+  `PANEL_REAL_CLAUDE_THINK=90` the script waits 90 seconds before it presses
+  Run, to show that Claude Code does not give up on a user who reads slowly.
 - `drawing_run.py`. It runs the two drawing tests and makes PNG pictures of the
   drawings to look at. Use it when you work on drawings.
 - The other files are helpers for the tests (fake servers, pretend `claude`,
-  test parts, `hang_report.py` for a test that hangs on macOS).
+  test parts, `hang_report.py` for a test that hangs on macOS, and
+  `user_yes.py`).
+
+A new profile approves nothing: the AI's code waits for Run or Skip, and no
+service outside the computer gets data before Allow. A test that is about
+something else gives these two yeses in its own scratch profile with
+`user_yes.py` (`run_without_asking()`, `allow(kind, url)`,
+`allow_claude_code()`), the same way the user gives them. Only
+`test_approval_gui` and `test_consent_gui` work without them.
 
 ## How to add a test
 

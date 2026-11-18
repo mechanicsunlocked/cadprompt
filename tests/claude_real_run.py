@@ -14,6 +14,15 @@ the answer names its volume. The report goes to
 to the server, which is the record of what the protocol needs.
 PANEL_REAL_CLAUDE_MODEL picks the model (default: haiku).
 
+The profile is new but for one thing: the user said Allow to Claude Code
+(user_yes.py). "Run the AI's code without asking" is off, so the code of
+Claude waits in the panel for Run or Skip. This script is the user: it reads
+the question and presses Run after PANEL_REAL_CLAUDE_THINK seconds (default
+3) for the first question, and after 2 seconds for each later one. With 90
+it shows that a user who takes time to read is not cut off: the tool call of
+Claude Code waits that long inside FreeCAD, and Claude Code goes on with the
+result ("timeout" in template/.mcp.json).
+
 The project is made to look like one from another person: its .mcp.json
 names a program as the server `freecad`, and its settings switch the
 questions of Claude Code off. Neither may count: the program must not start,
@@ -50,6 +59,7 @@ HOME = os.environ["FREECAD_USER_HOME"]
 LOG = os.path.join(HOME, "claude_real_run.log")
 open(LOG, "w", encoding="utf-8").close()
 PROMPT = "Make a box 20 x 30 x 10 mm named TestBox, then tell me its volume."
+THINK = float(os.environ.get("PANEL_REAL_CLAUDE_THINK") or 3)
 passed, failed = [], []
 
 
@@ -78,9 +88,11 @@ def pump(cond=lambda: False, timeout=5.0):
 
 
 def main():
-    from cadprompt import bridge, local_tools, mcp_server, panel, paths, projects, runner
+    from cadprompt import approval, bridge, local_tools, mcp_server, panel, paths, projects, runner
+    import user_yes
 
     p = paths.params()
+    user_yes.allow_claude_code()             # the question about the service: test_consent_gui.py
     p.SetString("ProjectsDir", os.path.join(HOME, "projects"))
     p.SetString("Backend", "account")
     p.SetString("ModelOverride", os.environ.get("PANEL_REAL_CLAUDE_MODEL") or "haiku")
@@ -114,10 +126,15 @@ def main():
     seen, ran = [], []
     real_handle, real_request, real_run_tool = mcp_server.Server.handle, mcp_server._Handler._request, local_tools.run_tool
 
+    waits = []                               # how long each tools/call was open, in seconds
+
     def handle(self, message):
+        t0 = time.time()
         status, answer = real_handle(self, message)
         if isinstance(message, dict):
             seen.append((message.get("method"), message.get("params"), status))
+            if message.get("method") == "tools/call":
+                waits.append(((message.get("params") or {}).get("name"), time.time() - t0, status))
         return status, answer
 
     def request(self):
@@ -158,11 +175,52 @@ def main():
         App.closeDocument(d)
     results = []
     pan.run.finished.connect(lambda res: results.append(dict(res)))
+
+    # the user: reads each question of the panel, then presses Run
+    asked, state = [], {"since": None}
+
+    def user():
+        if not pan.asking():
+            state["since"] = None
+            return
+        now = time.time()
+        if state["since"] is None:
+            state["since"] = now
+            asked.append({"title": pan.card.title.text(), "text": pan.card.shown_text(),
+                          "ran": len([r for r in ran if r[0] in ("run_python", "make_drawing")]),
+                          "objects": [o.Name for d in App.listDocuments().values() for o in d.Objects],
+                          "on_screen": not pan.card.isHidden(), "waited": 0.0})
+            say("      question %d: %s\n            | %s" % (len(asked), asked[-1]["title"],
+                                                              asked[-1]["text"].replace("\n", "\n            | ")))
+        elif now - state["since"] >= (THINK if len(asked) == 1 else 2):
+            asked[-1]["waited"] = now - state["since"]
+            say("      -> Run, after %.1f s (Claude Code still runs: %r)" % (asked[-1]["waited"], pan.run.running()))
+            pan.card.run_btn.click()
+    timer = QtCore.QTimer()
+    timer.timeout.connect(user)
+    timer.start(50)
+
+    check("'Run the AI's code without asking' is off, as in a new installation", approval.auto() is False)
     t0 = time.time()
     pan.send(PROMPT)
     check("the message started Claude Code and the server", pan.send_btn.text() == "Stop" and bridge.running())
-    done = pump(lambda: bool(results) and pan.send_btn.text() == "Send", 240)
+    done = pump(lambda: bool(results) and pan.send_btn.text() == "Send", 240 + THINK)
+    timer.stop()
     say("      the run took %.0f s" % (time.time() - t0))
+    say("      tool calls of Claude Code (name, seconds open, status): %s"
+        % [(n, round(s, 1), st) for n, s, st in waits])
+    first = asked[0] if asked else {}
+    changing = [(r[0], approval.shown(r[0], r[1])) for r in ran if r[0] in ("run_python", "make_drawing")]
+    check("the panel asked before the code of Claude Code ran: the question was on screen, with no code run yet",
+          bool(asked) and first.get("on_screen") and first.get("ran") == 0 and not first.get("objects")
+          and first.get("title") == "Claude wants to run this code in FreeCAD:", str(first)[:400])
+    check("each step that changes things was asked for, and ran exactly as it was shown",
+          bool(changing) and [a["text"] for a in asked] == [text for _name, text in changing],
+          "%d questions, %d steps" % (len(asked), len(changing)))
+    slow = [w for w in waits if w[0] == "run_python"]
+    check("the tool call of Claude Code waited inside FreeCAD while the user read for %.0f s, and was answered"
+          % THINK, bool(slow) and slow[0][1] >= THINK and slow[0][2] == 200 and first.get("waited", 0) >= THINK,
+          str(slow)[:300])
     for kind, text in pan.entries:
         say("      [%s] %s" % (kind, text.replace("\n", "\n            ")))
     res = results[-1] if results else {}
@@ -215,7 +273,7 @@ def main():
 
 
 code = 1
-threading.Timer(290, lambda: (say("WATCHDOG: the test hung for 290 s"), os._exit(3))).start()
+threading.Timer(290 + THINK, lambda: (say("WATCHDOG: the test hung for %.0f s" % (290 + THINK)), os._exit(3))).start()
 try:
     main()
     code = 0 if not failed else 1

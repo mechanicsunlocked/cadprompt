@@ -183,8 +183,19 @@ def main():
     import cadprompt
     sys.modules["cadprompt.local_engine"] = stub
     cadprompt.local_engine = stub
-    from cadprompt import backends, bridge, panel, paths, projects, runner, settings_dialog
+    from cadprompt import backends, bridge, consent, panel, paths, projects, runner, settings_dialog
     from cadprompt.settings_dialog import SettingsDialog
+    import user_yes
+
+    # This file is about the panel and its sources, not about the two questions to the user
+    # (test_consent_gui.py, test_approval_gui.py). The user of this scratch profile said Allow
+    # to the three services outside the computer that the tests name, and turned "Run the AI's
+    # code without asking" on. A question that comes all the same is counted, and is a failure.
+    user_yes.allow("anthropic", backends.ANTHROPIC_URL)
+    user_yes.allow_claude_code("http://localhost:11434")
+    user_yes.run_without_asking()
+    questions = []
+    consent.asker = lambda kind, url: questions.append((kind, url)) or False
 
     real_roots = paths.bundle_roots()
     say("FreeCAD's own bundle: " + (", ".join(real_roots) or "none (a FreeCAD of the system)"))
@@ -547,8 +558,9 @@ def main():
                   pan.project == project and pan.entries[0] == ("note", "Project **test-part**."))
     p.SetString("Backend", "nonsense")
     pan = new_panel()
-    check("an unknown Backend value opens as the Claude account", pan.source.full == "Claude account · sonnet",
-          pan.source.full)
+    check("an unknown Backend value is no source: the panel shows the three choices and starts nothing",
+          pan.source.full == "No AI chosen" and not pan.chooser.isHidden() and pan.claude is None
+          and not bridge_calls, pan.source.full)
 
     # =====================================================================
     say("\n-- panel: local model --")
@@ -1362,6 +1374,8 @@ def main():
     spin(200)
     check("the panel is deleted: the bridge stops", not bridge.running())
 
+    check("in all of this the user was asked no question about a service: each one had the yes already, "
+          "or is on this computer", not questions, str(questions))
     check("no exception in any Qt slot", not SLOT_ERRORS, "\n".join(SLOT_ERRORS))
     for pan in panels:
         pan.deleteLater()

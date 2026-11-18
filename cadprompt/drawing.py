@@ -917,6 +917,27 @@ def fill_title_block(template, autofill, values, keep_rest):
 
 
 # ---- the tool --------------------------------------------------------------
+def describe(sheet="A3", obj_name=""):
+    """One line that says what make_drawing() would do now, for the user's yes (approval.py).
+
+    Never raises. It changes nothing: it only looks which object would be drawn.
+    """
+    asked = str(sheet or "A3").strip() or "A3"
+    wanted = str(obj_name or "").strip()
+    try:
+        size = _parse_sheet(asked)[0]
+        doc = App.ActiveDocument
+        obj = pick_object(doc, wanted)[0] if doc is not None and size is not None else None
+    except Exception:
+        size, obj = asked, None
+    if size is None:
+        return f"Make drawing: sheet {asked}. The tool does not know this sheet, so it will draw nothing."
+    if obj is None:
+        which = f"object {wanted}" if wanted else "the main object"
+        return f"Make drawing: sheet {size}, {which}. No such solid is there now, so it will draw nothing."
+    return f"Make drawing: sheet {size}, object {obj.Label} \u2192 drawings/{_file_name(obj.Label)}-{size}.pdf"
+
+
 def make_drawing(project, sheet="A3", obj_name=""):
     """Workshop drawing of one object of the active document. Returns a text report.
 

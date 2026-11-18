@@ -3,6 +3,7 @@
     "freecad": {
       "type": "http",
       "url": "${CADPROMPT_MCP_URL:-http://127.0.0.1:9/mcp}",
+      "timeout": 86400000,
       "headers": {
         "Authorization": "Bearer ${CADPROMPT_MCP_TOKEN:-none}"
       }

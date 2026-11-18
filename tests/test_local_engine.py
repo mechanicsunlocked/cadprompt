@@ -42,9 +42,13 @@ QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
 from cadprompt import backends, local_agent, local_engine, local_tools, projects    # noqa: E402
 from local_fake_server import FakeAnthropic, FakeServer, answer, call, claude, cut, error, slow   # noqa: E402
+import user_yes                                                                               # noqa: E402
 import windows_paths                                                                          # noqa: E402
 
 HOME = os.environ["FREECAD_USER_HOME"]
+# This file tests the engine, with no panel that could ask: the user of this scratch profile
+# turned "Run the AI's code without asking" on. Part 16 turns it off and tests the question.
+user_yes.run_without_asking()
 LOG = os.path.join(HOME, "test_local_engine.log")
 open(LOG, "w", encoding="utf-8").close()
 passed, failed = [], []
@@ -1072,9 +1076,19 @@ def main():
               and "AfterStop" not in json.dumps(chat(project16)[-1:]), (rec16.events, len(srv.requests) - n))
     finally:
         approval.request = real_request
-    check("approval.request says yes for now, for every tool and source",
-          approval.request("run_python", {"code": "x"}, "local") is True
-          and approval.request("make_drawing", {}, "account") is True)
+    # the real function, with no panel that could ask: only the user's switch says yes
+    user_yes.run_without_asking(False)
+    srv.add(call("run_python", {"code": 'doc.addObject("Part::Box", "NobodyAsked")'}, "a5"), answer("Not approved."))
+    n = len(srv.requests)
+    run, rec = run_once(project16, "One more.", cfg)
+    sent = srv.requests[n + 1]["body"]["messages"][-1] if len(srv.requests) > n + 1 else {}
+    check("the real approval.request, 'run without asking' off and no panel to ask: the step does not run",
+          approval.request("run_python", {"code": "x"}, "local") is False
+          and approval.request("make_drawing", {}, "account") is False
+          and sent.get("content") == approval.DECLINED and App.ActiveDocument.getObject("NobodyAsked") is None
+          and "tool:save" not in rec.kinds(), (sent, rec.events))
+    user_yes.run_without_asking()
+    check("... and with the user's switch on it runs", approval.request("run_python", {"code": "x"}, "local") is True)
 
     check("the Anthropic script was used exactly", cl.overrun == 0 and not cl.script, (cl.overrun, len(cl.script)))
     cl.close()

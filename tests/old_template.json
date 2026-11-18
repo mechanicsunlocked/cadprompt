@@ -1,5 +1,5 @@
 {
- "note": "The files of template/ as they were before the bridge was built into the addon (HEAD of 2026-11-17), and under 'older' two files as they were in the first versions. Test data for projects.migrate().",
+ "note": "The files of template/ as they were before the bridge was built into the addon (HEAD of 2026-11-17), and under 'older' other versions that projects can still have: two files of the first versions, and the .mcp.json without a time limit for a tool call. Test data for projects.migrate().",
  "before": {
   ".mcp.json": "{\n  \"mcpServers\": {\n    \"freecad\": {\n      \"command\": \"uvx\",\n      \"args\": [\n        \"--python\", \">=3.12\",\n        \"freecad-mcp==${FREECAD_MCP_VERSION:-0.1.28}\",\n        \"--freecadcmd\", \"${CADPROMPT_FREECADCMD:-freecadcmd}\"\n      ],\n      \"env\": {\n        \"FREECAD_MCP_TOKEN\": \"${FREECAD_MCP_TOKEN:-}\"\n      }\n    }\n  }\n}\n",
   ".claude/settings.json": "{\n  \"permissions\": {\n    \"defaultMode\": \"acceptEdits\",\n    \"blockReadsOutsideWorkingDirectories\": true,\n    \"allow\": [\n      \"mcp__freecad__*\"\n    ],\n    \"deny\": [\n      \"Bash\",\n      \"Edit(/.claude/**)\",\n      \"Edit(/.mcp.json)\",\n      \"Edit(/CLAUDE.md)\"\n    ]\n  },\n  \"enabledMcpjsonServers\": [\n    \"freecad\"\n  ]\n}\n",
@@ -12,6 +12,7 @@
  },
  "older": {
   ".claude/settings.json": "{\n  \"permissions\": {\n    \"defaultMode\": \"acceptEdits\",\n    \"blockReadsOutsideWorkingDirectories\": true,\n    \"allow\": [\n      \"mcp__freecad__*\"\n    ],\n    \"ask\": [\n      \"WebFetch\",\n      \"WebSearch\"\n    ],\n    \"deny\": [\n      \"Bash\",\n      \"Edit(/.claude/**)\",\n      \"Edit(/.mcp.json)\",\n      \"Edit(/CLAUDE.md)\"\n    ]\n  },\n  \"enabledMcpjsonServers\": [\"freecad\"]\n}\n",
-  ".claude/commands/drawing.md": "---\ndescription: DIN workshop drawing of the current part (Hoischen style)\nargument-hint: \"[A4|A3|A2] [extra wishes]\"\n---\nMake a workshop drawing of the current part following the Drawings section\nof CLAUDE.md: DIN preset, the views a machinist needs, functional dimensions,\n`run_arrange` for the spacing, title block filled, PDF exported to\n`drawings/`. Sheet size and wishes: $ARGUMENTS\nAfterwards list anything you were unsure about (a tolerance, a surface,\na missing material) so he can decide.\n"
+  ".claude/commands/drawing.md": "---\ndescription: DIN workshop drawing of the current part (Hoischen style)\nargument-hint: \"[A4|A3|A2] [extra wishes]\"\n---\nMake a workshop drawing of the current part following the Drawings section\nof CLAUDE.md: DIN preset, the views a machinist needs, functional dimensions,\n`run_arrange` for the spacing, title block filled, PDF exported to\n`drawings/`. Sheet size and wishes: $ARGUMENTS\nAfterwards list anything you were unsure about (a tolerance, a surface,\na missing material) so he can decide.\n",
+  ".mcp.json": "{\n  \"mcpServers\": {\n    \"freecad\": {\n      \"type\": \"http\",\n      \"url\": \"${CADPROMPT_MCP_URL:-http://127.0.0.1:9/mcp}\",\n      \"headers\": {\n        \"Authorization\": \"Bearer ${CADPROMPT_MCP_TOKEN:-none}\"\n      }\n    }\n  }\n}\n"
  }
 }

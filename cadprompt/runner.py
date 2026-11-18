@@ -18,13 +18,26 @@ import os
 
 from PySide import QtCore
 
-from . import backends, paths
+from . import backends, consent, paths
 
 
 HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the user did
 MCP_SERVER = "freecad"           # the name of the bridge in the .mcp.json of the addon
 LOCAL_HOSTS = ("127.0.0.1", "localhost")   # the bridge, and a model server on this computer
 WEB_TOOLS = ("WebSearch", "WebFetch")
+NOT_ALLOWED = "Claude Code was not started: you did not allow it yet. Send your message again and say Allow."
+
+
+def allowed():
+    """True when the user said yes to Claude Code for the source that is chosen now.
+
+    Claude Code works with a login found on this computer and sends the
+    conversation to a service. The panel asks before (Panel._consent, which
+    is backends.may_contact); this is the lock on the two doors themselves,
+    ClaudeRun.start and auth_status. It asks nothing.
+    """
+    service = backends.service()
+    return bool(service) and service[0] in consent.CLAUDE_CODE and consent.allowed(*service)
 
 
 def _short_tool(name):
@@ -223,6 +236,9 @@ class ClaudeRun(QtCore.QObject):
         return self.proc is not None and self.proc.state() != QtCore.QProcess.NotRunning
 
     def start(self, claude, project, prompt, session=None, env=None):
+        if not allowed():
+            self.finished.emit({"is_error": True, "result": NOT_ALLOWED, "kind": "start"})
+            return
         args = ["-p", "--output-format", "stream-json", "--verbose"]
         if session:
             args += ["--resume", session]
@@ -317,7 +333,13 @@ class ClaudeRun(QtCore.QObject):
 
 
 def auth_status(claude, callback, parent=None):
-    """Ask `claude auth status` without blocking FreeCAD. callback(dict or None)."""
+    """Ask `claude auth status` without blocking FreeCAD. callback(dict or None).
+
+    Not before the user's yes to Claude Code (allowed()): then nothing is
+    started, the callback is not called and None is returned.
+    """
+    if not allowed():
+        return None
     proc = QtCore.QProcess(parent)
     pe = system_environment()
     _apply_backend(pe)

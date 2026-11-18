@@ -19,7 +19,8 @@ BACKUPS = 10      # copies kept of each model in model/.backup
 # that changed: the SHA-256 of every earlier version (line ends as LF). A project file that
 # is one of these was never changed by the user, so the new version can take its place.
 OLD = {
-    ".mcp.json": ("6063d993d17936e86554387b2560345a050f21a6991c99a9a02c30a15727de37",),
+    ".mcp.json": ("6063d993d17936e86554387b2560345a050f21a6991c99a9a02c30a15727de37",
+                  "5ff716b3a1230aef643bad022fe38bc573f259906283d5feeb04a5d0eb9ad88e"),
     ".claude/settings.json": ("d3560e37dc1c09c85651280b7f99fc0d2495d8099d67d26d07f616ffeea27d8a",
                               "a31d13aa5ba48ed15399043c7d22f35d11ac8474649037519f5098fe805592c3"),
     ".claude/commands/build.md": ("0fce8d988123bb0985d324be50108406971d07e62d7ed6ded8851411de347482",),

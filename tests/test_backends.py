@@ -148,7 +148,11 @@ def main():
     p = paths.params()
 
     # ---- which source ----
-    check("fresh profile: the source is the Claude account", backends.current() == "account")
+    check("fresh profile: no source is chosen, there is no default service",
+          backends.current() == "" and backends.service() is None and not backends.uses_claude_code()
+          and backends.engine_config() is None and backends.label() == "No AI chosen"
+          and backends.claude_env() == ({}, []) and backends.custom_env() == {},
+          repr((backends.current(), backends.service(), backends.label())))
     for b in ("account", "apikey", "local", "custom"):
         p.SetString("Backend", b)
         check(f"current() gives {b}", backends.current() == b)
@@ -156,7 +160,7 @@ def main():
         check(f"uses_claude_code({b})", backends.uses_claude_code() == (b in ("account", "custom"))
               and backends.uses_claude_code(b) == (b in ("account", "custom")))
     p.SetString("Backend", "nonsense")
-    check("an unknown source counts as the account", backends.current() == "account")
+    check("an unknown source counts as none", backends.current() == "" and backends.service() is None)
     check("labels", [backends.label(b) for b in ("account", "apikey", "local", "custom")] ==
           ["Claude account", "Anthropic API key", "Local model", "Other endpoint"])
     p.SetString("Backend", "local")
@@ -300,10 +304,120 @@ def main():
     p.SetString("BaseUrl", "")
     check("engine_config is None for the sources that run Claude Code",
           backends.engine_config("account") is None and backends.engine_config("custom") is None)
-    check("may_contact(kind, url) is the gate, and it is open for now",
-          backends.may_contact("anthropic", backends.ANTHROPIC_URL) is True
-          and backends.may_contact("openai", "http://127.0.0.1:1234/v1") is True)
     p.SetString("LocalUrl", "")
+
+    # ---- the gate: one yes of the user for each service outside this computer ----
+    from cadprompt import approval, consent
+    lan, lan2 = "http://192.168.1.20:1234/v1", "http://192.168.1.21:1234/v1"
+    asked, answer = [], [False]
+    real_asker, consent.asker = consent.asker, lambda kind, url: asked.append((kind, url)) or answer[0]
+    check("a new profile has no yes for any service", consent.records() == [] and p.GetString("Consent", "") == "")
+    here = ("http://127.0.0.1:1234/v1", "http://localhost:11434/v1", "http://[::1]:8080/v1", "http://127.8.9.1/v1",
+            "http://LOCALHOST./v1", "127.0.0.1:1234/v1", "http://[::ffff:127.0.0.1]/v1")
+    check("a server on this computer needs no yes and nobody is asked: localhost, 127.x.x.x, ::1",
+          all(consent.on_this_computer(u) and backends.may_contact("openai", u) is True for u in here)
+          and not asked and consent.records() == [], str([u for u in here if not consent.on_this_computer(u)]))
+    there = (lan, "https://api.anthropic.com", "http://my-pc.local:1234/v1", "http://0.0.0.0:1234/v1",
+             "http://localhost.evil.example/v1", "http://127.0.0.1.evil.example/v1", "http://2130706433/v1",
+             "http://[fe80::1]/v1", "http://10.0.0.5/v1", "")
+    check("every other address is another computer, also a name that only looks like this one",
+          not [u for u in there if consent.on_this_computer(u)], str([u for u in there if consent.on_this_computer(u)]))
+    check("another computer, the user says Not now: False, and the no is not kept",
+          backends.may_contact("openai", lan) is False and backends.may_contact("openai", lan) is False
+          and asked == [("openai", lan)] * 2 and consent.records() == [], str(asked))
+    answer[0] = True
+    del asked[:]
+    check("the user says Allow: True, asked one time",
+          backends.may_contact("openai", lan) is True and asked == [("openai", lan)], str(asked))
+    rows = consent.records()
+    check("the yes is kept as (kind, host, DATA_KINDS), in FreeCAD's parameters",
+          len(rows) == 1 and (rows[0]["kind"], rows[0]["host"], rows[0]["data"]) == ("openai", "192.168.1.20", consent.DATA_KINDS)
+          and "192.168.1.20" in p.GetString("Consent", ""), str(rows))
+    check("the same service again, also on another port and path: no question",
+          backends.may_contact("openai", lan) is True and backends.may_contact("openai", "https://192.168.1.20/other") is True
+          and len(asked) == 1 and len(consent.records()) == 1, str(asked))
+    answer[0] = False
+    check("the host changes: asked again, and the no sends nothing",
+          backends.may_contact("openai", lan2) is False and asked[-1] == ("openai", lan2) and len(asked) == 2, str(asked))
+    check("another kind of service at the same host is another service: asked again",
+          backends.may_contact("anthropic", lan) is False and asked[-1] == ("anthropic", lan) and len(asked) == 3,
+          str(asked))
+    real_kinds, consent.DATA_KINDS = consent.DATA_KINDS, consent.DATA_KINDS + 1
+    check("DATA_KINDS changes (CADprompt sends a new kind of data): the old yes does not count, asked again",
+          not consent.allowed("openai", lan) and backends.may_contact("openai", lan) is False
+          and asked[-1] == ("openai", lan) and len(asked) == 4, str(asked))
+    consent.DATA_KINDS = real_kinds
+    check("... and it counts again for the data it was given for",
+          consent.allowed("openai", lan) and backends.may_contact("openai", lan) is True and len(asked) == 4)
+    consent.forget("openai", "192.168.1.20")
+    check("Forget: the record is gone and the service is asked for again",
+          consent.records() == [] and backends.may_contact("openai", lan) is False and len(asked) == 5, str(asked))
+    check("an address without a host cannot be allowed: False, nobody is asked",
+          backends.may_contact("openai", "") is False and backends.may_contact("openai", "http://") is False
+          and len(asked) == 5)
+    answer[0] = True
+    check("Claude Code is asked for also when its server is this computer: it is a program of its own",
+          not consent.needs_none("custom", "http://localhost:11434") and not consent.needs_none("account", lan)
+          and backends.may_contact("custom", "http://localhost:11434") is True
+          and asked[-1] == ("custom", "http://localhost:11434") and consent.allowed("custom", "http://localhost:11434"))
+    consent.asker = None
+    check("with nobody to ask (no window): no yes, nothing is sent; a yes that is kept still counts",
+          backends.may_contact("anthropic", backends.ANTHROPIC_URL) is False
+          and backends.may_contact("custom", "http://localhost:11434") is True
+          and backends.may_contact("openai", here[0]) is True)
+    consent.asker = real_asker
+    consent.forget("custom", "localhost")
+    p.SetString("BaseUrl", "http://localhost:11434")
+    p.SetString("LocalUrl", lan)
+    check("service(source) is what the gate is asked for: the API, the model server, Claude Code and its endpoint",
+          [backends.service(b) for b in ("apikey", "local", "account", "custom")] ==
+          [("anthropic", "https://api.anthropic.com"), ("openai", lan), ("account", "https://api.anthropic.com"),
+           ("custom", "http://localhost:11434")], str([backends.service(b) for b in backends.BACKENDS]))
+    p.SetString("BaseUrl", "")
+    p.SetString("LocalUrl", "")
+    check("... Claude Code with no endpoint set works with the account, so that is what is asked for",
+          backends.service("custom") == ("account", "https://api.anthropic.com"))
+    sent = ("your messages", "results of the AI's code", "object names, sizes", "images", "reference files")
+    texts = {kind: "\n".join(consent.question(kind, url)) for kind, url in (
+        ("anthropic", "https://api.anthropic.com"), ("openai", lan), ("account", "https://api.anthropic.com"),
+        ("custom", "http://localhost:11434"))}
+    check("the question names the service and its address, and what is sent",
+          "Anthropic (api.anthropic.com)" in texts["anthropic"] and "the model server at 192.168.1.20" in texts["openai"]
+          and "the server at localhost (this computer)" in texts["custom"]
+          and not [(k, w) for k, t in texts.items() for w in sent if w not in t],
+          str([(k, w) for k, t in texts.items() for w in sent if w not in t]))
+    check("... for the Claude account: that the Claude Code program is started with the login and sends the "
+          "data to Anthropic, the pictures of the 3D view too",
+          "The Claude Code program on this computer is started with your login and sends this data to Anthropic"
+          in texts["account"] and "pictures of the 3D view" in texts["account"]
+          and "whether you are signed in" in texts["account"], texts["account"])
+    check("... and one short line about the proxy of the computer, in every question",
+          all("A proxy of this computer, when its settings name one, sees the name of the service." in t
+              for t in texts.values()))
+    check("the API key source says that the key is sent, the local one says so for its own key",
+          "your API key" in texts["anthropic"] and "the key of this server, when you saved one" in texts["openai"])
+
+    # ---- the AI's code: no yes without the user ----
+    check("a new profile does not run the AI's code without asking",
+          approval.auto() is False and p.GetBool("AutoApprove", False) is False)
+    check("with no panel to ask, approval.request() says no, for every tool and source",
+          approval.request("run_python", {"code": "x = 1"}, "local") is False
+          and approval.request("make_drawing", {}, "account") is False)
+    approval.set_auto(True)
+    check("the user's switch 'run without asking' is the only yes without a question",
+          approval.auto() is True and p.GetBool("AutoApprove", False) is True
+          and approval.request("run_python", {"code": "x = 1"}, "apikey") is True)
+    approval.set_auto(False)
+    code = "a = 1\n\tb = 'ä'  \n\n"
+    check("what the user is shown for run_python is the text that runs, character for character",
+          approval.shown("run_python", {"code": code}) == code and approval.shown("run_python", {}) == ""
+          and approval.shown("run_python", {"code": 7}) == "7")
+    check("what the user is shown for make_drawing is one line that names the sheet",
+          approval.shown("make_drawing", {"sheet": "A4"}).startswith("Make drawing: sheet A4")
+          and "\n" not in approval.shown("make_drawing", {}), approval.shown("make_drawing", {"sheet": "A4"}))
+    check("the warning for 'run without asking' says it in plain words",
+          all(w in approval.WARNING for w in ("runs as you", "change or delete files", "models that you can restore",
+                                              "one Undo step", "backup copy")), approval.WARNING)
 
     # ---- claude_env ----
     p.SetString("Backend", "account")
@@ -313,6 +427,11 @@ def main():
     check("claude_env apikey: nothing, the key never goes to Claude Code", backends.claude_env() == ({}, []),
           str(backends.claude_env()))
     p.SetString("Backend", "custom")
+    p.SetString("BaseUrl", "  ")
+    check("claude_env custom with no address: Claude Code works with its login, so an endpoint and a token of "
+          "the user's shell are taken out, as for the account (the user was asked for Anthropic)",
+          backends.service() == ("account", backends.ANTHROPIC_URL) and backends.claude_env() ==
+          ({}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]), str(backends.claude_env()))
     p.SetString("BaseUrl", "http://localhost:11434")
     p.SetString("AuthToken", "")
     p.SetString("Model", "")

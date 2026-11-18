@@ -132,6 +132,10 @@ def main():
     p.SetString("ProjectsDir", os.path.join(home, "projects"))
     p.SetString("Backend", "local")
     project = projects.create("Integration plate")
+    # This file is not about the question "Run or Skip?" (test_approval_gui.py): the user of
+    # this scratch profile turned "Run the AI's code without asking" on.
+    import user_yes
+    user_yes.run_without_asking()
     check("a project is made from the repository's template",
           os.path.realpath(paths.template_dir()) == os.path.realpath(os.path.join(REPO, "template"))
           and all(os.path.exists(os.path.join(project, n)) for n in

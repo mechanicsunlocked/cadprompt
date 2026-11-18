@@ -31,8 +31,10 @@ Updates come the same way: the Addon Manager shows them.
 ## First start
 
 Pick the **CADprompt** workbench in FreeCAD's workbench list. The chat panel opens
-on the right and stays open when you go to another workbench. Press **Settings**
-in the panel and choose where the AI runs:
+on the right and stays open when you go to another workbench. A new installation
+has no AI: the panel shows three buttons, **Local model**, **API key** and
+**Claude account**. Nothing is contacted, and no login or key of your computer is
+used, before you choose one. You can change the choice later in **Settings**:
 
 | Source | You need | What leaves the computer |
 |---|---|---|
@@ -57,6 +59,13 @@ Claude Code for each message; you do not need the terminal again.
 The local model and the API key share one conversation in a project. You can
 change between them in the middle of the work.
 
+**CADprompt asks before data leaves your computer.** The first time you use a
+service that is not on this computer (a model server on another computer, the
+Anthropic API, Claude Code), a window in FreeCAD names the service and says
+what is sent. **Allow** is kept for that service; **Not now** sends nothing.
+A model server on this computer needs no question. **Settings → Privacy**
+lists the services that you allowed, with a **Forget** button for each.
+
 ## Using it
 
 - **Project**: a folder with `model/`, `refs/` and `drawings/`. Pick one or make a
@@ -74,6 +83,17 @@ change between them in the middle of the work.
   `drawings/`. The sheet is made by fixed rules, not by the AI. Tolerances,
   surface marks and detail dimensions you add yourself.
 - **Check**: the AI reviews the model before it goes to the shop.
+- **Run or Skip**: when the AI wants to run code, the panel shows the complete
+  code and waits. **Run** runs exactly that text (Enter). **Skip** runs nothing
+  and tells the AI that you did not approve the step (Esc). **Run all for this
+  request** runs the next steps of this one request without a question. A
+  drawing asks the same way, with one line that says what will be made. Tools
+  that only look (the list of objects, a file of the project) do not ask. The
+  chat keeps every piece of code that ran, folded: press "show" to read it.
+- **Run the AI's code without asking** (Settings): off in a new installation.
+  When you turn it on, a warning tells you what that means. While it is on,
+  the panel shows the marker "runs without asking"; one click on the marker
+  turns it off again.
 - **Undo**: each step of the AI is one Undo step in FreeCAD. Before the first
   change of a request, the model file is copied to `model/.backup/`. A request
   that ends with an error is not saved over your file.
@@ -83,10 +103,11 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 
 ## Safety and privacy, the honest version
 
-- **The AI writes Python and FreeCAD runs it, as you.** A guard refuses the plain
-  ways to start programs, use the network or delete files, and one run is stopped
-  after 60 seconds. That guard is a fence, not a wall. Work on models that you can
-  restore.
+- **The AI writes Python and FreeCAD runs it, as you.** You see the code first
+  and press Run, unless you turned "Run the AI's code without asking" on. A
+  guard refuses the plain ways to start programs, use the network or delete
+  files, and one run is stopped after 60 seconds. That guard is a fence, not a
+  wall. Read the code, and work on models that you can restore.
 - **A small local model makes mistakes.** It can build a wrong part and say that
   it is right. The panel finds broken objects and takes such a step back, but it
   cannot see a hole in the wrong place. Check the part.
@@ -96,9 +117,17 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   your own user folder, which other users of the computer cannot open. A key is
   sent only to the server
   it was saved for, and only over https unless the server is this computer.
-- **Nothing is sent to an AI service until you send a message or press Find models.**
-  With the Claude account source, the panel asks the Claude Code program on this
-  computer whether you are signed in when it opens. No telemetry.
+- **Nothing is sent to an AI service until you send a message or press Find
+  models, and never before you said Allow to that service.** With the Claude
+  account source, the panel asks the Claude Code program on this computer
+  whether you are signed in (`claude auth status`), but only after you allowed
+  Claude Code. No telemetry. Your yes is kept in FreeCAD's settings for the
+  service (its kind and its host name) and for the kinds of data that this
+  version sends. CADprompt asks again when the host changes, and when a later
+  version sends another kind of data.
+- **A key that is in the environment of your computer** (`ANTHROPIC_API_KEY`
+  and the like) is never used by CADprompt, and it is taken out of the
+  environment of Claude Code when you chose the Claude account.
 - With the API key source, each step of a request is one HTTPS request to
   `api.anthropic.com`: the conversation of the project (up to about 300,000
   characters of it), the images of that conversation and the key. Find models is
@@ -118,14 +147,18 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   token that is made new for each start and is kept in memory only; the panel
   gives it to the Claude Code program that it starts. A web page cannot use the
   server: a request from a browser is refused. The server starts when you send
-  a message to Claude, not when FreeCAD starts. It stops when you close the
-  panel, choose a local model or an API key, or quit FreeCAD.
-- Claude Code gets four tools from that server and may use them without a
-  question of its own: `run_python`, `get_document_state`, `make_drawing` and
-  `get_view`. CADprompt starts it with the shell tool off and in its asking
-  mode. In the panel nobody can answer a question of Claude Code, so its own
-  file tools (Write, Edit) are refused there; it can read the files of the
-  project.
+  a message to Claude and have allowed Claude Code, not when FreeCAD starts.
+  It stops when you close the panel, choose a local model or an API key, take
+  your yes for Claude Code back, or quit FreeCAD.
+- Claude Code gets four tools from that server: `run_python`,
+  `get_document_state`, `make_drawing` and `get_view`. Claude Code started by
+  the panel cannot show a question of its own, so the question is asked in
+  FreeCAD: `run_python` and `make_drawing` wait for your Run or Skip in the
+  panel, exactly as with a local model. The two tools that only look do not
+  ask. CADprompt starts Claude Code with the shell tool off and in its asking
+  mode: its own file tools (Write, Edit) are refused in the panel; it can read
+  the files of the project. Claude Code waits for your answer for up to one
+  day (`"timeout"` in the `.mcp.json` of the addon).
 - **A project folder from another person** cannot give Claude Code other
   tools. CADprompt tells Claude Code to use the server list of the addon and
   no other, so a `.mcp.json` in the project folder is not read by the panel.
@@ -139,14 +172,32 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   `127.0.0.1` and `localhost` to `NO_PROXY` for Claude Code, so the requests to
   FreeCAD stay on this computer.
 
+### Every connection that CADprompt can make
+
+| Connection | When | What is sent | What must be true first |
+|---|---|---|---|
+| To the model server of the source "Local model" (`POST <address>/chat/completions`) | once for each step of the AI after you send a message | the conversation of the project: your messages, the results of the AI's code, descriptions of the document (object names, sizes), the images that you attached, the text of project files that the AI read; the key of that server when you saved one | a server on this computer: nothing. Another computer: your Allow for that host |
+| To the same server (`GET <address>/models`) | when you press Find models | the key of that server when you saved one | the same |
+| To `api.anthropic.com` (`POST /v1/messages`), source "Anthropic API key" | once for each step of the AI after you send a message | the same conversation data, and your API key | your Allow for Anthropic |
+| To `api.anthropic.com` (`GET /v1/models`) | when you press Find models | your API key | your Allow for Anthropic |
+| To the proxy of your computer, when its settings name one | before each https connection above | the name of the service (`CONNECT api.anthropic.com:443`), and the login for the proxy when the setting has one | the same Allow as for the connection |
+| The program `claude auth status` (it is started; CADprompt itself connects to nothing) | when the panel opens or the settings change, with a Claude Code source | nothing from CADprompt | your Allow for Claude Code |
+| The program `claude -p` (Claude Code; it sends the data to Anthropic or to your endpoint with its own connections) | once for each message | your message; through the tools: the results of the AI's code, descriptions of the document, pictures of the 3D view; and the project files that Claude Code reads | your Allow for Claude Code with that service |
+| The server inside FreeCAD for Claude Code (`127.0.0.1`, incoming only) | listens from your first message to Claude until the panel closes | nothing leaves the computer | your Allow for Claude Code; each request needs the token |
+
+CADprompt makes no other connection: no update check, no telemetry, no
+download. FreeCAD's Addon Manager, not CADprompt, gets the updates.
+
 ## What is not done yet
 
-- The AI's code runs **without asking first**. A "show the code, then Run or
-  Skip" step, with a switch for "run without asking", is planned (the place for
-  it is `cadprompt/approval.py`; all sources go through it). The official
-  FreeCAD addon list requires it, so CADprompt is not in that list yet.
-- A question "may CADprompt contact this service?" before the first request to
-  each AI service is planned (the place for it is `backends.may_contact`).
+- Claude Code is a program of its own. CADprompt asks you before it starts it,
+  but it cannot see or limit the connections that Claude Code makes.
+- Hooks in the `.claude/settings.json` of a project folder, and the text of its
+  `CLAUDE.md`, are read by Claude Code. Look at them in a project that is not
+  yours.
+- Keys are files that only you can read, not entries in the key store of the
+  system. The token of "Claude Code with another endpoint" is in FreeCAD's
+  settings file.
 - No person has tested Windows and macOS.
 - A fine-tuned small model for FreeCAD is planned.
 

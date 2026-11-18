@@ -125,9 +125,11 @@ def port_open(port):
 
 
 def main():
-    from cadprompt import approval, bridge, local_prompt, local_tools, main_thread, paths, projects
+    from cadprompt import approval, bridge, consent, local_prompt, local_tools, main_thread, paths, projects
+    import user_yes
 
     paths.params().SetString("ProjectsDir", os.path.join(HOME, "projects"))
+    paths.params().SetString("BaseUrl", "http://localhost:11434")     # the endpoint of the source "custom"
     project = projects.create("Bridge test")
     gui_thread = QtWidgets.QApplication.instance().thread()
 
@@ -172,6 +174,22 @@ def main():
     # ---- 1: the server starts with ensure(), not before -------------------------
     say("--- 1 life of the server")
     check("nothing listens after the addon's modules are loaded", not bridge.running())
+    refused = []
+    for source in ("account", "custom", "local", ""):
+        try:
+            bridge.ensure(project, source)
+            refused.append("it started for %r" % source)
+        except PermissionError:
+            pass
+    check("before the user's yes to Claude Code, ensure() refuses and nothing listens",
+          not refused and not bridge.running() and bridge._server is None, str(refused))
+    # This file tests the bridge, with no panel that could ask: the user of this scratch profile
+    # said Allow to Claude Code and turned "Run the AI's code without asking" on. Part 3 tests
+    # that the question is asked.
+    user_yes.allow_claude_code("http://localhost:11434")
+    user_yes.run_without_asking()
+    check("(setup) the user's yes is in the profile", consent.allowed("account", "https://api.anthropic.com")
+          and consent.allowed("custom", "http://localhost:11434") and approval.auto())
     url, token = bridge.ensure(project, "account")
     where.update(url=url, token=token)
     port = int(re.search(r":(\d+)/", url).group(1))
@@ -261,7 +279,16 @@ def main():
     c = tool("run_python", {"code": "doc.addObject('Part::Box', 'Wanted')"})
     check("the answer True: the step runs; the source is the one of ensure()",
           asked[-1][2] == "custom" and doc.getObject("Wanted") is not None and "+ new Wanted" in c.text(), c.text())
-    check("the real approval.request says yes for now", real_request("run_python", {"code": "x"}, "account") is True)
+    # the real function, with no panel that could ask: only the user's switch says yes
+    user_yes.run_without_asking(False)
+    approval.request = real_request
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'NobodyAsked')"})
+    check("the real approval.request, 'run without asking' off and no panel to ask: the step does not run",
+          c.text() == approval.DECLINED and doc.getObject("NobodyAsked") is None, c.text())
+    user_yes.run_without_asking()
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'SwitchOn')"})
+    check("... and with the user's switch on it runs", doc.getObject("SwitchOn") is not None, c.text())
+    approval.request = recording_request
     bridge.ensure(project, "account")
 
     # ---- 4: FreeCAD stays alive while a call waits for the user ------------------

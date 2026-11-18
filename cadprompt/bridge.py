@@ -174,10 +174,14 @@ def ensure(project="", source="account", note=None):
     Call it in the main thread, right before Claude Code starts. `source` is
     the AI source for approval.request; note(name, detail) is told what the
     bridge did by itself (the backup copy). Raises OSError when the server
-    cannot listen.
+    cannot listen, and PermissionError before the user's yes to Claude Code
+    for this source (consent.py): nothing listens before that.
     """
     global _host, _server
-    from . import local_prompt, mcp_server
+    from . import backends, consent, local_prompt, mcp_server
+    service = backends.service(source)
+    if not service or service[0] not in consent.CLAUDE_CODE or not consent.allowed(*service):
+        raise PermissionError("you did not allow Claude Code for this source yet")
     if _host is None:
         _host = _Host()
         app = QtCore.QCoreApplication.instance()

@@ -91,6 +91,10 @@ def main():
     p.SetString("ProjectsDir", os.path.join(home, "projects"))
     p.SetString("Backend", "local")
     project = projects.create("Engine part")
+    # This file is not about the question "Run or Skip?" (test_approval_gui.py): the user of
+    # this scratch profile turned "Run the AI's code without asking" on.
+    import user_yes
+    user_yes.run_without_asking()
 
     # the Claude Code side must stay untouched: make every way into it loud
     touched = []

@@ -1,4 +1,5 @@
-"""Settings: projects folder, which AI does the work, and what that AI needs."""
+"""Settings: projects folder, which AI does the work, what that AI needs, whether its
+code runs without a question, and which services may get data (Privacy)."""
 
 import threading
 import time
@@ -6,7 +7,7 @@ import urllib.error
 
 from PySide import QtCore, QtWidgets
 
-from . import backends, local_agent, paths
+from . import approval, ask_ui, backends, consent, local_agent, paths
 
 # Linux and macOS: the key file has mode 0600. Windows has no such modes; there the
 # folder of the user's own profile keeps other users out (backends.py).
@@ -21,7 +22,14 @@ HINTS = {
     "local": "A model on this computer or another server that speaks the OpenAI API. "
              "Nothing else to install: start the server, press Find models, pick one.",
     "custom": "Claude Code, sent to a server that speaks the Anthropic Messages API.",
+    "": "Choose who does the work. Nothing is contacted before you choose.",
 }
+AUTO = "Run the AI's code without asking"
+AUTO_HINT = "Off: you see each piece of code before it runs, and press Run or Skip."
+TECHDRAW = "Also show the drawing tools in the TechDraw workbench"
+NOT_ALLOWED = "Nothing was sent: you did not allow this service. Press Find models again to be asked again."
+PRIVACY_NONE = "No service outside this computer is allowed yet. CADprompt asks before it sends anything."
+PRIVACY_HERE = "A model server on this computer needs no permission: nothing leaves the computer."
 
 
 def _why(exc, kind="openai"):
@@ -217,6 +225,34 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow("claude program", self.claude)
         lay.addWidget(self.claude_box)
 
+        # ---- the AI's code: asked for, unless the user turns that off ----
+        code = QtWidgets.QGroupBox("The AI's code")
+        box = QtWidgets.QVBoxLayout(code)
+        self.auto = QtWidgets.QCheckBox(AUTO)
+        self.auto.setChecked(approval.auto())
+        self.auto.toggled.connect(self._auto_toggled)
+        box.addWidget(self.auto)
+        hint = QtWidgets.QLabel("<small>%s</small>" % AUTO_HINT)
+        hint.setWordWrap(True)
+        hint.setEnabled(False)
+        box.addWidget(hint)
+        lay.addWidget(code)
+
+        # ---- which services may get data ----
+        privacy = QtWidgets.QGroupBox("Privacy")
+        self.privacy = QtWidgets.QVBoxLayout(privacy)
+        self.privacy_rows = []           # (kind, host, the row widget, its Forget button)
+        self._show_privacy()
+        lay.addWidget(privacy)
+
+        from . import workbench          # here: Settings can open before the workbench was ever active
+        self._in_techdraw = workbench.show_in_techdraw()
+        self.techdraw = QtWidgets.QCheckBox(TECHDRAW)
+        self.techdraw.setToolTip("The four drawing buttons (line widths 0.5 and 0.7, arrange dimensions, "
+                                 "settings) also go into TechDraw's own toolbar.")
+        self.techdraw.setChecked(self._in_techdraw)
+        lay.addWidget(self.techdraw)
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -228,25 +264,78 @@ class SettingsDialog(QtWidgets.QDialog):
         self._poll.setInterval(100)
         self._poll.timeout.connect(self._find_poll)
 
-        self.radios[backends.current()].setChecked(True)
+        if backends.current():           # a new installation has no source: no button is on
+            self.radios[backends.current()].setChecked(True)
         for b in self.radios.values():
             b.toggled.connect(self._show_source)
         self._show_source()
 
     def backend(self):
+        """The chosen source, or "" when the user chose none yet."""
         for name, b in self.radios.items():
             if b.isChecked():
                 return name
-        return "account"
+        return ""
+
+    def choose(self, name):
+        """Open with this source picked (the chooser of the panel). Saved with OK only."""
+        if name in self.radios:
+            self.radios[name].setChecked(True)
+
+    # ---- the AI's code ---------------------------------------------------------
+    def _auto_toggled(self, on):
+        """Turning it on needs a yes to the warning. Saved with OK only."""
+        if on and not ask_ui.confirm(self, approval.WARNING_TITLE, approval.WARNING,
+                                     approval.WARNING_YES, approval.WARNING_NO):
+            self.auto.blockSignals(True)
+            self.auto.setChecked(False)
+            self.auto.blockSignals(False)
+
+    # ---- Privacy ---------------------------------------------------------------
+    def _show_privacy(self):
+        while self.privacy.count():
+            item = self.privacy.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.privacy_rows = []
+        rows = consent.records()
+        for r in rows:
+            row = QtWidgets.QWidget()
+            line = QtWidgets.QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            name = consent.service_name(r["kind"], r["host"])
+            text = QtWidgets.QLabel("Allowed: %s%s" % (name, " (since %s)" % r["when"] if r.get("when") else ""))
+            text.setWordWrap(True)
+            forget = QtWidgets.QPushButton("Forget")
+            forget.setAutoDefault(False)
+            forget.setToolTip("Take the permission back now. CADprompt asks again before it sends "
+                              "anything to this service.")
+            forget.clicked.connect(lambda _c=False, kind=r["kind"], host=r["host"]: self._forget(kind, host))
+            line.addWidget(text, 1)
+            line.addWidget(forget)
+            self.privacy.addWidget(row)
+            self.privacy_rows.append((r["kind"], r["host"], row, forget))
+        if not rows:
+            none = QtWidgets.QLabel(PRIVACY_NONE)
+            none.setWordWrap(True)
+            self.privacy.addWidget(none)
+        here = QtWidgets.QLabel("<small>%s</small>" % PRIVACY_HERE)
+        here.setWordWrap(True)
+        here.setEnabled(False)
+        self.privacy.addWidget(here)
+
+    def _forget(self, kind, host):
+        consent.forget(kind, host)       # at once, also when the dialog is closed with Cancel
+        self._show_privacy()
 
     def _show_source(self, *_):
         """Show only what the chosen source needs."""
         b = self.backend()
-        self.hint.setText(HINTS[b])
+        self.hint.setText(HINTS.get(b, HINTS[""]))
         self.apikey_box.setVisible(b == "apikey")
         self.local_box.setVisible(b == "local")
         self.custom_box.setVisible(b == "custom")
-        self.claude_box.setVisible(backends.uses_claude_code(b))
+        self.claude_box.setVisible(b in backends.CLAUDE_CODE)
         # another endpoint has its own model field: the Claude model names mean nothing there
         for w in (self.model_label, self.model_override):
             w.setVisible(b == "account")
@@ -289,8 +378,12 @@ class SettingsDialog(QtWidgets.QDialog):
             key = self.local_key.typed()
             if not key and not self.local_key.remove and self._key_fits():
                 key = backends.local_key()
-        if not backends.may_contact(kind, url):
-            msg.setText("Nothing was sent: CADprompt is not allowed to contact this service.")
+        known = consent.records()
+        allowed = backends.may_contact(kind, url)
+        if consent.records() != known:
+            self._show_privacy()         # the user just said Allow: the list shows it
+        if not allowed:
+            msg.setText(NOT_ALLOWED)
             return
         answer = {}
 
@@ -357,4 +450,8 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("Model", self.model.text().strip())
         p.SetString("AuthToken", self.token.text().strip())
         p.SetString("claudePath", self.claude.text().strip())
+        approval.set_auto(self.auto.isChecked())
+        if self.techdraw.isChecked() != self._in_techdraw:
+            from . import workbench
+            workbench.set_show_in_techdraw(self.techdraw.isChecked())
         self.accept()

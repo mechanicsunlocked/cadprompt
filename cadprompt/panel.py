@@ -7,6 +7,11 @@ or an Anthropic API key. The panel looks and works the same for all of them.
 Claude Code reaches FreeCAD through the bridge (bridge.py), a server inside
 this process. The panel starts it right before it starts Claude Code, and
 stops it when it is closed or another kind of source is chosen.
+
+Two questions to the user live here. Before data leaves the computer:
+_consent(), which asks backends.may_contact(). Before a step of the AI runs:
+ask_approval(), which approval.request() calls for both engines. A new
+installation has no source: the panel shows three choices and contacts nothing.
 """
 
 import os
@@ -15,9 +20,15 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtWidgets
 
-from . import backends, bridge, paths, projects, runner
+from . import approval, ask_ui, backends, bridge, consent, paths, projects, runner
 
 NEW = "+ New project…"
+NO_SOURCE = "Choose the AI that does the work first: press one of the three buttons above."
+ASKS_FIRST = ("CADprompt did not start Claude Code yet, also not to see whether you are signed in. "
+              "It asks you first, with your first message.")
+WAITING = "Waiting for you: Run or Skip."
+AUTO_MARK = "runs without asking"
+AUTO_OFF = "From now on CADprompt asks before it runs the AI's code."
 IMAGES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")   # references that can go with a message
 
 INSTALL_CLAUDE = {
@@ -87,6 +98,12 @@ class Panel(QtWidgets.QWidget):
         self._closed = False                  # the dock is hidden: the bridge is not kept open
         self._project_notes = []              # what projects.migrate() says about this project
         self._migrated = False                # projects.migrate() ran for this project
+        self._approval = None                 # "" while a step waits for Run or Skip, then the answer
+        self._run_all = False                 # "Run all for this request": until this request ends
+        self._sending = False                 # send() is asking the user: no second send meanwhile
+        self._said_local = False              # "runs on this computer" was said in this panel
+        self._open = []                       # the code entries that are shown in full
+        self._alive = alive = {"dead": False}
         self.entries = []
         self.project = None
         self.claude = None
@@ -97,7 +114,11 @@ class Panel(QtWidgets.QWidget):
         self._build_ui()
         self._show_source()
         self._fill_projects()
+        self._show_auto()
+        approval.register(self)
         self.destroyed.connect(lambda *_: bridge.stop())
+        # a question that still waits must not touch a panel that Qt deleted
+        self.destroyed.connect(lambda *_, me=self: (alive.__setitem__("dead", True), approval.unregister(me)))
         QtCore.QTimer.singleShot(0, self.check_setup)
 
     # ---- the two engines ----------------------------------------------------
@@ -122,6 +143,7 @@ class Panel(QtWidgets.QWidget):
         return self.run.running() or (self.local_run is not None and self.local_run.running())
 
     def _stop(self):
+        self._end_question()
         if self.run.running():
             bridge.idle()         # a tool call of Claude Code that still waits must not run after Stop
             self.run.stop()
@@ -130,8 +152,9 @@ class Panel(QtWidgets.QWidget):
 
     # ---- the bridge: open only while Claude Code can need it ---------------------
     def _bridge_idle(self):
-        """Close the bridge when the panel is closed or the source is not Claude Code."""
-        if not self.run.running() and (self._closed or not backends.uses_claude_code()):
+        """Close the bridge when the panel is closed, the source is not Claude Code, or the
+        user took the yes for Claude Code back (Settings > Privacy)."""
+        if not self.run.running() and (self._closed or not backends.uses_claude_code() or not runner.allowed()):
             bridge.stop()
 
     def _bridge_note(self, name, detail):
@@ -150,6 +173,8 @@ class Panel(QtWidgets.QWidget):
     @staticmethod
     def _name(backend, start=False):
         """What the AI of a source is called in messages: every source but the local one is Claude."""
+        if not backend:
+            return "The AI" if start else "the AI"
         if backend != "local":
             return "Claude"
         return "The local model" if start else "the local model"
@@ -169,7 +194,8 @@ class Panel(QtWidgets.QWidget):
         model = {"local": p.GetString("LocalModel", "").strip() or "no model yet",
                  "apikey": backends.api_model(),
                  "custom": p.GetString("Model", "").strip()}.get(b, p.GetString("ModelOverride", "").strip())
-        self.source.show_text(backends.label(b) + (" · " + model if model else ""))
+        self.source.show_text(backends.label(b) + (" · " + model if model and b else ""))
+        self.chooser.setVisible(not b)       # a new installation: the user chooses first
         self.build_btn.setToolTip(f"{self._ai(start=True)} builds the whole part")
         self.refs_btn.setToolTip(f"Copy photos, PDFs or drawings into refs/ for {self._ai()}")
 
@@ -208,9 +234,20 @@ class Panel(QtWidgets.QWidget):
         row.addWidget(newchat)
         lay.addLayout(row)
 
+        self.chooser = ask_ui.Chooser()
+        self.chooser.chosen.connect(self._choose)
+        self.chooser.hide()
+        lay.addWidget(self.chooser)
+
         self.view = QtWidgets.QTextBrowser()
-        self.view.setOpenExternalLinks(True)
+        self.view.setOpenLinks(False)        # "show" and "hide" of a piece of code are links of ours
+        self.view.anchorClicked.connect(self._on_link)
         lay.addWidget(self.view, 1)
+
+        # the step of the AI that waits for Run or Skip: under the chat, the model stays in view
+        self.card = ask_ui.ApprovalCard()
+        self.card.answered.connect(self._on_card)
+        lay.addWidget(self.card)
 
         row = QtWidgets.QHBoxLayout()
         self.refs_btn = QtWidgets.QPushButton("Add reference…")
@@ -240,6 +277,11 @@ class Panel(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel("")
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
+        self.auto_btn = QtWidgets.QToolButton(text=AUTO_MARK)
+        self.auto_btn.setToolTip("The AI's code runs without a question (Settings). "
+                                 "Click to turn that off: CADprompt then asks before each step.")
+        self.auto_btn.clicked.connect(self._auto_off)
+        row.addWidget(self.auto_btn)
         self.send_btn = QtWidgets.QPushButton("Send")
         self.send_btn.clicked.connect(self._send_or_stop)
         row.addWidget(self.send_btn)
@@ -249,22 +291,67 @@ class Panel(QtWidgets.QWidget):
         self.entries.append((kind, text))
         self._render()
 
-    def _render(self):
+    @staticmethod
+    def _fence(text, least=1):
+        """Backticks to put around `text` in Markdown: more than the text itself has in a row."""
+        run = longest = 0
+        for c in text:
+            run = run + 1 if c == "`" else 0
+            longest = max(longest, run)
+        return "`" * max(least, longest + 1)
+
+    def _code_part(self, i, kind, text):
+        """A step that the user saw, or that ran without a question: one small line.
+        Code of more than one line is folded; "show" opens it."""
+        # Qt shows Markdown inside an HTML tag in the wrong order: the tag holds plain words only
+        what = "ran" if kind == "code" else "skipped, not run"
+        if "\n" not in text.strip():
+            fence = self._fence(text)
+            return f"<small>▸ {what}:</small> {fence} {text.strip()} {fence}"
+        lines = text.count("\n") + 1
+        if not any(e is self.entries[i] for e in self._open):
+            return f"<small>▸ {what}: {lines} lines of code ·</small> [show](cadprompt:code/{i})"
+        fence = self._fence(text, 3)
+        return (f"<small>▾ {what}: {lines} lines of code ·</small> [hide](cadprompt:code/{i})\n\n"
+                f"{fence}python\n{text}\n{fence}")
+
+    def _on_link(self, url):
+        if url.scheme() != "cadprompt":
+            # a link in an answer: the browser of the system. Web links only: the text comes
+            # from the AI, and a link to a file or a program must not open with a click.
+            if url.scheme().lower() in ("http", "https"):
+                QtGui.QDesktopServices.openUrl(url)
+            return
+        try:
+            entry = self.entries[int(url.path().rsplit("/", 1)[-1])]
+        except (ValueError, IndexError):
+            return
+        if any(e is entry for e in self._open):
+            self._open = [e for e in self._open if e is not entry]
+        else:
+            self._open.append(entry)
+        self._render(keep=True)
+
+    def _render(self, keep=False):
         parts = []
-        for kind, text in self.entries:
-            if kind == "user":
+        sb = self.view.verticalScrollBar()
+        was = sb.value()
+        self._open = [e for e in self._open if any(e is one for one in self.entries)]
+        for i, (kind, text) in enumerate(self.entries):
+            if kind in ("code", "skipped"):
+                parts.append(self._code_part(i, kind, text))
+            elif kind == "user":
                 parts.append("> **You:** " + text.replace("\n", "\n> "))
             elif kind == "claude":
                 parts.append(text)
             elif kind == "tool":
-                parts.append(f"<small>▸ {text}</small>")
+                parts.append(f"<small>▸</small> {text}")     # not the text in the tag: see _code_part
             elif kind in ("error", "setup"):
                 parts.append(f"**⚠** {text}")
             else:
                 parts.append(f"*{text}*")
         self.view.setMarkdown("\n\n".join(parts))
-        sb = self.view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        sb.setValue(min(was, sb.maximum()) if keep else sb.maximum())
 
     def _busy(self, on, msg=""):
         self.send_btn.setText("Stop" if on else "Send")
@@ -281,7 +368,12 @@ class Panel(QtWidgets.QWidget):
         if any(kind.startswith("setup") for kind, _ in self.entries):
             self.entries = [e for e in self.entries if not e[0].startswith("setup")]
             self._render()
-        if not backends.uses_claude_code():
+        backend = backends.current()
+        if not backend:
+            # no source chosen: nothing is looked for, started or contacted (see the chooser)
+            self._bridge_idle()
+            return False
+        if backend in backends.ENGINE:
             self._bridge_idle()
             return self._check_engine()
         return self._check_claude_code()
@@ -327,6 +419,11 @@ class Panel(QtWidgets.QWidget):
                         " Then sign in once by running `claude` and restart FreeCAD.")
             return False
         self._show_project_notes()
+        self._bridge_idle()
+        if not self._allowed():
+            # the program runs with a login found on this computer: not before the user's yes
+            self._setup(ASKS_FIRST, note=True)
+            return True
         if not runner.backend_env():
             runner.auth_status(self.claude, lambda st, n=self._check: self._on_auth(st, n), self)
         return True
@@ -429,7 +526,7 @@ class Panel(QtWidgets.QWidget):
 
     def _load_history(self):
         """The earlier conversation of this project with the source chosen now."""
-        if not self.project:
+        if not self.project or not backends.current():
             return
         if not backends.uses_claude_code():
             try:
@@ -503,7 +600,7 @@ class Panel(QtWidgets.QWidget):
         text = "In refs/: " + ", ".join(what) + "."
         images = [n for n in names if n.lower().endswith(IMAGES)]
         self._images += [os.path.join(self.project, "refs", n) for n in images]
-        if images and not backends.uses_claude_code():
+        if images and backends.current() in backends.ENGINE:
             text += (" The image goes" if len(images) == 1 else " The images go") + \
                     f" to {self._ai()} with your next message."
         else:
@@ -516,7 +613,8 @@ class Panel(QtWidgets.QWidget):
 
     def _new_chat(self):
         if self.project:
-            if not backends.uses_claude_code():
+            self._end_question()      # a step of the old conversation that still waits
+            if backends.current() in backends.ENGINE:
                 # Claude Code keeps its own conversation: this one is the engine's file
                 try:
                     if self.local_run is not None and self.local_run.running():
@@ -544,12 +642,135 @@ class Panel(QtWidgets.QWidget):
         if files:
             self._added(projects.add_refs(self.project, files))
 
-    def _settings(self):
+    def _settings(self, choose=None):
+        """Open Settings. `choose`: the source that the user picked in the chooser."""
         from .settings_dialog import SettingsDialog
-        if SettingsDialog(self).exec():
+        dlg = SettingsDialog(self)
+        if choose:
+            dlg.choose(choose)
+        before = backends.service()
+        if dlg.exec():
             self._show_source()
+            self._show_auto()
             self._fill_projects()     # also shows the conversation of the source chosen now
-            self.check_setup()
+            if self.check_setup() and backends.service() != before and not self._allowed():
+                # the user just chose this service: ask now, so the sign-in can be checked.
+                # Not for a service that was there before: a Forget or a "Not now" is not
+                # answered with the same question at once; the next message asks.
+                if self._consent(backends.current()) and backends.uses_claude_code():
+                    self.check_setup()
+        else:
+            self._bridge_idle()       # Forget works at once, also with Cancel
+
+    def _choose(self, name):
+        self._settings(choose=name)
+
+    # ---- the user's yes: before data leaves, before code runs ---------------------
+    def _allowed(self, backend=None):
+        """True when the service of a source needs no question any more. Asks nothing."""
+        service = backends.service(backend)
+        return bool(service) and (consent.needs_none(*service) or consent.allowed(*service))
+
+    def _consent(self, backend):
+        """May this source get data now? Asks the user the first time. Says what a no means."""
+        service = backends.service(backend)
+        if service and backends.may_contact(*service):
+            if backend == "local" and consent.on_this_computer(service[1]) and not self._said_local:
+                self._said_local = True
+                self._add("note", consent.ON_THIS_COMPUTER)
+            return True
+        self._add("note", consent.NOT_NOW)
+        return False
+
+    def _show_auto(self):
+        self.auto_btn.setVisible(approval.auto())
+
+    def _auto_off(self):
+        approval.set_auto(False)
+        self._show_auto()
+        self._add("note", AUTO_OFF)
+
+    def asks(self):
+        """approval.request() asks the panel whose request is running."""
+        return self._running()
+
+    def asking(self):
+        """True while a step of the AI waits for Run or Skip."""
+        return self._approval == ""
+
+    def _on_card(self, word):
+        if self.asking():
+            self._approval = word
+
+    def _end_question(self):
+        """The request ends: a step that still waits is not run."""
+        if self.asking():
+            self._approval = "stop"
+
+    def ask_approval(self, tool_name, args, source):
+        """Show a step of the AI and wait for the user. True: it may run, as it was shown.
+
+        Called by approval.request() inside a slot of the engine or the bridge.
+        The wait lets FreeCAD work, so Stop, a new chat and a closed panel all
+        get through; each of them ends the question with a no.
+        """
+        text = approval.shown(tool_name, args)
+        if approval.auto() or self._run_all:
+            self._add("code", text)          # folded in the chat: the user can read what ran
+            return True
+        if self._approval is not None:
+            return False                     # one question at a time
+        who = self._name(source, start=True)
+        title = (f"{who} wants to run this code in FreeCAD:" if tool_name == "run_python"
+                 else f"{who} wants to make a drawing:")
+        alive = self._alive
+        self._approval = ""
+        self.card.ask(title, text)
+        dock = self.parent()
+        if isinstance(dock, QtWidgets.QDockWidget) and not self.isVisible():
+            dock.show()                      # closed or behind another tab while the AI worked:
+            dock.raise_()                    # a question nobody sees would wait for ever
+        if self.input.hasFocus() and not self.input.toPlainText().strip():
+            self.card.setFocus()             # Enter and Esc work at once; never while the user types
+        self.status.setText(WAITING)
+        in_time = ask_ui.wait_until(lambda: alive["dead"] or self._approval != "")
+        if alive["dead"]:
+            return False
+        choice, self._approval = self._approval, None
+        back = self.card.hasFocus() or any(w.hasFocus() for w in self.card.findChildren(QtWidgets.QWidget))
+        self.card.hide()
+        if back:
+            self.input.setFocus()
+        if not in_time or not choice:        # FreeCAD is closing: end the request, run nothing
+            self._stop()
+            return False
+        if choice == "stop":
+            return False
+        if self._running():
+            self.status.setText(f"{self._who(start=True)} is working… ({tool_name})")
+        if choice == "skip":
+            self._add("skipped", text)
+            return False
+        if choice == "all":
+            self._run_all = True
+        self._add("code", text)
+        return True
+
+    def closeEvent(self, e):
+        self._closed_by_user()
+        super().closeEvent(e)
+
+    def eventFilter(self, obj, e):
+        # the dock was closed with its button (not: another tab is in front)
+        if e.type() == QtCore.QEvent.Close and obj is self.parent():
+            self._closed_by_user()
+        return super().eventFilter(obj, e)
+
+    def _closed_by_user(self):
+        """Nobody can answer a question in a closed panel: the request ends."""
+        if self.asking():
+            self._stop_asked = True
+            self._stop()
 
     # ---- talking to the AI ---------------------------------------------------
     def _send_or_stop(self):
@@ -570,23 +791,40 @@ class Panel(QtWidgets.QWidget):
             self._add("error", "Pick or create a project first.")
             return
         backend = backends.current()
-        engine = not backends.uses_claude_code(backend)
+        if not backend:
+            self._add("error", NO_SOURCE)
+            return
+        if self._sending:
+            return                # the question of the last Send is still open
+        engine = backend in backends.ENGINE
         where, images = None, []
-        if engine:
-            if not self.check_setup():
-                return
-            images = self._take_images()
-            if images is None:
-                return
-        else:
-            if not self.claude and not self.check_setup():
-                return
-            self._migrate()       # a project made by an earlier version: its files name tools that are gone
-            try:
-                where = bridge.ensure(self.project, backend, self._bridge_note)
-            except Exception as e:
-                self._add("error", f"The FreeCAD tools for Claude could not be started: {e}")
-                return
+        self._sending = True
+        try:
+            if engine:
+                if not self.check_setup() or not self._consent(backend):
+                    return
+                images = self._take_images()
+                if images is None:
+                    return
+            else:
+                asked = not self._allowed(backend)
+                if not self.claude and not self.check_setup():
+                    return
+                # the bridge, the sign-in check and Claude Code itself: nothing before the user's yes
+                if not self._consent(backend):
+                    return
+                if asked and not self.check_setup():
+                    return        # the yes is new: now the sign-in is looked at too
+                self._migrate()   # a project made by an earlier version: its files name tools that are gone
+                try:
+                    where = bridge.ensure(self.project, backend, self._bridge_note)
+                except Exception as e:
+                    self._add("error", f"The FreeCAD tools for Claude could not be started: {e}")
+                    return
+        finally:
+            self._sending = False
+        self._run_all = False
+        self._show_auto()
         self._images = []
         if typed:
             self.input.clear()
@@ -653,6 +891,9 @@ class Panel(QtWidgets.QWidget):
     def _on_finished(self, res, run=None):
         run = run or self._engine
         local = run is not self.run
+        if run is self._engine:
+            self._end_question()     # a step that still waits belongs to a request that is over
+            self._run_all = False
         if not local:
             bridge.idle()            # Claude Code is gone: a call of it that still waits is dropped
             self._bridge_idle()
@@ -722,6 +963,7 @@ def _make_dock():
     _dock = QtWidgets.QDockWidget("CADprompt", mw)
     _dock.setObjectName("CADpromptDock")
     _dock.setWidget(Panel(_dock))
+    _dock.installEventFilter(_dock.widget())      # the panel hears when its dock is closed
     mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _dock)
     _dock.show()
     return True
@@ -737,6 +979,8 @@ def show():
 def toggle():
     if _make_dock():
         return
-    _dock.setVisible(not _dock.isVisible())
     if _dock.isVisible():
+        _dock.close()             # as the button of the dock does: a question that waits ends
+    else:
+        _dock.show()
         _dock.raise_()

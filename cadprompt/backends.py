@@ -5,6 +5,7 @@ Four sources, chosen in Settings (parameter "Backend"):
   apikey   an Anthropic API key, through the built-in engine
   local    a local or other OpenAI-compatible server, through the built-in engine
   custom   Claude Code pointed at another Anthropic-compatible endpoint
+A new installation has none of them: the user chooses first (current() is "").
 
 No Qt in here, so the settings and the tests can use it anywhere.
 """
@@ -18,7 +19,7 @@ import urllib.parse
 
 import FreeCAD as App
 
-from . import paths
+from . import consent, paths
 
 BACKENDS = ("account", "apikey", "local", "custom")
 LABELS = {"account": "Claude account", "apikey": "Anthropic API key",
@@ -29,32 +30,55 @@ ANTHROPIC_VERSION = "2026-10-21"         # the same API version as local_agent.A
 API_MODEL = "claude-opus-5-5"            # used until the user picks another one in Settings
 API_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")   # offered before Find models
 ENGINE = ("apikey", "local")             # the sources of the built-in engine: no Claude Code
+CLAUDE_CODE = ("account", "custom")      # the sources that start the Claude Code program
+NO_SOURCE = "No AI chosen"
 
 
 def current():
-    b = paths.params().GetString("Backend", "account")
-    return b if b in BACKENDS else "account"
+    """The source the user chose, or "" when none is chosen yet: there is no default service."""
+    b = paths.params().GetString("Backend", "")
+    return b if b in BACKENDS else ""
 
 
 def uses_claude_code(backend=None):
-    return (backend or current()) not in ENGINE
+    return (backend or current()) in CLAUDE_CODE
+
+
+def service(backend=None):
+    """(kind, url) of the service that a source sends data to, as may_contact() wants it.
+    None when no source is chosen."""
+    b = backend or current()
+    if b == "apikey":
+        return "anthropic", ANTHROPIC_URL
+    if b == "local":
+        return "openai", local_config()["url"]
+    url = paths.params().GetString("BaseUrl", "").strip()
+    if b == "custom" and url:
+        return "custom", url
+    if b in CLAUDE_CODE:                     # no endpoint set: Claude Code works with the account
+        return "account", ANTHROPIC_URL      # where Claude Code sends the conversation
+    return None
 
 
 def may_contact(kind, url):
     """True when CADprompt may send a request to this service now.
 
-    The one gate for everything the addon itself sends to an AI service:
-    kind is "openai" or "anthropic", url the address of the service. The
-    built-in engine asks before every request (local_engine: in the GUI
-    thread, also for requests that its worker thread sends), and Settings asks
-    before "Find models". On False nothing is sent and no connection is
-    opened. A consent question of the user belongs here.
+    The one gate for everything that leaves the computer for an AI service.
+    kind "openai" or "anthropic": a request of the addon itself to the service
+    at `url`. The built-in engine asks before every request (local_engine: in
+    the GUI thread, also for requests that its worker thread sends), and
+    Settings asks before "Find models". kind "account" or "custom": the panel
+    asks before it starts the Claude Code program or asks it for the sign-in.
+    On False nothing is sent, no connection is opened and no program starts.
+
+    A server on this computer needs no yes. Every other service is asked for
+    once, in FreeCAD's window (consent.py). Call it in the GUI thread.
     """
-    return True
+    return consent.may_contact(kind, url)
 
 
 def label(backend=None):
-    return LABELS.get(backend or current(), LABELS["account"])
+    return LABELS.get(backend or current(), NO_SOURCE)
 
 
 # ---- keys -------------------------------------------------------------------
@@ -192,9 +216,9 @@ def engine_config(backend=None):
 def custom_env():
     """Environment for Claude Code on another endpoint, or {} when that is not chosen."""
     p = paths.params()
-    if p.GetString("Backend", "account") != "custom":
+    if current() != "custom":
         return {}
-    url = p.GetString("BaseUrl", "")
+    url = p.GetString("BaseUrl", "").strip()
     if not url:
         return {}
     env = {"ANTHROPIC_BASE_URL": url,
@@ -217,8 +241,11 @@ def claude_env():
     b = current()
     if not uses_claude_code(b):
         return {}, []        # the built-in engine does the work, not Claude Code
-    if b == "custom":
+    if b == "custom" and custom_env():
         return custom_env(), ["ANTHROPIC_API_KEY"]
+    # the account, and "another endpoint" with no address: Claude Code works with its login.
+    # An endpoint of the user's shell must not get the data that the user allowed for Anthropic
+    # (service() names the account then, and that is what the user was asked for).
     return {}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 
 
