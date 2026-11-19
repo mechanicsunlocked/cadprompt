@@ -575,6 +575,119 @@ class LifeCycle(Base):
         self.assertIn("RuntimeError: a mistake in the server", printed)
 
 
+class ClientGone(unittest.TestCase):
+    """Server.client_gone(): the tool that waits (for the user's Run or Skip) can see that
+    the client does not wait for its answer any more."""
+
+    def setUp(self):
+        self.seen = {}
+        self.srv = mcp_server.Server([{"name": "wait", "description": "waits", "inputSchema": {"type": "object"}}],
+                                     self.wait_tool)
+        self.srv.start()
+
+    def tearDown(self):
+        self.srv.stop()
+
+    def wait_tool(self, name, args):
+        """Waits `seconds`, as bridge.py waits for the main thread, and looks at the client meanwhile."""
+        key, end = args.get("key"), time.monotonic() + args.get("seconds", 5)
+        while time.monotonic() < end:
+            if self.srv.client_gone():
+                self.seen[key] = "gone"
+                return "gone"
+            time.sleep(0.02)
+        self.seen[key] = "waited"
+        return "done"
+
+    def call(self, ident, key, seconds=5):
+        """Send one tools/call and return the open connection."""
+        body = json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+                           "params": {"name": "wait", "arguments": {"key": key, "seconds": seconds}}}).encode()
+        sock = socket.create_connection(("127.0.0.1", self.srv.port), timeout=10)
+        sock.sendall(("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\n"
+                      "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                      % (self.srv.port, self.srv.token, len(body))).encode("ascii") + body)
+        return sock
+
+    def cancel(self, ident):
+        conn = http.client.HTTPConnection("127.0.0.1", self.srv.port, timeout=10)
+        try:
+            conn.request("POST", "/mcp", json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                                     "params": {"requestId": ident}}),
+                         {"Authorization": "Bearer " + self.srv.token, "Content-Type": "application/json"})
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status
+        finally:
+            conn.close()
+
+    def until(self, key, seconds=5):
+        end = time.monotonic() + seconds
+        while key not in self.seen and time.monotonic() < end:
+            time.sleep(0.02)
+        return self.seen.get(key)
+
+    def test_a_client_that_waits_is_not_gone_and_gets_its_answer(self):
+        sock = self.call(1, "patient", 0.8)
+        answer = b""
+        while True:
+            block = sock.recv(65536)
+            if not block:
+                break
+            answer += block
+        sock.close()
+        self.assertEqual(self.seen.get("patient"), "waited")
+        self.assertIn(b'"done"', answer)
+
+    def test_a_closed_connection_is_seen(self):
+        sock = self.call(2, "closed")
+        time.sleep(0.3)
+        self.assertNotIn("closed", self.seen)
+        sock.close()
+        self.assertEqual(self.until("closed"), "gone")
+
+    def test_a_reset_connection_is_seen(self):
+        sock = self.call(3, "reset")
+        time.sleep(0.3)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh" if os.name == "nt" else "ii", 1, 0))
+        sock.close()
+        self.assertEqual(self.until("reset"), "gone")
+
+    def test_a_cancel_notification_is_seen_and_only_for_its_own_request(self):
+        sock = self.call(7, "cancelled")
+        try:
+            time.sleep(0.3)
+            self.assertEqual(self.cancel(99), 202)           # a request that no call has
+            self.assertEqual(self.cancel("7"), 202)          # a text is another id than the number
+            time.sleep(0.3)
+            self.assertNotIn("cancelled", self.seen)
+            self.assertEqual(self.cancel(7), 202)
+            self.assertEqual(self.until("cancelled"), "gone")    # the connection is still open
+        finally:
+            sock.close()
+
+    def test_an_old_cancel_does_not_count_for_a_later_call_with_the_same_id(self):
+        sock = self.call(7, "first")
+        time.sleep(0.2)
+        self.cancel(7)
+        self.assertEqual(self.until("first"), "gone")
+        sock.close()
+        sock = self.call(7, "second", 0.6)       # the next client counts its ids from the start again
+        try:
+            self.assertEqual(self.until("second"), "waited")
+        finally:
+            sock.close()
+        self.assertEqual(self.srv._calls, {})    # nothing is kept for a call that is over
+
+    def test_a_cancel_with_an_id_that_is_none_is_taken_and_harmless(self):
+        for bad in (True, None, [1], {"a": 1}):
+            self.assertEqual(self.cancel(bad), 202, bad)
+        self.assertEqual(self.srv._calls, {})
+
+    def test_outside_a_request_nobody_is_gone(self):
+        self.assertFalse(self.srv.client_gone())
+
+
 class Registry(unittest.TestCase):
     """The tools that Claude Code gets are the tools of the built-in engine."""
 

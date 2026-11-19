@@ -39,6 +39,7 @@ class _Host(QtCore.QObject):
     """Runs the tools in the main thread for the requests of the server."""
 
     need_tool = QtCore.Signal(object)       # a main_thread.Call, sent from a thread of the server
+    left = QtCore.Signal(object)            # a Call whose client does not wait for the result any more
 
     def __init__(self):
         super().__init__()
@@ -48,7 +49,9 @@ class _Host(QtCore.QObject):
         self._doc = None          # name of the document this request works on
         self._backed = set()      # model files that have their backup copy for this request
         self._in_tool = False
+        self._asking = None       # the call whose question (Run or Skip) is open
         self.need_tool.connect(self._on_tool, QtCore.Qt.QueuedConnection)
+        self.left.connect(self._on_left, QtCore.Qt.QueuedConnection)
 
     def begin(self, project, source, note):
         """A new request of the user starts: Claude Code is about to run."""
@@ -71,18 +74,31 @@ class _Host(QtCore.QObject):
     def call(self, name, args):
         from . import mcp_server
         server, call = _server, main_thread.Call(name, args)
-        call.serial = self._serial
+        call.serial, call.left = self._serial, False
         self.need_tool.emit(call)
-        # the wait ends when the server is stopped, so a request cannot hang on a closed panel
-        if not main_thread.wait(call, lambda: server is None or not server.running()):
+        # The wait ends when the server is stopped, so a request cannot hang on a closed panel.
+        # It also ends when Claude Code gave this call up (connection closed, or cancelled):
+        # nobody takes the result, and the model can send the same call again.
+        if not main_thread.wait(call, lambda: server is None or not server.running() or server.client_gone()):
+            call.left = True
+            self.left.emit(call)
             return [mcp_server.text_item(GONE)], True
         return call.result
 
     # ---- in the main thread -----------------------------------------------------
     def _wanted(self, call):
         """This call belongs to the request that runs now. False after Stop, after the end
-        of Claude Code and after stop(), also for a call that came in later."""
-        return self._active and call.serial == self._serial and running()
+        of Claude Code and after stop(), also for a call that came in later, for a call
+        that Claude Code gave up, and when the user took the yes for Claude Code back."""
+        return (self._active and call.serial == self._serial and not call.left and running()
+                and _has_yes(self.source))
+
+    def _on_left(self, call):
+        """Claude Code gave this call up. A question for it ends with a no; a call that
+        did not start is dropped by _wanted."""
+        if call is self._asking:
+            from . import approval
+            approval.withdraw()
 
     def _on_tool(self, call):
         from . import mcp_server
@@ -112,7 +128,12 @@ class _Host(QtCore.QObject):
             return [mcp_server.text_item(closed)], True
         if name in local_prompt.CHANGING:
             # the user decides, in this thread, before anything of the step happens
-            if not approval.request(name, args, self.source):
+            self._asking = call
+            try:
+                yes = approval.request(name, args, self.source)
+            finally:
+                self._asking = None
+            if not yes:
                 return [mcp_server.text_item(approval.DECLINED)], False
             # The question lets events through: Stop, the end of Claude Code, a closed panel,
             # a click on another document. A yes to a request that is over runs nothing.
@@ -163,6 +184,13 @@ class _Host(QtCore.QObject):
             self.note("backup", "model/.backup/" + copy.replace("\\", "/").rsplit("/", 1)[-1])
 
 
+def _has_yes(source):
+    """True when the user's yes to Claude Code for this source is there (consent.py)."""
+    from . import backends, consent
+    service = backends.service(source)
+    return bool(service) and service[0] in consent.CLAUDE_CODE and consent.allowed(*service)
+
+
 def _active_name():
     doc = App.ActiveDocument
     return doc.Name if doc is not None else None
@@ -178,9 +206,8 @@ def ensure(project="", source="account", note=None):
     for this source (consent.py): nothing listens before that.
     """
     global _host, _server
-    from . import backends, consent, local_prompt, mcp_server
-    service = backends.service(source)
-    if not service or service[0] not in consent.CLAUDE_CODE or not consent.allowed(*service):
+    from . import local_prompt, mcp_server
+    if not _has_yes(source):
         raise PermissionError("you did not allow Claude Code for this source yet")
     if _host is None:
         _host = _Host()

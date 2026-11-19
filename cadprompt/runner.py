@@ -10,11 +10,13 @@ What does not come from the project folder, because a project can come from
 another person: the list of MCP servers (mcp_config: the file of the addon,
 which sends Claude Code to the FreeCAD tools of this process, bridge.py;
 mcp_env() is where and with which token), the permission mode and the shell
-(ClaudeRun.start).
+(ClaudeRun.start). A project folder with hooks is not started at all
+(project_hooks).
 """
 
 import json
 import os
+import re
 
 from PySide import QtCore
 
@@ -25,6 +27,11 @@ HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the u
 MCP_SERVER = "freecad"           # the name of the bridge in the .mcp.json of the addon
 LOCAL_HOSTS = ("127.0.0.1", "localhost")   # the bridge, and a model server on this computer
 WEB_TOOLS = ("WebSearch", "WebFetch")
+NO_STORED_TRUST = "CLAUDE_CODE_IGNORE_PERSISTED_TRUST"   # Claude Code: no "trust this folder" answer counts
+SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
+HOOKS = ("Claude Code was not started: this project has hooks in %s. A hook is a command that Claude Code "
+         "runs by itself, without a question, and a project can come from another person. Open the file and "
+         "take the \"hooks\" part out, then send your message again.")
 NOT_ALLOWED = "Claude Code was not started: you did not allow it yet. Send your message again and say Allow."
 
 
@@ -38,6 +45,51 @@ def allowed():
     """
     service = backends.service()
     return bool(service) and service[0] in consent.CLAUDE_CODE and consent.allowed(*service)
+
+
+def project_hooks(project):
+    """The files of a project folder that give Claude Code hooks, as paths inside the project.
+
+    A hook is a shell command that Claude Code runs by itself: at its start,
+    before a tool, after a tool. Started with -p it runs the hooks of the
+    project's settings files without a question, and a hook can also say yes
+    to a tool. A project can come from another person, so ClaudeRun.start
+    does not start Claude Code in a folder that has one. The settings files
+    are looked at, and the commands, agents and skills in .claude/ (a hook can
+    be in the head of such a file).
+    """
+    found = []
+    for rel in SETTINGS_FILES:
+        try:
+            with open(os.path.join(project, *rel.split("/")), encoding="utf-8", errors="replace") as f:
+                text = f.read(2_000_000)
+        except OSError:
+            continue
+        try:
+            data = json.loads(text)
+            hooks = isinstance(data, dict) and bool(data.get("hooks"))
+        except ValueError:
+            hooks = "hooks" in text      # not JSON for us: Claude Code can read it all the same
+        if hooks:
+            found.append(rel)
+    seen = 0
+    for folder, _dirs, files in os.walk(os.path.join(project, ".claude")):
+        for name in sorted(files):
+            seen += 1
+            if seen > 2000:              # not a project of ours: stop looking, the files so far count
+                return found
+            if not name.lower().endswith(".md"):
+                continue
+            path = os.path.join(folder, name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read(20_000)
+            except OSError:
+                continue
+            head = re.match(r"\ufeff?---\r?\n(.*?)\r?\n---", text, re.S)
+            if head and re.search(r"^\s*hooks\s*:", head.group(1), re.M):
+                found.append(os.path.relpath(path, project).replace(os.sep, "/"))
+    return found
 
 
 def _short_tool(name):
@@ -107,9 +159,11 @@ def _apply_backend(pe):
     """Fit the environment to the source chosen in Settings.
 
     Removing matters as much as setting: an ANTHROPIC_API_KEY left in the
-    user's shell must not bill the API when the Claude account is chosen.
+    user's shell must not bill the API when the Claude account is chosen, and
+    a provider switch there (CLAUDE_CODE_USE_BEDROCK ...) must not send the
+    conversation to a service that the user was not asked for.
     """
-    add, drop = backends.claude_env()
+    add, drop = backends.claude_env(pe.keys())
     for k in drop:
         pe.remove(k)
     for k, v in add.items():
@@ -163,6 +217,12 @@ def claude_environment(claude, env=None):
         pe.insert(k, v)
     _apply_backend(pe)
     _no_proxy_for_local(pe)
+    # A project can come from another person. With this variable Claude Code started with -p
+    # takes the folder as one that nobody trusted: the hooks of the project's settings files
+    # do not run and their allow rules do not count, also when the folder (or the git checkout
+    # around it) was trusted in a terminal before. CLAUDE.md and the commands are still read.
+    # (Read in the text of Claude Code 2.1.327. An older version that does not know it ignores it.)
+    pe.insert(NO_STORED_TRUST, "1")
     return pe
 
 
@@ -238,6 +298,11 @@ class ClaudeRun(QtCore.QObject):
     def start(self, claude, project, prompt, session=None, env=None):
         if not allowed():
             self.finished.emit({"is_error": True, "result": NOT_ALLOWED, "kind": "start"})
+            return
+        hooks = project_hooks(project)
+        if hooks:
+            names = ", ".join("`%s`" % rel for rel in hooks[:5])
+            self.finished.emit({"is_error": True, "result": HOOKS % names, "kind": "start"})
             return
         args = ["-p", "--output-format", "stream-json", "--verbose"]
         if session:

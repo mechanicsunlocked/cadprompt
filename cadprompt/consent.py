@@ -6,7 +6,8 @@ before "Find models", and before the Claude Code program is started or asked
 for its sign-in. A model server on this computer needs no yes: nothing leaves
 the machine. Every other service is asked for once, inside FreeCAD, and the
 yes is kept with (kind, host, DATA_KINDS). It is asked again when the host
-changes, and when DATA_KINDS changes.
+changes, when DATA_KINDS changes, and when the address of a service that was
+allowed with https changes to http (not encrypted: the question says so).
 
 The records are no secrets: they are one FreeCAD parameter ("Consent", JSON).
 No Qt in here: the question itself is `asker`, which ask_ui.py sets.
@@ -16,8 +17,6 @@ import datetime
 import ipaddress
 import json
 import urllib.parse
-
-from . import paths
 
 # Raise this number when CADprompt starts to send a kind of data that the lists below do
 # not name. Every stored yes is then asked for again.
@@ -36,6 +35,8 @@ SENT_BY_CLAUDE_CODE = ("your messages",
                        "files of the project folder that the AI reads: images, reference files",
                        "pictures of the 3D view")
 PROXY = "A proxy of this computer, when its settings name one, sees the name of the service."
+NOT_ENCRYPTED = ("The address starts with http://, so the connection is not encrypted. Other people on "
+                 "the same network can read everything that is sent, also the key or the token.")
 ONCE = "CADprompt asks once for each service. Settings > Privacy takes your yes back."
 ON_THIS_COMPUTER = ("The model server runs on this computer: nothing leaves it, so CADprompt does "
                     "not ask for a permission.")
@@ -74,6 +75,22 @@ def on_this_computer(url):
     return (mapped or address).is_loopback
 
 
+def with_scheme(url, has_key=False):
+    """The address as it is used. One that was typed with no scheme gets https when a key
+    goes with it, so that a key never crosses a network in clear text by accident; for this
+    computer, and with no key, it gets http (a model server in the room has no https)."""
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = ("http://" if on_this_computer(url) or not has_key else "https://") + url
+    return url
+
+
+def clear_text(url):
+    """True for an http:// address of another computer: what is sent crosses the network
+    not encrypted."""
+    return (url or "").strip().lower().startswith("http://") and not on_this_computer(url)
+
+
 def needs_none(kind, url):
     """A server on this computer that CADprompt itself talks to: no question.
     Claude Code is always asked for: it is a program of its own, with its own connections."""
@@ -82,7 +99,9 @@ def needs_none(kind, url):
 
 # ---- the records ---------------------------------------------------------------
 def records():
-    """The services with a yes: [{"kind", "host", "data", "when"}], the oldest first."""
+    """The services with a yes: [{"kind", "host", "data", "when"}], the oldest first.
+    "clear": True is there when the yes was given for an address that is not encrypted."""
+    from . import paths      # here, not at the top: local_agent uses on_this_computer() without FreeCAD
     try:
         rows = json.loads(paths.params().GetString(PARAM, "") or "[]")
     except ValueError:
@@ -92,14 +111,17 @@ def records():
 
 
 def _store(rows):
+    from . import paths
     paths.params().SetString(PARAM, json.dumps(rows))
 
 
 def allowed(kind, url):
     """True when the user said yes to this service, for the data that is sent today."""
     host = host_of(url)
+    # a yes for https://host is no yes for http://host: the user was not told "not encrypted"
+    clear = clear_text(url)
     return bool(host) and any(r["kind"] == kind and r["host"] == host and r.get("data") == DATA_KINDS
-                              for r in records())
+                              and (not clear or r.get("clear") is True) for r in records())
 
 
 def allow(kind, url):
@@ -107,7 +129,10 @@ def allow(kind, url):
     if not host:
         return
     rows = [r for r in records() if (r["kind"], r["host"]) != (kind, host)]
-    rows.append({"kind": kind, "host": host, "data": DATA_KINDS, "when": datetime.date.today().isoformat()})
+    row = {"kind": kind, "host": host, "data": DATA_KINDS, "when": datetime.date.today().isoformat()}
+    if clear_text(url):
+        row["clear"] = True
+    rows.append(row)
     _store(rows)
 
 
@@ -171,5 +196,7 @@ def question(kind, url):
         body = ("This server is not on this computer. CADprompt sends to it:\n"
                 + bullets(SENT + ("the key of this server, when you saved one",))
                 + "\n\nIt is sent each time you send a message, and for each step of the AI. "
-                "\"Find models\" asks only for the list of models.")
+                "\"Find models\" sends only the key, when you saved one.")
+    if kind in ("openai", "custom") and clear_text(url):
+        body += "\n" + NOT_ENCRYPTED
     return head, body + "\n" + PROXY + "\n\n" + ONCE

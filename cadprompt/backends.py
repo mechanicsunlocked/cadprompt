@@ -170,6 +170,29 @@ def set_local_key(text):
     _write_key("cadprompt_local_key", text)
 
 
+def endpoint_token():
+    """The token of "Claude Code with another endpoint"."""
+    p = paths.params()
+    old = p.GetString("AuthToken", "").strip()
+    if old:
+        # The first versions kept it in user.cfg. The first read moves it to its own file.
+        try:
+            _write_key("cadprompt_endpoint_token", old)
+        except OSError:
+            return old               # no file can be written: the token still works
+        p.RemString("AuthToken")
+        App.saveParameter()          # out of user.cfg now, not when FreeCAD closes
+    return _read_key("cadprompt_endpoint_token")
+
+
+def set_endpoint_token(text):
+    _write_key("cadprompt_endpoint_token", text)
+    p = paths.params()
+    if p.GetString("AuthToken", ""):
+        p.RemString("AuthToken")
+        App.saveParameter()
+
+
 def same_server(a, b):
     """True when two addresses name the same server. A key is for one server only."""
     def origin(url):
@@ -187,9 +210,11 @@ def same_server(a, b):
 
 def local_config():
     p = paths.params()
-    return {"url": p.GetString("LocalUrl", LOCAL_URL).strip().rstrip("/"),
+    key = local_key()
+    # with its scheme, as the engine uses it: the consent question names the same address
+    return {"url": consent.with_scheme(p.GetString("LocalUrl", LOCAL_URL).strip().rstrip("/"), bool(key)),
             "model": p.GetString("LocalModel", "").strip(),
-            "key": local_key()}
+            "key": key}
 
 
 def api_model():
@@ -222,7 +247,7 @@ def custom_env():
     if not url:
         return {}
     env = {"ANTHROPIC_BASE_URL": url,
-           "ANTHROPIC_AUTH_TOKEN": p.GetString("AuthToken", "") or "local"}
+           "ANTHROPIC_AUTH_TOKEN": endpoint_token() or "local"}
     model = p.GetString("Model", "")
     if model:
         for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -231,22 +256,45 @@ def custom_env():
     return env
 
 
-def claude_env():
+# Variables of the user's shell that send Claude Code to another service than the one the
+# user said yes to, or give it a key or a login for one (read in the text of Claude Code
+# 2.1.327): CLAUDE_CODE_USE_BEDROCK, _VERTEX, _FOUNDRY, _MANTLE, _GATEWAY and more choose
+# another provider, which wins over the login and over ANTHROPIC_BASE_URL.
+# ANTHROPIC_<provider>_BASE_URL, ANTHROPIC_UNIX_SOCKET and CLAUDE_CODE_API_BASE_URL are other
+# addresses. ANTHROPIC_<provider>_API_KEY, ANTHROPIC_PROFILE and ANTHROPIC_CUSTOM_HEADERS are
+# keys, logins and headers. Whole families and not single names: each version of Claude Code
+# has more of them.
+SHELL_FAMILIES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
+SHELL_NAMES = ("CLAUDE_CODE_API_BASE_URL", "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL")
+# These only choose a model; the user's choice in the shell stays.
+MODEL_CHOICE = ("ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION")
+
+
+def _other_service(name):
+    """True for a variable that can send Claude Code somewhere else, or give it a key."""
+    name = name.upper()      # Windows: the names have no case
+    return name in SHELL_NAMES or (name.startswith(SHELL_FAMILIES) and not name.startswith(MODEL_CHOICE))
+
+
+def claude_env(names=()):
     """(set, unset): changes to the environment of the Claude Code process.
 
-    The unset list matters as much as the set one: a key or an endpoint left
-    in the user's shell would otherwise win over the source chosen here, and
-    bill the API when the user picked the subscription.
+    `names`: the variables that the process would start with.
+    The unset list matters as much as the set one: a key, an endpoint or a
+    provider switch left in the user's shell would otherwise win over the
+    source chosen here. The data would go to a service that the user was not
+    asked for, or bill the API when the user picked the subscription.
     """
     b = current()
     if not uses_claude_code(b):
         return {}, []        # the built-in engine does the work, not Claude Code
-    if b == "custom" and custom_env():
-        return custom_env(), ["ANTHROPIC_API_KEY"]
-    # the account, and "another endpoint" with no address: Claude Code works with its login.
-    # An endpoint of the user's shell must not get the data that the user allowed for Anthropic
-    # (service() names the account then, and that is what the user was asked for).
-    return {}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+    add = custom_env() if b == "custom" else {}
+    # No address (the account, and "another endpoint" with none): Claude Code works with its
+    # login. An endpoint of the user's shell must not get the data that the user allowed for
+    # Anthropic (service() names the account then, and that is what the user was asked for).
+    drop = ["ANTHROPIC_API_KEY"] if add else ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+    return add, drop + [n for n in names if _other_service(n) and n not in drop]
 
 
 # ---- asking a service for its models ---------------------------------------

@@ -1,6 +1,6 @@
 """A pretend `claude` program for the panel tests: the real one is never started.
 
-It writes what it was started with (arguments, the ANTHROPIC_* and bridge
+It writes what it was started with (arguments, the ANTHROPIC_*, CLAUDE_CODE_* and bridge
 variables of its environment, the prompt from stdin) as one JSON line to the
 file named in PANEL_FAKE_CLAUDE_LOG, then answers like Claude Code would:
 `auth status` with a small JSON, everything else with a stream-json result.
@@ -26,7 +26,7 @@ import time
 
 args = sys.argv[1:]
 auth = args[:2] == ["auth", "status"]
-keep = ("ANTHROPIC_", "FREECAD_MCP_", "CADPROMPT_", "PYTHON", "PANEL_BUNDLE_")
+keep = ("ANTHROPIC_", "CLAUDE_CODE_", "FREECAD_MCP_", "CADPROMPT_", "PYTHON", "PANEL_BUNDLE_")
 
 
 def expand(text):

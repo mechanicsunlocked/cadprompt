@@ -58,7 +58,7 @@ BLOCKED_OS = {"system", "popen", "fork", "kill", "remove", "unlink", "rmdir", "r
               "rename", "replace", "chmod", "chown", "startfile"}
 BLOCKED_ANY = {"unlink", "rmdir", "rmtree"}      # on any object: pathlib deletes the same as os
 BLOCKED_NAMES = {"__import__", "eval", "exec", "compile"}
-KEY_FILES = ("cadprompt_api_key", "cadprompt_local_key")
+KEY_FILES = ("cadprompt_api_key", "cadprompt_local_key", "cadprompt_endpoint_token")
 
 
 _old_problems = set()     # (document, object) that were broken before the request began
@@ -142,8 +142,8 @@ def _hide_keys(text):
     if token:
         text = text.replace(token, "(the token of the bridge, hidden)")
     try:
-        from . import backends, paths
-        secrets = (backends.api_key(), backends.local_key(), paths.params().GetString("AuthToken", ""))
+        from . import backends
+        secrets = (backends.api_key(), backends.local_key(), backends.endpoint_token())
     except Exception:
         return text
     for secret in secrets:

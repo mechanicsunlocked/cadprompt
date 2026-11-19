@@ -29,7 +29,7 @@ from utf8_output import utf8_output            # noqa: E402
 utf8_output()
 
 import FreeCAD as App                       # noqa: E402
-from cadprompt import backends, local_agent, paths      # noqa: E402
+from cadprompt import backends, local_agent      # noqa: E402
 from cadprompt import local_tools as T      # noqa: E402
 import windows_paths                        # noqa: E402
 
@@ -427,16 +427,16 @@ class Keys(unittest.TestCase):
     def tearDown(self):
         backends.set_api_key("")
         backends.set_local_key("")
-        paths.params().SetString("AuthToken", "")
+        backends.set_endpoint_token("")
 
     def test_a_saved_key_never_leaves_in_a_tool_result(self):
         new_doc()
         backends.set_api_key("sk-ant-made-up-0123456789")
         backends.set_local_key("sk-local-made-up-0123")
-        paths.params().SetString("AuthToken", "token-made-up-0123")
+        backends.set_endpoint_token("token-made-up-0123")
         # a way to read the files that the guard rail does not see
         code = ("import glob\nfor f in sorted(glob.glob(App.getUserAppDataDir() + 'cadprompt_*')):\n"
-                "    print(open(f).read())\nprint(App.ParamGet(%r).GetString('AuthToken'))" % paths.PARAMS)
+                "    print(open(f).read())")
         direct = T.run_python(code)
         self.assertIn("sk-ant-made-up-0123456789", direct)       # the test itself is right
         out = T.run_tool("/p", "run_python", {"code": code})

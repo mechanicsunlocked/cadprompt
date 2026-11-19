@@ -111,6 +111,8 @@ class _KeyRow(QtWidgets.QWidget):
 
 
 class SettingsDialog(QtWidgets.QDialog):
+    forgot = QtCore.Signal()     # Forget was pressed: the panel stops what still works with that yes
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("CADprompt settings")
@@ -201,7 +203,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.model = QtWidgets.QLineEdit(p.GetString("Model", ""))
         self.model.setPlaceholderText("model name on that endpoint")
         f.addRow("Endpoint model", self.model)
-        self.token = QtWidgets.QLineEdit(p.GetString("AuthToken", ""))
+        self.token = QtWidgets.QLineEdit(backends.endpoint_token())
         self.token.setEchoMode(QtWidgets.QLineEdit.Password)
         self.token.setPlaceholderText("usually empty for a local model")
         f.addRow("Endpoint token", self.token)
@@ -305,6 +307,7 @@ class SettingsDialog(QtWidgets.QDialog):
             line.setContentsMargins(0, 0, 0, 0)
             name = consent.service_name(r["kind"], r["host"])
             text = QtWidgets.QLabel("Allowed: %s%s" % (name, " (since %s)" % r["when"] if r.get("when") else ""))
+            text.setTextFormat(QtCore.Qt.PlainText)      # a host name from the settings file
             text.setWordWrap(True)
             forget = QtWidgets.QPushButton("Forget")
             forget.setAutoDefault(False)
@@ -327,6 +330,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def _forget(self, kind, host):
         consent.forget(kind, host)       # at once, also when the dialog is closed with Cancel
         self._show_privacy()
+        self.forgot.emit()
 
     def _show_source(self, *_):
         """Show only what the chosen source needs."""
@@ -435,6 +439,7 @@ class SettingsDialog(QtWidgets.QDialog):
         try:
             self.api_key.save(backends.set_api_key)
             self.local_key.save(backends.set_local_key)
+            backends.set_endpoint_token(self.token.text())     # a key file too, not user.cfg
         except OSError as e:
             QtWidgets.QMessageBox.warning(self, "CADprompt", f"Could not save the key: {e}")
             return
@@ -448,7 +453,6 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("ModelOverride", self.model_override.text().strip())
         p.SetString("BaseUrl", self.url.text().strip())
         p.SetString("Model", self.model.text().strip())
-        p.SetString("AuthToken", self.token.text().strip())
         p.SetString("claudePath", self.claude.text().strip())
         approval.set_auto(self.auto.isChecked())
         if self.techdraw.isChecked() != self._in_techdraw:

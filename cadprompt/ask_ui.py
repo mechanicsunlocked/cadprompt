@@ -54,6 +54,7 @@ class Question(QtWidgets.QDialog):
         font = self.headline.font()
         font.setBold(True)
         self.headline.setFont(font)
+        self.headline.setTextFormat(QtCore.Qt.PlainText)     # it names a host that the user typed
         self.headline.setWordWrap(True)
         lay.addWidget(self.headline)
         self.text = QtWidgets.QLabel(text)
@@ -118,8 +119,9 @@ class ApprovalCard(QtWidgets.QFrame):
     """One step of the AI that waits for the user: the text, Run, Skip, Run all."""
 
     answered = QtCore.Signal(str)       # "run", "skip" or "all"
-    # Enter and Esc do nothing in the first moment: a key that was on its way to the text
-    # the user is typing must not run code.
+    # Enter and Esc work only after a click into the card (it never takes the focus itself),
+    # and do nothing in its first moment or as the repeat of a key that is held down: a key
+    # that was on its way to something else must not run code.
     KEY_DELAY = 0.4
     ROWS = 12                           # lines of code in view; the rest scrolls
 
@@ -139,6 +141,12 @@ class ApprovalCard(QtWidgets.QFrame):
         self.code.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
         self.code.setTabChangesFocus(True)
         lay.addWidget(self.code)
+        self.more = QtWidgets.QLabel("")     # says so when a part of the text is outside the view
+        self.more.setWordWrap(True)
+        self.more.hide()
+        lay.addWidget(self.more)
+        for bar in (self.code.verticalScrollBar(), self.code.horizontalScrollBar()):
+            bar.rangeChanged.connect(self._tell_more)    # also when the user makes the panel smaller
         row = QtWidgets.QHBoxLayout()
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.setToolTip("Run exactly this, one time (Enter)")
@@ -152,7 +160,8 @@ class ApprovalCard(QtWidgets.QFrame):
         self.all_btn.setToolTip("Run this and the next steps of this request without a question. "
                                 "Your next message asks again.")
         lay.addWidget(self.all_btn)
-        self.hint = QtWidgets.QLabel("<small>Nothing runs before you press Run. Enter runs it, Esc skips it.</small>")
+        self.hint = QtWidgets.QLabel("<small>Nothing runs before you press Run. After a click on the code, "
+                                     "Enter runs it and Esc skips it.</small>")
         self.hint.setWordWrap(True)
         self.hint.setEnabled(False)      # greyed like a hint, in the theme's own colour
         lay.addWidget(self.hint)
@@ -174,6 +183,16 @@ class ApprovalCard(QtWidgets.QFrame):
         self.code.setFixedHeight(rows * self.code.fontMetrics().lineSpacing() + 26)
         self._since = time.monotonic()
         self.show()
+        self._tell_more()                # two texts with the same scroll ranges send no signal
+
+    def _tell_more(self, *_range):
+        """Say in words when the view shows only a part of the text. A scroll bar alone is
+        easy to miss, and macOS hides it until the user scrolls."""
+        cut = self.code.verticalScrollBar().maximum() > 0 or self.code.horizontalScrollBar().maximum() > 0
+        lines = self.code.blockCount()
+        self.more.setText("<b>%d %s. Only a part is in view: scroll to read all of it.</b>"
+                          % (lines, "line" if lines == 1 else "lines") if cut else "")
+        self.more.setVisible(cut)
 
     def shown_text(self):
         return self.code.toPlainText()
@@ -185,8 +204,8 @@ class ApprovalCard(QtWidgets.QFrame):
     def _key(self, event, button=None):
         if not self._ours(event):
             return False
-        if time.monotonic() - self._since < self.KEY_DELAY:
-            return True                  # too early: the key is dropped
+        if event.isAutoRepeat() or time.monotonic() - self._since < self.KEY_DELAY:
+            return True                  # too early, or a key that is held down: dropped
         if event.key() == QtCore.Qt.Key_Escape:
             self.answered.emit("skip")
         elif button is not None:

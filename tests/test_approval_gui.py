@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -63,10 +64,10 @@ def check(name, ok, detail=""):
 class Client:
     """One tools/call to the bridge, sent from its own thread, as Claude Code would send it."""
 
-    def __init__(self, url, token, name, args):
+    def __init__(self, url, token, name, args, ident=1):
         self.status, self.body, self.error, self.seconds = None, None, None, 0.0
         self.url, self.token = url, token
-        self.message = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        self.message = {"jsonrpc": "2.0", "id": ident, "method": "tools/call",
                         "params": {"name": name, "arguments": args}}
         self.thread = threading.Thread(target=self._send, daemon=True)
         self.thread.start()
@@ -96,6 +97,36 @@ class Client:
             return self.body["result"]["content"][0]["text"]
         except (TypeError, KeyError, IndexError):
             return "status %s, body %s, error %r" % (self.status, self.body, self.error)
+
+
+def _port(url):
+    return int(re.search(r":(\d+)/", url).group(1))
+
+
+def call_and_keep(url, token, name, args, ident=1):
+    """Send one tools/call and give the open connection back. The test closes it without
+    reading the answer: a Claude Code that gave the call up."""
+    body = json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+                       "params": {"name": name, "arguments": args}}).encode("utf-8")
+    sock = socket.create_connection(("127.0.0.1", _port(url)), timeout=10)
+    sock.sendall(("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nAuthorization: Bearer %s\r\n"
+                  "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                  % (_port(url), token, len(body))).encode("ascii") + body)
+    return sock
+
+
+def cancel(url, token, ident):
+    """notifications/cancelled for a request, as the MCP client of Claude Code sends it. The HTTP status."""
+    conn = http.client.HTTPConnection("127.0.0.1", _port(url), timeout=10)
+    try:
+        conn.request("POST", "/mcp", json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                                 "params": {"requestId": ident, "reason": "timeout"}}).encode("utf-8"),
+                     {"Content-Type": "application/json", "Authorization": "Bearer " + token})
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status
+    finally:
+        conn.close()
 
 
 def main():
@@ -336,6 +367,82 @@ def main():
               (0.4, card.run_btn.click))
     done = send("key test 4")
     check("another key does nothing", done and early[-1] is True and codes[n_codes:] == ["k4 = 4"])
+    # A key that is held down repeats. The second step of a request opens a moment after the
+    # Run of the first one: the Enter that is still down must not answer it.
+    card.KEY_DELAY = 0.0
+    srv.add(call("run_python", {"code": "k5 = 5"}, "c11"), answer("ok"))
+    n_codes = len(codes)
+    held = lambda: QtWidgets.QApplication.sendEvent(card.code, QtGui.QKeyEvent(
+        QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier, "\r", True))
+    user.will((0.2, held), (0.25, held), (0.3, lambda: early.append((pan.asking(), len(codes) - n_codes))),
+              (0.4, key(card.code, QtCore.Qt.Key_Return)))
+    done = send("key test 5")
+    check("an Enter that is held down (key repeat) does not answer; a new press does",
+          done and early[-1] == (True, 0) and codes[n_codes:] == ["k5 = 5"], str(early[-1:]) + str(codes[n_codes:]))
+
+    # The card does not take the keyboard. After Send the focus is in the empty message box,
+    # and the user can type the next message with the eyes on the keyboard: those keys go into
+    # the box (not to FreeCAD's shortcuts), and the Enter at their end answers nothing.
+    import FreeCADGui as Gui
+    app, window = QtWidgets.QApplication.instance(), Gui.getMainWindow()
+    for _ in range(20):
+        window.activateWindow()
+        pan.input.setFocus()
+        spin(100)
+        if app.focusWidget() is pan.input:
+            break
+    in_box = app.focusWidget() is pan.input
+    if not in_box:
+        say("   (this platform gave the message box no focus: only 'the card takes none' is checked)")
+
+    def press(which, text):
+        widget = app.focusWidget() or pan.input
+        for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+            app.sendEvent(widget, QtGui.QKeyEvent(kind, which, QtCore.Qt.NoModifier, text))
+
+    def in_card():
+        return card.hasFocus() or any(w.hasFocus() for w in card.findChildren(QtWidgets.QWidget))
+    typed = {}
+
+    def type_on():
+        typed["focus"] = (in_card(), app.focusWidget() is pan.input)
+        press(QtCore.Qt.Key_M, "m")
+        press(QtCore.Qt.Key_Return, "\r")
+        spin(50)
+        typed["after"] = (pan.asking(), len(codes) - n_codes, pan.input.toPlainText())
+    card.KEY_DELAY = 0.0                     # the delay is not what protects here
+    srv.add(call("run_python", {"code": "k6 = 6"}, "c12"), answer("ok"))
+    n, n_codes = len(srv.requests), len(codes)
+    user.will((0.5, type_on), (0.7, card.skip_btn.click))
+    pan.input.setPlainText("key test 6")
+    press(QtCore.Qt.Key_Return, "\r") if in_box else pan.send()     # Send with Enter: the box is empty, the focus in it
+    done = wait_for(idle, 40)
+    check("the card does not take the keyboard from the message box: a letter and Enter typed after it opened "
+          "run nothing and answer nothing" + (", and the letter is in the message box" if in_box else ""),
+          done and typed.get("focus") == (False, in_box) and typed.get("after", ())[:2] == (True, 0)
+          and (not in_box or typed["after"][2] == "m") and len(codes) == n_codes
+          and tool_results(n) == [approval.DECLINED], str(typed))
+    pan.input.clear()
+    card.KEY_DELAY = 0.4
+
+    # A text that the view cuts: the card says so in words. A scroll bar alone is easy to
+    # miss (macOS hides it), and the part that is out of view runs too.
+    notes = []
+    note = lambda: notes.append(card.more.text() if card.more.isVisible() else None)
+    long_code = "\n".join("v%d = %d" % (i, i) for i in range(52))
+    wide_code = "w = 1" + " " * 300 + "; w2 = 2"
+    for text in (long_code, wide_code, "s = 1\ns = 2\ns = 3"):
+        srv.add(call("run_python", {"code": text}, "m%d" % len(notes)), answer("ok"))
+        user.will((0.3, note), (0.35, card.run_btn.click))
+        send("long text %d" % len(notes))
+    check("code that is longer than the view: the card says how many lines it has and that only a part is in view",
+          len(notes) == 3 and notes[0] is not None and "52 lines." in notes[0] and "scroll" in notes[0]
+          and codes[-3] == long_code, repr(notes))
+    check("one line that is wider than the view (300 spaces, then more code): the card says so too",
+          len(notes) == 3 and notes[1] is not None and "1 line." in notes[1] and "scroll" in notes[1]
+          and codes[-2] == wide_code, repr(notes))
+    check("code that is all in view has no such note", len(notes) == 3 and notes[2] is None, repr(notes))
+
     check("a text with characters that do not show is marked",
           ask_ui.hidden_characters("x = 1 ‮# hidden") and ask_ui.hidden_characters("a​b")
           and not ask_ui.hidden_characters(code) and not ask_ui.hidden_characters("a\tb\n"))
@@ -634,6 +741,65 @@ def main():
           c.text() == approval.DECLINED
           and user.seen[-1]["text"] == "Make drawing: sheet A3, object FromClaude → drawings/FromClaude-A3.pdf"
           and user.seen[-1]["title"] == "Claude wants to make a drawing:", str(user.seen[-1]))
+
+    # Claude Code gives a tool call up (its own time limit, a lost connection) while the card
+    # waits. Nobody takes the result any more, and the model can send the same call again.
+    # (A question that is open keeps this script inside its wait: the user's timer does the work.)
+    not_waited = ("note", panel.NOT_WAITED % "Claude")
+    late_code = "doc.addObject('Part::Box', 'LateBox')"
+    n_codes, n_seen, n_notes = len(codes), len(user.seen), pan.entries.count(not_waited)
+    sock = call_and_keep(url, token, "run_python", {"code": late_code})
+    user.will((0.5, sock.close))
+    closed = wait_for(lambda: len(user.seen) > n_seen and not pan.asking() and card.isHidden(), 20)
+    check("the client of a tool call goes away while its question waits: the question closes by itself, "
+          "nothing runs, the chat says that the step was not run, and Claude Code still works",
+          closed and len(user.seen) == n_seen + 1 and user.seen[-1]["text"] == late_code and len(codes) == n_codes
+          and "LateBox" not in objects() and pan.entries.count(not_waited) == n_notes + 1
+          and pan.send_btn.text() == "Stop" and pan.status.text() == "Claude is working… (run_python)",
+          f"{closed} {pan.entries[-2:]} {pan.status.text()!r}")
+    user.will((0.3, card.run_btn.click))
+    c = Client(url, token, "run_python", {"code": late_code})
+    wait_for(c.done, 30)
+    spin(300)
+    check("... the same call sent again asks one time and runs one time",
+          c.status == 200 and len(user.seen) == n_seen + 2 and codes[n_codes:] == [late_code]
+          and [o for o in objects() if o.startswith("LateBox")] == ["LateBox"] and not pan.asking(),
+          f"{c.text()[:200]} {codes[n_codes:]} {objects()}")
+    n_codes, n_seen = len(codes), len(user.seen)
+    behind = []
+    user.will((0.3, lambda: behind.append(call_and_keep(
+                  url, token, "run_python", {"code": "doc.addObject('Part::Box', 'NobodyWaits')"}, 2))),
+              (0.7, lambda: behind[0].close()),        # this one waits behind the card of the first call
+              (1.2, card.run_btn.click))
+    first = Client(url, token, "run_python", {"code": "doc.addObject('Part::Box', 'FirstOfTwo')"})
+    wait_for(first.done, 30)
+    spin(600)
+    check("a call that waits behind the card of another one, and whose client goes away: no card for it "
+          "afterwards, and its code does not run",
+          first.status == 200 and codes[n_codes:] == ["doc.addObject('Part::Box', 'FirstOfTwo')"]
+          and len(user.seen) == n_seen + 1 and "NobodyWaits" not in objects() and not pan.asking(),
+          f"{codes[n_codes:]} {len(user.seen) - n_seen} {objects()}")
+    n_codes, n_seen, n_notes = len(codes), len(user.seen), pan.entries.count(not_waited)
+    got = {}
+    user.will((0.3, lambda: got.update(other=cancel(url, token, 99))),
+              (0.6, lambda: got.update(still=pan.asking())),
+              (0.7, lambda: got.update(status=cancel(url, token, 7))))
+    c = Client(url, token, "run_python", {"code": "doc.addObject('Part::Box', 'Cancelled')"}, ident=7)
+    wait_for(lambda: c.done() and not pan.asking(), 30)
+    spin(200)
+    check("Claude Code cancels the call and keeps its connection open (notifications/cancelled): the same. "
+          "A cancel for another request changes nothing",
+          got == {"other": 202, "still": True, "status": 202} and c.text() == bridge.GONE and card.isHidden()
+          and len(user.seen) == n_seen + 1 and len(codes) == n_codes and "Cancelled" not in objects()
+          and pan.entries.count(not_waited) == n_notes + 1 and pan.send_btn.text() == "Stop",
+          f"{got} {c.text()[:200]}")
+    user.will((0.3, card.run_btn.click))
+    c = Client(url, token, "run_python", {"code": "after_cancel = 7"}, ident=7)
+    wait_for(c.done, 30)
+    check("... a new call with the same id is asked for and runs: the old cancel does not count for it",
+          c.status == 200 and codes[n_codes:] == ["after_cancel = 7"] and c.text() != bridge.GONE, c.text()[:200])
+
+    n_codes = len(codes)
     user.will((0.3, pan.send_btn.click))     # Stop while the question for Claude Code waits
     c = Client(url, token, "run_python", {"code": "doc.addObject('Part::Box', 'AfterStop')"})
     wait_for(lambda: c.done() and idle(), 30)
@@ -647,6 +813,36 @@ def main():
     check("... and a call that comes in after Stop, with the right token, runs nothing and asks nobody",
           "Late" not in objects() and not pan.asking() and (late.error is not None or late.text() == bridge.GONE),
           late.text()[:200])
+
+
+    # New chat while a question of Claude Code waits: the old request ends, as for a local model
+    newchat = [b for b in pan.findChildren(QtWidgets.QToolButton) if b.text() == "New chat"][0]
+    projects.set_session(pan.project, "session-of-the-old-chat")
+    n = len(claude_calls())
+    pan.send("slow: think for a minute more")
+    wait_for(lambda: bridge.running() and [c for c in claude_calls()[n:] if c["stdin"].startswith("slow")], 20)
+    url, token = bridge._server.url, bridge.token()
+    at_work = pan.send_btn.text() == "Stop" and pan.run.running()
+    n_codes = len(codes)
+    user.will((0.3, newchat.click))
+    c = Client(url, token, "run_python", {"code": "doc.addObject('Part::Box', 'OldChat')"})
+    wait_for(lambda: c.done() and idle(), 30)
+    spin(300)
+    check("New chat while a question for Claude Code waits: Claude Code is stopped, nothing runs, the status "
+          "line is empty and the chat is the new one",
+          at_work and c.done() and idle() and not pan.run.running() and card.isHidden() and not pan.asking()
+          and pan.status.text() == "" and pan.entries == [("note", "New conversation.")]
+          and len(codes) == n_codes and "OldChat" not in objects()
+          and projects.get_session(pan.project) is None,
+          f"{at_work} {c.text()[:120]} {pan.status.text()!r} {pan.entries} {projects.get_session(pan.project)}")
+    again = Client(url, token, "run_python", {"code": "doc.addObject('Part::Box', 'OldChatAgain')"})
+    wait_for(again.done, 20)
+    spin(300)
+    check("... a later step of the old conversation opens no card in the new chat, and the old conversation "
+          "is not written back",
+          not pan.asking() and "OldChatAgain" not in objects() and pan.entries == [("note", "New conversation.")]
+          and (again.error is not None or again.text() == bridge.GONE)
+          and projects.get_session(pan.project) is None, again.text()[:200])
 
     check("the user was asked no question about a service in all of this", not questions, str(questions))
     check("every question had its answer planned", not user.lost and not user.plan, f"{user.lost} {len(user.plan)}")

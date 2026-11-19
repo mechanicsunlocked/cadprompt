@@ -912,6 +912,10 @@ class AnthropicErrors(AnthropicBase):
     def test_no_connection_on_a_network_with_a_proxy_says_that_the_two_ways_were_tried(self):
         https = "https://127.0.0.1:%d" % self.dead_port()
         proxy = {"https_proxy": "http://127.0.0.1:%d" % self.dead_port()}
+        # the address stands for Anthropic, a service on another computer (one on this computer has no proxy)
+        far = mock.patch.object(local_agent.consent, "on_this_computer", return_value=False)
+        far.start()
+        self.addCleanup(far.stop)
         self.assertTrue(self.no_connection(https, proxy).endswith(local_agent.PROXY))
         self.assertIn("tried the proxy and then a direct connection", local_agent.PROXY)
         # no proxy in the settings, an exception for this address, a local http server: no such hint
@@ -1354,6 +1358,11 @@ class ThroughAProxy(unittest.TestCase):
         self.service = fake_proxy.Service()
         self.addCleanup(self.service.close)
         self.context = fake_proxy.client_context()
+        # The pretend service is on 127.0.0.1 and stands for a service on another computer.
+        # A server that really is on this computer never goes through a proxy: see the last test.
+        self.far = mock.patch.object(local_agent.consent, "on_this_computer", return_value=False)
+        self.far.start()
+        self.addCleanup(mock.patch.stopall)
 
     def proxy(self, mode="pass"):
         proxy = fake_proxy.Proxy(mode)
@@ -1435,6 +1444,24 @@ class ThroughAProxy(unittest.TestCase):
         with mock.patch.dict(os.environ, dict(clean, https_proxy=proxy.url, http_proxy=proxy.url), clear=True):
             self.assertEqual(local_agent.proxy_for(self.service.url), ("127.0.0.1", proxy.port, {}))
             self.assertIsNone(local_agent.proxy_for("http://example.invalid:1234/v1"))   # http: never
+
+    def test_a_server_on_this_computer_is_never_asked_for_through_the_proxy(self):
+        # consent.needs_none() asks no question for such a server and the user reads "nothing
+        # leaves the computer": so the proxy must not get its address or the login of the setting
+        self.far.stop()
+        proxy = self.proxy()
+        setting = "http://user:secret@127.0.0.1:%d" % proxy.port
+        self.assertEqual(self.get(setting)[0], 200)                      # https://127.0.0.1:<port>
+        self.assertEqual(self.get(setting, "https://localhost:%d" % self.service.port)[0], 200)
+        names = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        clean = {k: v for k, v in os.environ.items() if k.lower() not in names}
+        with mock.patch.dict(os.environ, dict(clean, https_proxy=setting), clear=True):
+            for address in ("https://127.0.0.1:8443/v1", "https://localhost:8443/v1", "https://[::1]:8443/v1",
+                            "https://127.8.9.1/v1", "https://LocalHost./v1"):
+                self.assertIsNone(local_agent.proxy_for(address), address)
+                self.assertEqual(local_agent.proxy_note(address), "", address)
+            self.assertIsNotNone(local_agent.proxy_for("https://192.168.1.20:8443/v1"))   # another computer
+        self.assertEqual((proxy.requests, proxy.clear), ([], b""))
 
 
 class BrokenLine(Base):

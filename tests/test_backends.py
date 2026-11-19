@@ -175,7 +175,8 @@ def main():
         return stat.S_IMODE(os.stat(path).st_mode)
 
     for name, get, put in (("cadprompt_api_key", backends.api_key, backends.set_api_key),
-                           ("cadprompt_local_key", backends.local_key, backends.set_local_key)):
+                           ("cadprompt_local_key", backends.local_key, backends.set_local_key),
+                           ("cadprompt_endpoint_token", backends.endpoint_token, backends.set_endpoint_token)):
         path = os.path.join(data, name)
         check(f"{name}: no key at first", get() == "" and not os.path.exists(path))
         put("  made-up-key-" + name + "\n")
@@ -397,6 +398,60 @@ def main():
     check("the API key source says that the key is sent, the local one says so for its own key",
           "your API key" in texts["anthropic"] and "the key of this server, when you saved one" in texts["openai"])
 
+    # ---- an http:// address of another computer: the question says "not encrypted" ----
+    said = lambda kind, url: consent.NOT_ENCRYPTED in consent.question(kind, url)[1]
+    check("the question for an http:// server on another computer says that the connection is not encrypted, "
+          "and that other people on the network can read the key",
+          "not encrypted" in consent.NOT_ENCRYPTED and "the key" in consent.NOT_ENCRYPTED
+          and said("openai", lan) and said("openai", " HTTP://my-pc.local:1234/v1")
+          and said("custom", "http://10.0.0.5:4000"))
+    check("... not for https, not for this computer, not for Anthropic",
+          not said("openai", "https://192.168.1.20:1234/v1") and not said("openai", "http://127.0.0.1:1234/v1")
+          and not said("openai", "http://localhost:1234/v1") and not said("custom", "http://localhost:11434")
+          and not said("anthropic", backends.ANTHROPIC_URL) and not said("account", backends.ANTHROPIC_URL))
+    check("\"Find models\" is said as it is: it sends the key of the server",
+          "\"Find models\" sends only the key, when you saved one." in texts["openai"]
+          and "asks only for the list" not in texts["openai"])
+    secure, plain = "https://192.168.1.30:1234/v1", "http://192.168.1.30:1234/v1"
+    consent.asker = lambda kind, url: asked.append((kind, url)) or True
+    del asked[:]
+    check("a yes for https://host is no yes for http://host (the user was not told 'not encrypted'): asked again",
+          backends.may_contact("openai", secure) is True and consent.allowed("openai", secure)
+          and not consent.allowed("openai", plain) and backends.may_contact("openai", plain) is True
+          and asked == [("openai", secure), ("openai", plain)], str(asked))
+    check("... a yes for http://host counts for https://host too, and it is one record",
+          consent.allowed("openai", plain) and consent.allowed("openai", secure)
+          and backends.may_contact("openai", secure) is True and len(asked) == 2
+          and [r.get("clear") for r in consent.records() if r["host"] == "192.168.1.30"] == [True],
+          str(consent.records()))
+    consent.forget("openai", "192.168.1.30")
+    consent.asker = real_asker
+    table = [(("192.168.1.50:1234/v1", True), "https://192.168.1.50:1234/v1"),
+             (("192.168.1.50:1234/v1", False), "http://192.168.1.50:1234/v1"),
+             (("localhost:1234/v1", True), "http://localhost:1234/v1"),
+             (("[::1]:1234/v1", True), "http://[::1]:1234/v1"),
+             (("http://192.168.1.50:1234/v1", True), "http://192.168.1.50:1234/v1"),
+             (("https://x.example/v1", False), "https://x.example/v1"), (("", True), "")]
+    from cadprompt import local_agent
+    check("an address typed with no scheme: https with a key, http for this computer or with no key; the "
+          "engine and the consent question use the same rule",
+          [consent.with_scheme(*given) for given, _ in table] == [want for _, want in table]
+          and [local_agent.OpenAIWire(url, "m", "k" if key else "").url for (url, key), _ in table]
+          == [want for _, want in table], str([consent.with_scheme(*given) for given, _ in table]))
+    kept_key = backends.local_key()
+    p.SetString("LocalUrl", "192.168.1.50:1234/v1/")
+    backends.set_local_key("")
+    no_key = (backends.local_config()["url"], backends.service("local"), said(*backends.service("local")))
+    backends.set_local_key("BBB-made-up")
+    with_key = (backends.local_config()["url"], backends.service("local"), said(*backends.service("local")))
+    check("... so the question for an address typed with no scheme and no key names http:// and says "
+          "'not encrypted'; with a key it is https",
+          no_key == ("http://192.168.1.50:1234/v1", ("openai", "http://192.168.1.50:1234/v1"), True)
+          and with_key == ("https://192.168.1.50:1234/v1", ("openai", "https://192.168.1.50:1234/v1"), False),
+          f"{no_key} {with_key}")
+    backends.set_local_key(kept_key)
+    p.SetString("LocalUrl", "")
+
     # ---- the AI's code: no yes without the user ----
     check("a new profile does not run the AI's code without asking",
           approval.auto() is False and p.GetBool("AutoApprove", False) is False)
@@ -433,14 +488,29 @@ def main():
           backends.service() == ("account", backends.ANTHROPIC_URL) and backends.claude_env() ==
           ({}, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]), str(backends.claude_env()))
     p.SetString("BaseUrl", "http://localhost:11434")
-    p.SetString("AuthToken", "")
+    backends.set_endpoint_token("")
     p.SetString("Model", "")
     check("claude_env custom, no model, no token", backends.claude_env() ==
           ({"ANTHROPIC_BASE_URL": "http://localhost:11434", "ANTHROPIC_AUTH_TOKEN": "local"},
            ["ANTHROPIC_API_KEY"]), str(backends.claude_env()))
-    p.SetString("AuthToken", "tok")
+    p.SetString("AuthToken", "tok")          # a profile of the first versions: the token is in user.cfg
+    App.saveParameter()
+    user_cfg = os.path.join(App.getUserConfigDir(), "user.cfg")
+    was_there = ">tok<" in open(user_cfg, encoding="utf-8").read()
     p.SetString("Model", "qwen-not-used")
     add, drop = backends.claude_env()
+    token_file = os.path.join(App.getUserAppDataDir(), "cadprompt_endpoint_token")
+    check("the token of the first versions moves from user.cfg to its own file on the first read"
+          + (", mode 0600" if POSIX else ""),
+          was_there and p.GetString("AuthToken", "") == "" and backends.endpoint_token() == "tok"
+          and open(token_file, encoding="utf-8").read().strip() == "tok"
+          and ">tok<" not in open(user_cfg, encoding="utf-8").read()
+          and (not POSIX or stat.S_IMODE(os.stat(token_file).st_mode) == 0o600),
+          f"{was_there} {p.GetString('AuthToken', '')!r} {backends.endpoint_token()!r}")
+    p.SetString("AuthToken", "older")
+    backends.set_endpoint_token("tok")
+    check("a new token takes an old one out of user.cfg too",
+          p.GetString("AuthToken", "") == "" and backends.endpoint_token() == "tok")
     check("claude_env custom with model and token", drop == ["ANTHROPIC_API_KEY"] and add == {
         "ANTHROPIC_BASE_URL": "http://localhost:11434", "ANTHROPIC_AUTH_TOKEN": "tok",
         "ANTHROPIC_MODEL": "qwen-not-used", "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen-not-used",
@@ -480,6 +550,34 @@ def main():
     check("account process: a key handed in by the caller is removed too",
           not runner.claude_environment("/nowhere/bin/claude", {"ANTHROPIC_API_KEY": "x"}).contains(
               "ANTHROPIC_API_KEY"))
+    # ---- a provider switch of the shell must not send the data to another service ----
+    shell = {"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "CLAUDE_CODE_USE_FOUNDRY": "1",
+             "CLAUDE_CODE_USE_GATEWAY": "1", "CLAUDE_CODE_USE_MANTLE": "1",
+             "ANTHROPIC_BEDROCK_BASE_URL": "https://other.invalid", "ANTHROPIC_FOUNDRY_API_KEY": "made-up",
+             "ANTHROPIC_UNIX_SOCKET": "/nowhere/sock", "ANTHROPIC_CUSTOM_HEADERS": "X-Made-Up: 1",
+             "ANTHROPIC_PROFILE": "made-up", "CLAUDE_CODE_API_BASE_URL": "https://other.invalid"}
+    os.environ.update(shell, ANTHROPIC_MODEL="shell-model")
+
+    def left(source):
+        p.SetString("Backend", source)
+        pe = runner.claude_environment("/nowhere/bin/claude", bridge_env)
+        return sorted(k for k in shell if pe.contains(k)), pe
+    still, pe = left("account")
+    check("account process: no provider switch, endpoint, socket, key or header of the shell is left, "
+          "the model choice stays", still == [] and pe.value("ANTHROPIC_MODEL") == "shell-model", str(still))
+    still, pe = left("custom")
+    check("custom process: the same, and the endpoint and the token are those from Settings",
+          still == [] and pe.value("ANTHROPIC_BASE_URL") == "http://localhost:11434"
+          and pe.value("ANTHROPIC_AUTH_TOKEN") == "tok", str(still))
+    p.SetString("Backend", "account")
+    for k in list(shell) + ["ANTHROPIC_MODEL"]:
+        del os.environ[k]
+    check("the family rule: a provider switch and a key in any case, not a model choice, not other names",
+          all(backends._other_service(n) for n in ("claude_code_use_bedrock", "Anthropic_Vertex_Base_Url",
+                                                   "ANTHROPIC_AWS_API_KEY", "CLAUDE_CODE_API_BASE_URL"))
+          and not any(backends._other_service(n) for n in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                                                           "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                                                           "CADPROMPT_MCP_TOKEN", "PATH", "AWS_REGION")))
     # ---- a proxy of the user must not get the requests of Claude Code to the bridge ----
     # Claude Code sends them through HTTP_PROXY / HTTPS_PROXY unless NO_PROXY names 127.0.0.1.
     proxy_names = ("NO_PROXY", "no_proxy", "HTTP_PROXY")

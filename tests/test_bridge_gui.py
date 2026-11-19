@@ -364,6 +364,18 @@ def main():
     bridge.ensure(project, "account")
     c = tool("run_python", {"code": "x = 1"})
     check("the next request of the user works again", c.failed() is False and len(ran) == 1, c.text())
+    # the user takes the yes for Claude Code back (Settings > Privacy > Forget) while a request runs
+    from cadprompt import backends, consent
+    del ran[:]
+    consent.forget("account", consent.host_of(backends.ANTHROPIC_URL))
+    c = tool("run_python", {"code": "doc.addObject('Part::Box', 'AfterForget')"})
+    looked = tool("get_document_state")
+    check("without the user's yes to Claude Code no tool call runs, also when no panel stopped the request",
+          not ran and doc.getObject("AfterForget") is None and c.failed() is True and c.text() == bridge.GONE
+          and looked.text() == bridge.GONE, f"{c.text()} {looked.text()} {ran}")
+    user_yes.allow_claude_code()
+    c = tool("run_python", {"code": "x = 2"})
+    check("... and with the yes back it works again", c.failed() is False and len(ran) == 1, c.text())
 
     # ---- 6: the backup copy before the first change of a request -----------------
     say("--- 6 backup")

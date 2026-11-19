@@ -367,11 +367,13 @@ def main():
     text = q.get("text", "")
     sent = ("your messages", "the results of the AI's code, and descriptions of the document (object names, sizes)",
             "images that you attach to a message", "the text of reference files that the AI reads")
-    check("... the question says exactly what is sent, when, and that a proxy sees the name of the service",
+    check("... the question says exactly what is sent, when, that an http:// connection is not encrypted, and "
+          "that a proxy sees the name of the service",
           all("•  " + row in text for row in sent) and "the key of this server, when you saved one" in text
           and "This server is not on this computer." in text
           and "It is sent each time you send a message, and for each step of the AI." in text
-          and "\"Find models\" asks only for the list of models." in text
+          and "\"Find models\" sends only the key, when you saved one." in text
+          and ROOM.startswith("http://") and consent.NOT_ENCRYPTED in text
           and "A proxy of this computer, when its settings name one, sees the name of the service." in text
           and "CADprompt asks once for each service. Settings > Privacy takes your yes back." in text, text)
     check("... while the question was open nothing had left: no connection, not even the name was looked up",
@@ -390,7 +392,7 @@ def main():
           and room.connections == 1 and len(person.seen) == n_seen + 2, dlg.find_msg.text())
     check("... the yes is kept for this service: kind, host and the version of the list of data",
           consent.records() == [{"kind": "openai", "host": "pc-in-the-room.test", "data": consent.DATA_KINDS,
-                                 "when": today}], str(consent.records()))
+                                 "when": today, "clear": True}], str(consent.records()))
     row_text = lambda d: [w.text() for _k, _h, r, _b in d.privacy_rows for w in r.findChildren(QtWidgets.QLabel)]
     check("... and Settings > Privacy lists it at once, with a Forget button",
           [(k, h, b.text()) for k, h, _r, b in dlg.privacy_rows] == [("openai", "pc-in-the-room.test", "Forget")]
@@ -634,6 +636,54 @@ def main():
     spin(300)
     check("... the next message asks again, and Not now starts nothing",
           done and len(person.seen) == n_seen + 1 and len(claude_calls()) == n_claude and not bridge.running())
+    pan.input.clear()
+
+    # Forget while Claude Code works: the program sends data until it ends, so it is stopped
+    person.will("yes")
+    n_slow = len([c for c in claude_calls() if c["stdin"].startswith("slow")])
+    pan.send("slow: think for a minute")
+    wait_for(lambda: len([c for c in claude_calls() if c["stdin"].startswith("slow")]) > n_slow
+             and bridge.running(), 30)
+    at_work = pan.run.running() and bridge.running() and pan.send_btn.text() == "Stop"
+    seen = {}
+
+    def forget_at_work(d):
+        [b for k, _h, _r, b in d.privacy_rows if k == "account"][0].click()
+        seen["gate"] = bool(bridge._host._active)        # closed at once, before the program is gone
+        seen["ended"] = wait_for(lambda: not pan.run.running() and not bridge.running(), 15)
+        seen["note"] = pan.entries[-1]                   # OK shows the conversation again, without it
+    settings(forget_at_work)
+    check("Forget while Claude Code works on a request: no tool call runs any more at once, the program is "
+          "ended and the bridge stops listening while Settings is still open, and the chat says why",
+          at_work and seen.get("gate") is False and seen.get("ended") is True and idle()
+          and not [r for r in consent.records() if r["kind"] == "account"]
+          and seen.get("note") == ("note", panel.FORGOT), f"{at_work} {seen}")
+    pan.input.clear()
+
+    # the same, and the dialog is closed with Cancel: Forget is not a setting that Cancel takes back
+    person.will("yes")
+    n_slow = len([c for c in claude_calls() if c["stdin"].startswith("slow")])
+    pan.send("slow: think for a minute more")
+    wait_for(lambda: len([c for c in claude_calls() if c["stdin"].startswith("slow")]) > n_slow
+             and bridge.running(), 30)
+    at_work = pan.run.running() and bridge.running() and pan.send_btn.text() == "Stop"
+
+    def forget_and_cancel(d):
+        [b for k, _h, _r, b in d.privacy_rows if k == "account"][0].click()
+        d.reject()
+        return d.result()
+    SettingsDialog.exec = forget_and_cancel
+    try:
+        pan._settings()
+    finally:
+        del SettingsDialog.exec
+    gate = bool(bridge._host._active)
+    ended = wait_for(lambda: not pan.run.running() and not bridge.running(), 15)
+    check("Forget, then Cancel, while Claude Code works: the same: stopped, nothing listens, the chat says why "
+          "and the button says Send again",
+          at_work and gate is False and ended and idle() and pan.entries[-1] == ("note", panel.FORGOT)
+          and pan.status.text() == "" and not [r for r in consent.records() if r["kind"] == "account"],
+          f"{at_work} {gate} {ended} {pan.entries[-2:]}")
     pan.input.clear()
 
     p.SetString("Backend", "custom")         # BaseUrl is http://localhost:11434

@@ -25,7 +25,6 @@ only in memory during one request and are never stored.
 
 import base64
 import http.client
-import ipaddress
 import json
 import re
 import socket
@@ -33,7 +32,7 @@ import threading
 import urllib.parse
 import urllib.request
 
-from . import main_thread
+from . import consent, main_thread
 
 MARK = "\n... (shortened, %d characters in total)"
 
@@ -120,10 +119,13 @@ def proxy_for(address):
     sent through a proxy: there the proxy could read everything.
     The settings are those of the system (environment variables, Windows
     internet options, macOS network settings), as for every other program.
+    A server on this computer is never asked for through a proxy, whatever
+    the settings say: no question is asked for it (consent.needs_none), and
+    the user reads that nothing leaves the computer.
     """
     try:
         u = urllib.parse.urlsplit(address)
-        if u.scheme != "https" or not u.hostname:
+        if u.scheme != "https" or not u.hostname or consent.on_this_computer(address):
             return None
         setting = urllib.request.getproxies().get("https")
         if not setting or urllib.request.proxy_bypass(u.netloc):
@@ -375,15 +377,8 @@ class OpenAIWire:
 
     def __init__(self, url, model, key):
         self.key = key
-        url = (url or "").strip().rstrip("/")
-        if url and "://" not in url:
-            # no scheme typed: a key must never go out in clear text, so only this computer gets http
-            host = urllib.parse.urlsplit("//" + url).hostname or ""
-            try:
-                here = ipaddress.ip_address(host).is_loopback
-            except ValueError:
-                here = host == "localhost"
-            url = ("http://" if here or not key else "https://") + url
+        # no scheme typed: a key must never go out in clear text, so only this computer gets http
+        url = consent.with_scheme((url or "").strip().rstrip("/"), bool(key))
         self.url, self.model = url, model
         self.where = "the model server at %s" % url
         # request fields this server does not take; remembered for the next request to it

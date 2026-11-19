@@ -14,6 +14,7 @@ ask_approval(), which approval.request() calls for both engines. A new
 installation has no source: the panel shows three choices and contacts nothing.
 """
 
+import html
 import os
 
 import FreeCAD as App
@@ -27,8 +28,10 @@ NO_SOURCE = "Choose the AI that does the work first: press one of the three butt
 ASKS_FIRST = ("CADprompt did not start Claude Code yet, also not to see whether you are signed in. "
               "It asks you first, with your first message.")
 WAITING = "Waiting for you: Run or Skip."
+NOT_WAITED = "%s did not wait for your answer. This step was not run."
 AUTO_MARK = "runs without asking"
 AUTO_OFF = "From now on CADprompt asks before it runs the AI's code."
+FORGOT = "Claude was stopped: you took the permission for this service back."
 IMAGES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")   # references that can go with a message
 
 INSTALL_CLAUDE = {
@@ -68,12 +71,15 @@ class _Source(QtWidgets.QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.full = ""
+        self.setTextFormat(QtCore.Qt.PlainText)
         self.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
 
     def show_text(self, text):
+        # the name of a model comes from the list of a server: it is shown as plain text
         self.full = text
-        self.setToolTip("The AI that does the work: " + text + ". Change it in Settings.")
+        self.setToolTip("<qt>%s</qt>" % html.escape("The AI that does the work: " + text
+                                                    + ". Change it in Settings."))
         self._fit()
 
     def resizeEvent(self, e):
@@ -82,6 +88,35 @@ class _Source(QtWidgets.QLabel):
 
     def _fit(self):
         self.setText(self.fontMetrics().elidedText(self.full, QtCore.Qt.ElideRight, self.width()))
+
+
+class _View(QtWidgets.QTextBrowser):
+    """The chat. Its text comes from the AI and from files of the project, and Qt opens
+    every file that such a text names as an image, a background or a style sheet. On
+    Windows `file://host/share/x.png` is a login at that host. This view opens no file."""
+
+    NO_IMAGE = "(image not shown)"
+    _OBJECT = "\ufffc"         # the character that stands for an image in a Qt document
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._blank = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
+        self._blank.fill(0)
+
+    def loadResource(self, kind, url):
+        # never None: the document then opens the file itself
+        return self._blank
+
+    def setMarkdown(self, text):
+        super().setMarkdown(text)
+        # An image that stays is looked for again when it is painted, past loadResource
+        # (`x@2x.png` beside it, on a screen with a scale factor): it becomes words.
+        doc = self.document()
+        cur = doc.find(self._OBJECT)
+        while not cur.isNull():
+            if cur.charFormat().isImageFormat():
+                cur.insertText(self.NO_IMAGE, QtGui.QTextCharFormat())
+            cur = doc.find(self._OBJECT, cur)
 
 
 class Panel(QtWidgets.QWidget):
@@ -156,6 +191,15 @@ class Panel(QtWidgets.QWidget):
         user took the yes for Claude Code back (Settings > Privacy)."""
         if not self.run.running() and (self._closed or not backends.uses_claude_code() or not runner.allowed()):
             bridge.stop()
+
+    def _yes_taken_back(self):
+        """Forget in Settings > Privacy, while the dialog is still open. Claude Code is a
+        program of its own: it would send data until its request ends, so it is stopped now.
+        The built-in engine needs nothing here: it asks before its next request."""
+        if self.run.running() and not self._allowed(self._sent_to):
+            self._add("note", FORGOT)
+            self._stop()
+        self._bridge_idle()
 
     def _bridge_note(self, name, detail):
         """What the bridge did by itself for a request of Claude Code (the backup copy)."""
@@ -239,7 +283,7 @@ class Panel(QtWidgets.QWidget):
         self.chooser.hide()
         lay.addWidget(self.chooser)
 
-        self.view = QtWidgets.QTextBrowser()
+        self.view = _View()
         self.view.setOpenLinks(False)        # "show" and "hide" of a piece of code are links of ours
         self.view.anchorClicked.connect(self._on_link)
         lay.addWidget(self.view, 1)
@@ -275,6 +319,7 @@ class Panel(QtWidgets.QWidget):
 
         row = QtWidgets.QHBoxLayout()
         self.status = QtWidgets.QLabel("")
+        self.status.setTextFormat(QtCore.Qt.PlainText)     # it shows a tool name that the AI gave
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
         self.auto_btn = QtWidgets.QToolButton(text=AUTO_MARK)
@@ -613,12 +658,13 @@ class Panel(QtWidgets.QWidget):
 
     def _new_chat(self):
         if self.project:
-            self._end_question()      # a step of the old conversation that still waits
+            # The request of the old conversation ends, for every source: a step of it that
+            # still waits is not run, and a run that went on would ask again in the new chat
+            # and write the old conversation back when it ends.
+            self._stop()
             if backends.current() in backends.ENGINE:
                 # Claude Code keeps its own conversation: this one is the engine's file
                 try:
-                    if self.local_run is not None and self.local_run.running():
-                        self.local_run.stop()     # or it would write the old conversation back
                     self._local_engine().clear(self.project)
                 except Exception as e:
                     self._add("error", f"Could not start a new conversation: {e}")
@@ -646,6 +692,7 @@ class Panel(QtWidgets.QWidget):
         """Open Settings. `choose`: the source that the user picked in the chooser."""
         from .settings_dialog import SettingsDialog
         dlg = SettingsDialog(self)
+        dlg.forgot.connect(self._yes_taken_back)
         if choose:
             dlg.choose(choose)
         before = backends.service()
@@ -660,7 +707,9 @@ class Panel(QtWidgets.QWidget):
                 if self._consent(backends.current()) and backends.uses_claude_code():
                     self.check_setup()
         else:
-            self._bridge_idle()       # Forget works at once, also with Cancel
+            # Forget works at once, also with Cancel: _yes_taken_back stopped a request of
+            # Claude Code that was running when the button was pressed
+            self._bridge_idle()
 
     def _choose(self, name):
         self._settings(choose=name)
@@ -707,6 +756,11 @@ class Panel(QtWidgets.QWidget):
         if self.asking():
             self._approval = "stop"
 
+    def withdraw(self):
+        """approval.withdraw(): the AI does not wait for the answer to its step any more."""
+        if self.asking():
+            self._approval = "gone"
+
     def ask_approval(self, tool_name, args, source):
         """Show a step of the AI and wait for the user. True: it may run, as it was shown.
 
@@ -730,8 +784,9 @@ class Panel(QtWidgets.QWidget):
         if isinstance(dock, QtWidgets.QDockWidget) and not self.isVisible():
             dock.show()                      # closed or behind another tab while the AI worked:
             dock.raise_()                    # a question nobody sees would wait for ever
-        if self.input.hasFocus() and not self.input.toPlainText().strip():
-            self.card.setFocus()             # Enter and Esc work at once; never while the user types
+        # The focus stays where it is. After Send it is in the empty message box, and the
+        # user can start the next message without a look at the screen: those keys, and
+        # the Enter at their end, must not answer the question.
         self.status.setText(WAITING)
         in_time = ask_ui.wait_until(lambda: alive["dead"] or self._approval != "")
         if alive["dead"]:
@@ -748,6 +803,9 @@ class Panel(QtWidgets.QWidget):
             return False
         if self._running():
             self.status.setText(f"{self._who(start=True)} is working… ({tool_name})")
+        if choice == "gone":
+            self._add("note", NOT_WAITED % self._who(start=True))
+            return False
         if choice == "skip":
             self._add("skipped", text)
             return False

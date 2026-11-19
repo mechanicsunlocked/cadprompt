@@ -296,15 +296,20 @@ def main():
     dlg.model_override.setText("sonnet")
     dlg.url.setText("http://localhost:11434")
     dlg.model.setText("endpoint-model")
-    dlg.token.setText("endpoint-token")
+    dlg.token.setText("endpoint-token-made-up")
     dlg._save()
     check("OK saves the source and the local server", (p.GetString("Backend"), p.GetString("LocalUrl"),
           p.GetString("LocalModel")) == ("local", "http://127.0.0.1:1/v1", "some-model"))
     check("OK saves the model for the API key", p.GetString("ApiModel") == "claude-haiku-5-5"
           and backends.engine_config("apikey")["model"] == "claude-haiku-5-5")
     check("OK saves the old fields too", (p.GetBool("AllowWeb"), p.GetString("ModelOverride"),
-          p.GetString("BaseUrl"), p.GetString("Model"), p.GetString("AuthToken"), p.GetString("claudePath"))
-          == (True, "sonnet", "http://localhost:11434", "endpoint-model", "endpoint-token", fake_claude))
+          p.GetString("BaseUrl"), p.GetString("Model"), backends.endpoint_token(), p.GetString("claudePath"))
+          == (True, "sonnet", "http://localhost:11434", "endpoint-model", "endpoint-token-made-up", fake_claude))
+    token_file = os.path.join(App.getUserAppDataDir(), "cadprompt_endpoint_token")
+    check("OK saves the endpoint token in its own file, not in FreeCAD's parameters"
+          + (", mode 0600" if os.name == "posix" else ""),
+          os.path.isfile(token_file) and p.GetString("AuthToken", "") == ""
+          and (os.name != "posix" or stat.S_IMODE(os.stat(token_file).st_mode) == 0o600))
     key_file = os.path.join(App.getUserAppDataDir(), "cadprompt_api_key")
     check("OK saves both keys in their own files" + (", mode 0600" if os.name == "posix" else ""),
           backends.api_key() == "sk-ant-made-up-1" and backends.local_key() == "made-up-local-key"
@@ -500,7 +505,13 @@ def main():
     plain = dlg.api_find_msg.text()
     os.environ["https_proxy"] = "http://127.0.0.1:1"
     backends.ANTHROPIC_URL = "https://127.0.0.1:1"
+    # the address stands for Anthropic, a service on another computer: one on this computer
+    # is never asked for through a proxy (test_local_agent.py), and needs the user's yes
+    user_yes.allow("anthropic", backends.ANTHROPIC_URL)
+    here, consent.on_this_computer = consent.on_this_computer, lambda url: False
     find_api(dlg)
+    consent.on_this_computer = here
+    consent.forget("anthropic", "127.0.0.1")
     check("API key: no connection on a computer with a proxy says that the proxy and the direct way were tried",
           dlg.api_find_msg.text().startswith("No answer from Anthropic.")
           and dlg.api_find_msg.text().endswith("CADprompt tried the proxy and then a direct connection, and "
@@ -626,6 +637,57 @@ def main():
     check("local: the Claude Code session file is not touched", projects.get_session(project) == "claude-session-keep")
     shown = pan.view.toPlainText()
     check("local: the view shows the conversation", "make a box 10 x 20 x 30" in shown and "A box 10 x 20 x 30 mm." in shown)
+
+    # The text of the AI and of a stored conversation can name files as images. Qt would open
+    # each of them when it shows the text, and on Windows file://host/share/x.png is a login at
+    # that host: the view opens no file. (That nothing is opened can only be measured with a
+    # tool of the system; this checks what the view does with such a text.)
+    png = os.path.join(project, "refs", "probe.png")
+    picture = QtGui.QImage(41, 19, QtGui.QImage.Format_RGB32)
+    picture.fill(0)
+    saved_png = picture.save(png, "PNG")
+    here = QtCore.QUrl.fromLocalFile(png)
+    kept_entries = list(pan.entries)
+    stub.past[project] = [
+        ("user", "show me"),
+        ("claude", "Done. ![x](%s) and ![y](file://fileserver.example/share/y.png)\n\n"
+                   "<table background=\"file://fileserver.example/share/bg.png\"><tr><td>cell</td></tr></table>\n\n"
+                   "![z][ref]\n\n[ref]: <//fileserver.example/share/z.png>" % here.toString()),
+        ("tool", "`run_python` <img src=\"file://fileserver.example/share/t.png\">")]
+    pan.entries = pan.entries[:1]
+    pan._load_history()
+    spin(100)
+    shown = pan.view.toPlainText()
+    doc = pan.view.document()
+    images, cur = 0, doc.find("\ufffc")
+    while not cur.isNull():
+        images += 1
+        cur = doc.find("\ufffc", cur)
+    blank = pan.view.loadResource(2, here)       # 2: QTextDocument.ImageResource
+    stored = doc.resource(2, here)
+    check("the chat shows no image that a text names (a stored conversation, an answer, a tool line): "
+          "words stand in its place, and no image is left in the view",
+          saved_png and ("claude", stub.past[project][1][1]) in pan.entries
+          and images == 0 and "\ufffc" not in shown and shown.count(panel._View.NO_IMAGE) >= 3
+          and "Done. %s and %s" % ((panel._View.NO_IMAGE,) * 2) in shown and "cell" in shown,
+          f"{images} {shown!r}")
+    check("... the view answers every request for a file with its own empty picture, never with the file",
+          isinstance(pan.view, panel._View) and isinstance(blank, QtGui.QImage)
+          and (blank.width(), blank.height()) == (1, 1)
+          and (stored is None or not hasattr(stored, "width") or stored.width() <= 1), f"{blank!r} {stored!r}")
+    pan._on_tool('<img src="file://fileserver.example/share/s.png">', "")
+    pan.source.show_text('<img src="file://fileserver.example/share/m.png"> & more')
+    check("... a tool name and a model name are shown as plain text in the status line and beside the mode "
+          "buttons, also in the tooltip",
+          pan.status.textFormat() == QtCore.Qt.PlainText and "<img" in pan.status.text()
+          and pan.source.textFormat() == QtCore.Qt.PlainText
+          and "<img" not in pan.source.toolTip() and "&lt;img" in pan.source.toolTip(), pan.source.toolTip())
+    del stub.past[project]
+    os.remove(png)
+    pan.entries = kept_entries
+    pan._render()
+    pan._busy(False)
+    pan._show_source()
 
     stub.replay[:] = [("finished", {"is_error": False, "result": "ok", "session_id": "from-a-broken-engine"})]
     pan.send("again")
@@ -960,7 +1022,7 @@ def main():
     args, pe = send_recorded("custom", "make a pin")
     check("custom: goes to ClaudeRun.start with the endpoint from Settings and no API key",
           args is not None and pe.value("ANTHROPIC_BASE_URL") == "http://localhost:11434"
-          and pe.value("ANTHROPIC_AUTH_TOKEN") == "endpoint-token" and pe.value("ANTHROPIC_MODEL") == "endpoint-model"
+          and pe.value("ANTHROPIC_AUTH_TOKEN") == "endpoint-token-made-up" and pe.value("ANTHROPIC_MODEL") == "endpoint-model"
           and not pe.contains("ANTHROPIC_API_KEY"))
     check("custom: the old backend_env() still answers", runner.backend_env().get("ANTHROPIC_MODEL") == "endpoint-model")
     check("custom: the bridge is asked with the source 'custom'", bridge_calls[-1] == (project, "custom"),
@@ -1247,6 +1309,66 @@ def main():
         check("... the file of the project is left as it is, and the panel has no note about it",
               f.read() == theirs and not kinds(pan, "setup-note")
               and not os.path.exists(os.path.join(foreign, ".mcp.json.old")), str(kinds(pan, "setup-note")))
+    check("... no \"trust this folder\" answer that Claude Code stored counts for a project of the panel",
+          rec["env"].get(runner.NO_STORED_TRUST) == "1", str(sorted(rec["env"])))
+    # hooks: commands that Claude Code would run by itself. The panel does not start it there.
+    check("a project from the template has no hooks", runner.project_hooks(foreign) == []
+          and runner.project_hooks(project) == [], str(runner.project_hooks(foreign)))
+    their_settings = os.path.join(foreign, ".claude", "settings.json")
+    with open(their_settings, encoding="utf-8") as f:
+        plain = f.read()
+    hooked = json.loads(plain)
+    hooked["hooks"] = {"SessionStart": [{"hooks": [{"type": "command", "command": "their-program"}]}],
+                       "PreToolUse": [{"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "say-yes"}]}]}
+    hooked["permissions"]["allow"] = ["Write", "Edit"]
+
+    def with_hooks(rel, text):
+        """True when the panel did not start Claude Code for a project with this file, and said why."""
+        path = os.path.join(foreign, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        before = None
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                before = f.read()
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        try:
+            pan._select("from-a-teacher", open_model=False)
+            p.SetString("Backend", "account")
+            pan.check_setup()
+            spin(300)
+            n = len([c for c in claude_calls() if c["argv"][:1] == ["-p"]])
+            pan.send("make a box")
+            wait_for(lambda: pan.send_btn.text() == "Send", 15)
+            spin(500)
+            said = [t for t in kinds(pan, "error") if "hooks" in t and "`%s`" % rel in t]
+            started = len([c for c in claude_calls() if c["argv"][:1] == ["-p"]]) - n
+            return runner.project_hooks(foreign) == [rel] and started == 0 and len(said) == 1 \
+                and pan.status.text() == "" and not pan.run.running(), (runner.project_hooks(foreign), started,
+                                                                         kinds(pan, "error"))
+        finally:
+            if before is None:
+                os.remove(path)
+            else:
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(before)
+    for rel, text in ((".claude/settings.json", json.dumps(hooked)),
+                      (".claude/settings.local.json", json.dumps({"hooks": hooked["hooks"]})),
+                      (".claude/settings.local.json", '{"hooks": {"SessionStart": [,]}  // not JSON for Python'),
+                      (".claude/commands/build.md", "---\ndescription: build\nhooks:\n  PreToolUse:\n"
+                                                    "    - hooks:\n        - type: command\n"
+                                                    "          command: their-program\n---\nBuild it.\n"),
+                      (".claude/skills/x/SKILL.md", "---\r\nname: x\r\nhooks: {}\r\n---\r\n")):
+        ok, detail = with_hooks(rel, text)
+        check("a project with hooks in %s (commands that Claude Code runs by itself): Claude Code is not "
+              "started there, and the chat names the file" % rel, ok, str(detail)[:600])
+    note = os.path.join(foreign, ".claude", "commands", "note.md")
+    with open(note, "w", encoding="utf-8", newline="\n") as f:
+        f.write("---\ndescription: about hooks\n---\nWhat are\nhooks: commands.\n")
+    check("... a command file that only has the word in its text is no hook, and the project starts again",
+          runner.project_hooks(foreign) == [] and "hooks" not in plain
+          and run_fake("account", "what are hooks:")["stdin"] == "what are hooks:")
+    os.remove(note)
     pan._select("test-part", open_model=False)
 
     # a session id that Claude Code does not have any more (transcript deleted, other computer)

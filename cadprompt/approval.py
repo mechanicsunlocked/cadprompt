@@ -52,7 +52,8 @@ def shown(tool_name, args):
 
 
 def register(asker):
-    """A panel that can ask: asker.ask_approval(tool_name, args, source) -> bool, asker.asks() -> bool."""
+    """A panel that can ask: asker.ask_approval(tool_name, args, source) -> bool, asker.asks() -> bool,
+    asker.withdraw()."""
     if asker not in _askers:
         _askers.append(asker)
 
@@ -71,6 +72,14 @@ def _asker():
         except RuntimeError:     # Qt deleted the panel already
             continue
     return None
+
+
+def withdraw():
+    """The AI does not wait for the answer any more (Claude Code gave the tool call up):
+    the question that is open ends with a no, and the request goes on. Main thread."""
+    asker = _asker()
+    if asker is not None:
+        asker.withdraw()
 
 
 def request(tool_name, args, source):

@@ -234,6 +234,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 _Unreadable = object()               # a body that is not JSON: answered as a JSON-RPC error
 
 
+def _hung_up(conn):
+    """True when the other side closed this connection. Its one request was read, so
+    nothing more comes in: the end of the stream means that the client went away."""
+    try:
+        before = conn.gettimeout()
+        conn.settimeout(0)           # a look, never a wait
+        try:
+            return conn.recv(1, socket.MSG_PEEK) == b""
+        finally:
+            conn.settimeout(before)
+    except (BlockingIOError, InterruptedError):
+        return False                 # open, and nothing to read
+    except OSError:
+        return True                  # reset by the client, or closed by stop()
+
+
 def _error(ident, code, message):
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}
 
@@ -254,6 +270,8 @@ class Server:
         self._thread = None
         self._open = set()               # the connections of requests that are under way
         self._lock = threading.Lock()
+        self._mine = threading.local()   # of the request of this thread: conn, ident, cancelled
+        self._calls = {}                 # id of a tool call that is under way -> its Event "cancelled"
 
     # ---- life cycle ----------------------------------------------------------
     def start(self):
@@ -297,12 +315,32 @@ class Server:
             self._thread = None
 
     def _opened(self, conn):
+        self._mine.conn = conn
         with self._lock:
             self._open.add(conn)
 
     def _closed(self, conn):
         with self._lock:
             self._open.discard(conn)
+
+    def client_gone(self):
+        """True when nobody waits for the answer of this thread's tool call any more: the
+        client closed the connection, or it sent notifications/cancelled for the request.
+        For call_tool, while the tool waits (bridge.py). False in every other thread."""
+        mine = self._mine
+        cancelled, conn = getattr(mine, "cancelled", None), getattr(mine, "conn", None)
+        return (cancelled is not None and cancelled.is_set()) or (conn is not None and _hung_up(conn))
+
+    def _cancel(self, params):
+        """notifications/cancelled: the client gave a request up. Claude Code can keep the
+        connection of that request open, so this is the only word of it."""
+        ident = params.get("requestId") if isinstance(params, dict) else None
+        if not isinstance(ident, (str, int, float)) or isinstance(ident, bool):
+            return
+        with self._lock:
+            cancelled = self._calls.get(ident)
+        if cancelled is not None:        # only a call that is under way: the next client counts from 1 again
+            cancelled.set()
 
     # ---- who asks ------------------------------------------------------------
     def hosts(self):
@@ -340,10 +378,13 @@ class Server:
         if not isinstance(method, str):
             return _error(ident, INVALID_REQUEST, "Invalid request: the method is not a text")
         if "id" not in message:
-            return None                      # notifications/initialized, notifications/cancelled, ...
+            if method == "notifications/cancelled":
+                self._cancel(message.get("params"))
+            return None                      # notifications/initialized, ...
         if not isinstance(ident, (str, int, float)) or isinstance(ident, bool):
             return _error(None, INVALID_REQUEST, "Invalid request: the id is not a text or a number")
         params = message.get("params")
+        self._mine.ident = ident
         try:
             result = self._result(method, params if isinstance(params, dict) else {})
         except _RpcError as exc:
@@ -374,9 +415,17 @@ class Server:
             args = {}
         if not isinstance(args, dict):
             raise _RpcError(INVALID_PARAMS, "The arguments of %s must be an object" % name)
+        mine = self._mine
+        mine.cancelled = threading.Event()
+        with self._lock:
+            self._calls[mine.ident] = mine.cancelled
         try:
             out = self.call_tool(name, args)
         except Exception as exc:             # the model must get a text that it can act on
             out = ([text_item("ERROR in tool %s: %s: %s" % (name, exc.__class__.__name__, exc))], True)
+        finally:
+            with self._lock:
+                if self._calls.get(mine.ident) is mine.cancelled:
+                    del self._calls[mine.ident]
         items, failed = out if isinstance(out, tuple) else ([text_item(out)], False)
         return {"content": list(items), "isError": bool(failed)}
