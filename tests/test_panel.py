@@ -703,6 +703,9 @@ def main():
           pan.status.text() == "The local model is working… (run_python)")
     check("local: a failed tool: 'the local model is looking at why'",
           kinds(pan, "error")[-1] == "`run_python` failed, the local model is looking at why", str(kinds(pan, "error")))
+    pan.local_run.tool_done.emit("run_python")
+    check("local: the result went back: the status says that the model thinks, not the tool name: " + pan.status.text(),
+          pan.status.text() == "The local model is thinking…")
     n_err = len(kinds(pan, "error"))
     pan.send_btn.click()                     # Stop
     spin(50)
@@ -1040,6 +1043,14 @@ def main():
     check("account: tool status and tool error name Claude",
           pan.status.text() == "Claude is working… (run_python)"
           and pan.entries[-1] == ("error", "`run_python` failed, Claude is looking at why"), str(pan.entries[-1]))
+    # what Claude Code writes when the result of a tool went back to the model
+    pan.run._tools["toolu_1"] = "get_document_state"
+    pan.run._event({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "Document"}]}})
+    check("account: the result went back: 'Claude is thinking…', not the name of the tool that is done: "
+          + pan.status.text(), pan.status.text() == "Claude is thinking…")
+    pan.run.tool.emit("run_python", "doc.recompute()")
+    check("account: the next tool is named again", pan.status.text() == "Claude is working… (run_python)")
     pan.run.finished.emit({"is_error": False, "result": "ok", "session_id": "claude-session-new"})
     check("account: the session id of the result is stored, as before",
           projects.get_session(project) == "claude-session-new" and pan.send_btn.text() == "Send")

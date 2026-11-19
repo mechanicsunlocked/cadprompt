@@ -373,6 +373,7 @@ class LocalRun(QtCore.QObject):
     text = QtCore.Signal(str)              # a block of the model's answer (markdown)
     tool = QtCore.Signal(str, str)         # tool name, short detail
     tool_error = QtCore.Signal(str)        # a tool result that failed
+    tool_done = QtCore.Signal(str)         # the result of a tool went back: the AI reads it now
     # {"is_error", "result"}; plus "stopped" after stop(); plus "incomplete" when the work did not end well
     finished = QtCore.Signal(dict)
 
@@ -479,8 +480,10 @@ class LocalRun(QtCore.QObject):
             self.text.emit(f"*{data}*")
         elif kind == "tool_call":
             self.tool.emit(data["name"], _tool_detail(data["args"]))
-        elif kind == "tool_result" and data["problem"]:
-            self.tool_error.emit(data["name"])
+        elif kind == "tool_result":
+            if data["problem"]:
+                self.tool_error.emit(data["name"])
+            self.tool_done.emit(data["name"])
 
     def _on_leave(self, number, call):
         """The worker is about to send a request: the gate of all outgoing requests decides."""

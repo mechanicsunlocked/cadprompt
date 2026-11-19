@@ -219,8 +219,8 @@ def static_checks():
              and isinstance(n.args[0], ast.Call)]
     check("package.xml: <classname> is the one workbench class that InitGui.py defines and adds",
           classname and classes == [classname] and added == [classname], f"{classname!r} {classes} {added}")
-    check("package.xml: version 0.2.0, FreeCAD 1.0.0 or newer, no upper limit",
-          texts("^version") == ["0.2.0"] and texts("^freecadmin") == ["1.0.0"] and texts("^freecadmax") == []
+    check("package.xml: version 0.2.1, FreeCAD 1.0.0 or newer, no upper limit",
+          texts("^version") == ["0.2.1"] and texts("^freecadmin") == ["1.0.0"] and texts("^freecadmax") == []
           and not pkg.findall(".//" + NS + "freecadmax"), f"{texts('^version')} {texts('^freecadmin')}")
     licences = {(e.text or "").strip(): e.get("file") for e in pkg.findall(NS + "license")}
     check("package.xml: both licences, each with its file",

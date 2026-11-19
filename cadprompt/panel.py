@@ -124,6 +124,7 @@ class Panel(QtWidgets.QWidget):
         super().__init__(parent)
         self.run = runner.ClaudeRun(self)     # Claude Code: account, other endpoint
         self.local_run = None                 # the built-in engine, made when first needed
+        self._working = False                 # a request is under way (the button says Stop)
         self._engine = self.run               # the one that got the last message
         self._sent_to = backends.current()    # the source that got the last message
         self._images = []                     # image references added since the last message
@@ -161,6 +162,7 @@ class Panel(QtWidgets.QWidget):
         run.text.connect(lambda t: self._add("claude", t))
         run.tool.connect(self._on_tool)
         run.tool_error.connect(self._on_tool_error)
+        run.tool_done.connect(lambda _name, run=run: self._on_tool_done(run))
         run.finished.connect(lambda res, run=run: self._on_finished(res, run))
 
     def _local_engine(self):
@@ -399,6 +401,7 @@ class Panel(QtWidgets.QWidget):
         sb.setValue(min(was, sb.maximum()) if keep else sb.maximum())
 
     def _busy(self, on, msg=""):
+        self._working = on
         self.send_btn.setText("Stop" if on else "Send")
         self.status.setText(msg)
 
@@ -942,6 +945,13 @@ class Panel(QtWidgets.QWidget):
     def _on_tool(self, name, detail):
         self._add("tool", f"`{name}` {detail}".strip())
         self.status.setText(f"{self._who(start=True)} is working… ({name})")
+
+    def _on_tool_done(self, run):
+        """The result of a tool went back to the AI. It reads the result and decides the next
+        step now, and that can take a minute: the tool name in the status would say that
+        FreeCAD still works on the tool."""
+        if run is self._engine and self._working and not self.asking():
+            self.status.setText(f"{self._who(start=True)} is thinking…")
 
     def _on_tool_error(self, name):
         self._add("error", f"`{name}` failed, {self._who()} is looking at why")

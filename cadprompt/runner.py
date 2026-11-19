@@ -281,6 +281,7 @@ class ClaudeRun(QtCore.QObject):
     text = QtCore.Signal(str)              # a block of Claude's answer (markdown)
     tool = QtCore.Signal(str, str)         # tool name, short detail
     tool_error = QtCore.Signal(str)        # a tool result that failed
+    tool_done = QtCore.Signal(str)         # the result of a tool went back: the AI reads it now
     finished = QtCore.Signal(dict)         # the final result event (or a synthetic one)
 
     def __init__(self, parent=None):
@@ -364,8 +365,11 @@ class ClaudeRun(QtCore.QObject):
         elif t == "user":
             content = ev.get("message", {}).get("content", [])
             for block in content if isinstance(content, list) else []:
-                if block.get("type") == "tool_result" and block.get("is_error"):
-                    self.tool_error.emit(self._tools.get(block.get("tool_use_id"), "tool"))
+                if block.get("type") != "tool_result" or block.get("tool_use_id") not in self._tools:
+                    continue
+                if block.get("is_error"):
+                    self.tool_error.emit(self._tools[block.get("tool_use_id")])
+                self.tool_done.emit(self._tools[block.get("tool_use_id")])
         elif t == "result":
             self._result = ev
 

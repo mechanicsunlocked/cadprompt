@@ -19,6 +19,7 @@ class LocalRun(QtCore.QObject):
     text = QtCore.Signal(str)
     tool = QtCore.Signal(str, str)
     tool_error = QtCore.Signal(str)
+    tool_done = QtCore.Signal(str)
     finished = QtCore.Signal(dict)
 
     def __init__(self, parent=None):
