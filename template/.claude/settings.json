@@ -1,14 +1,6 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
     "blockReadsOutsideWorkingDirectories": true,
-    "allow": [
-      "mcp__freecad__*"
-    ],
-    "ask": [
-      "WebFetch",
-      "WebSearch"
-    ],
     "deny": [
       "Bash",
       "Edit(/.claude/**)",
@@ -16,5 +8,7 @@
       "Edit(/CLAUDE.md)"
     ]
   },
-  "enabledMcpjsonServers": ["freecad"]
+  "enabledMcpjsonServers": [
+    "freecad"
+  ]
 }

@@ -1,0 +1,5 @@
+# The same line ends on every system. Git for Windows would turn LF into CRLF
+# on checkout, and the files of template/ are copied into each project as they are.
+* text=auto eol=lf
+*.png binary
+*.FCStd binary

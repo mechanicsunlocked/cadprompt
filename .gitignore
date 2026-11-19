@@ -1,3 +1,6 @@
 vendor/
 __pycache__/
 *.pyc
+
+# results of tests/run_all.py (--out test-results --junit test-results/junit.xml)
+/test-results/
