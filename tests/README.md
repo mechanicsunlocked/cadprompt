@@ -127,6 +127,7 @@ For the unpacked `.7z` archive, in PowerShell:
 | `test_backends` | freecadcmd | The AI sources, what the built-in engine gets for each, and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
 | `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
+| `test_local_bench` | freecadcmd | The checks of the benchmark `local_bench.py`: for each of its 20 requests a correct part passes and a part with a usual mistake fails. A scripted server plays the model. |
 | `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays, and nothing is written through a link that leads out of the project. `old_template.json` holds the old files. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |
 | `test_approval_gui` | freecad-gui | The question before the AI's code runs, in the real dock with a new profile: the code is shown, Run runs exactly that text, Skip runs nothing, Stop and a closed panel end it, the keys, "Run all for this request", the switch "Run the AI's code without asking" with its warning and its marker. For the built-in engine and for Claude Code (the pretend `claude` and client threads call the real bridge). |
@@ -147,6 +148,9 @@ Not run by `run_all.py`:
   these variables (all names with `_REAL_`, and `CADPROMPT_SMOKE_*`) before it
   starts a test, so it never calls a real model. It also removes
   `ANTHROPIC_*` and `OPENAI_API_KEY`, so no key of your computer gets into a test.
+- `local_bench.py`. The benchmark: it asks a local model for 20 parts, measures each part (box,
+  volume, solids, holes and their places) and prints the pass rate, the steps and the time.
+  `FREECAD_USER_HOME=<fresh folder> freecadcmd tests/local_bench.py`; the file names its options.
 - `claude_real_run.py`. It sends one message to the real Claude Code through
   the real panel and checks that the tool call arrives in FreeCAD. Its project
   looks like one from another person (a `.mcp.json` that names a program,
