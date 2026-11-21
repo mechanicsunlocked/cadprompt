@@ -63,6 +63,8 @@ BLOCKED_OS = {"system", "popen", "fork", "kill", "remove", "unlink", "rmdir", "r
 BLOCKED_ANY = {"unlink", "rmdir", "rmtree"}      # on any object: pathlib deletes the same as os
 BLOCKED_NAMES = {"__import__", "eval", "exec", "compile"}
 KEY_FILES = ("cadprompt_api_key", "cadprompt_local_key", "cadprompt_endpoint_token")
+A_KEY = "(a saved key, hidden)"      # what a tool result has in place of a saved key
+KEY_LENGTH = 8                       # a shorter text is not hidden: it can be a normal word
 
 
 _old_problems = set()     # (document, object) that were broken before the request began
@@ -133,26 +135,32 @@ def _not_allowed(code):
     return ""
 
 
-def _hide_keys(text):
-    """Take saved keys and the token of the bridge out of a tool result.
-
-    The result goes to the model server and into the chat file of the project,
-    and project folders are shared and synced.
-    """
+def _secrets():
+    """(text, what is written in its place) for the token of the bridge and each saved key."""
+    out = []
     # The token lets any program on this computer run the tools while the panel is open.
     # Not imported here: the bridge is loaded only for Claude Code.
     bridge = sys.modules.get((__package__ or "cadprompt") + ".bridge")
     token = bridge.token() if bridge is not None else ""
     if token:
-        text = text.replace(token, "(the token of the bridge, hidden)")
+        out.append((token, "(the token of the bridge, hidden)"))
     try:
         from . import backends
-        secrets = (backends.api_key(), backends.local_key(), backends.endpoint_token())
+        keys = (backends.api_key(), backends.local_key(), backends.endpoint_token())
     except Exception:
-        return text
-    for secret in secrets:
-        if len(secret) >= 8:
-            text = text.replace(secret, "(a saved key, hidden)")
+        return out
+    return out + [(key, A_KEY) for key in keys if len(key) >= KEY_LENGTH]
+
+
+def _hide_keys(text):
+    """Take saved keys and the token of the bridge out of a tool result.
+
+    The result goes to the model server and into the chat file of the project,
+    and project folders are shared and synced. training.py takes the same
+    texts out of the training data.
+    """
+    for secret, word in _secrets():
+        text = text.replace(secret, word)
     return text
 
 

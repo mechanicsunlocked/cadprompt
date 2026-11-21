@@ -56,6 +56,7 @@ NOT_ALLOWED = "Nothing was sent: CADprompt is not allowed to contact %s."
 BAD_PICTURE = "The image %s could not be read. Add it again, or send the message without it."
 PICTURE_GONE = "(An image was attached here: %s. The file is not there any more.)"
 PICTURE_LEFT_OUT = "(An image was attached here: %s. It is not sent again.)"
+LEFT_OUT = "\n\nThe start of this conversation was left out to save space."    # added to the system prompt
 
 SENT_KEYS = ("role", "content", "tool_calls", "tool_call_id")   # what counts for the size of a message
 VIEW_KEYS = SENT_KEYS + ("images", "_native")   # what a wire format gets to build its request from
@@ -869,17 +870,21 @@ class Agent:
         return result if isinstance(result, str) else str(result)
 
     # ---- HTTP ---------------------------------------------------------------
+    def room(self):
+        """The characters of the conversation that fit one request, beside the prompt and the tools."""
+        return self.context_chars - len(self.system) - len(json.dumps(self.tools))
+
     def _chat(self):
         """One answer of the model to the conversation as it is now."""
         wire = self.wire
-        budget = self.context_chars - len(self.system) - len(json.dumps(self.tools))
+        budget = self.room()
         halved, bare, waits = False, False, 0
         while True:
             view, dropped = build_view(self.messages, max(budget, 2000), wire.image_chars,
                                        images=not self._no_pictures)
             system = self.system
             if dropped:
-                system += "\n\nThe start of this conversation was left out to save space."
+                system += LEFT_OUT
             try:
                 return self._post(system, view)
             except _Refused as exc:
