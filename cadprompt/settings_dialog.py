@@ -1,5 +1,6 @@
 """Settings: projects folder, which AI does the work, what that AI needs, whether its
-code runs without a question, and which services may get data (Privacy)."""
+code runs without a question, which services may get data (Privacy), and whether good
+requests are kept as training data in the project."""
 
 import threading
 import time
@@ -7,7 +8,7 @@ import urllib.error
 
 from PySide import QtCore, QtWidgets
 
-from . import approval, ask_ui, backends, consent, local_agent, paths
+from . import approval, ask_ui, backends, consent, local_agent, paths, training
 
 # Linux and macOS: the key file has mode 0600. Windows has no such modes; there the
 # folder of the user's own profile keeps other users out (backends.py).
@@ -247,6 +248,18 @@ class SettingsDialog(QtWidgets.QDialog):
         self._show_privacy()
         lay.addWidget(privacy)
 
+        # ---- training data: a file in the project, only when the user turns it on ----
+        train = QtWidgets.QGroupBox("Training data")
+        box = QtWidgets.QVBoxLayout(train)
+        self.training = QtWidgets.QCheckBox(training.LABEL)
+        self.training.setChecked(training.enabled())
+        box.addWidget(self.training)
+        hint = QtWidgets.QLabel("<small>%s</small>" % training.HINT)
+        hint.setWordWrap(True)
+        hint.setEnabled(False)
+        box.addWidget(hint)
+        lay.addWidget(train)
+
         from . import workbench          # here: Settings can open before the workbench was ever active
         self._in_techdraw = workbench.show_in_techdraw()
         self.techdraw = QtWidgets.QCheckBox(TECHDRAW)
@@ -455,6 +468,7 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("Model", self.model.text().strip())
         p.SetString("claudePath", self.claude.text().strip())
         approval.set_auto(self.auto.isChecked())
+        training.set_enabled(self.training.isChecked())
         if self.techdraw.isChecked() != self._in_techdraw:
             from . import workbench
             workbench.set_show_in_techdraw(self.techdraw.isChecked())

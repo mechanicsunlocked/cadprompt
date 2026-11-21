@@ -19,7 +19,7 @@ import traceback
 import FreeCAD as App
 from PySide import QtCore, QtGui
 
-from . import approval, backends, local_agent, local_prompt, local_tools, main_thread, projects
+from . import approval, backends, local_agent, local_prompt, local_tools, main_thread, projects, training
 
 CHAT_FILE = "local-chat.json"
 MAX_STORED = 400                   # messages kept in the file; older requests are dropped whole
@@ -387,6 +387,8 @@ class LocalRun(QtCore.QObject):
         self._doc = None          # name of the document this run works on
         self._backed = set()      # model files that have their backup copy for this request
         self._source = "local"    # the source of this run, as approval.request wants it
+        self._first = 0           # where this request begins in the conversation
+        self._training = None     # what training.begin() gave, when the user turned the training data on
         self._changed = False
         self._in_tool = False
         live = self._live = []    # the running worker, shared with the hook below
@@ -421,9 +423,15 @@ class LocalRun(QtCore.QObject):
         self._source = SOURCES.get(config.get("kind") or "openai", "local")
         self._safe = messages + [local_agent.user_message(text, prompt, images)]
         self._ran, self._backed = [], set()
-        worker = _Worker(self._number, project, config,
-                         local_prompt.system_prompt(projects.get_mode(project)),
+        mode = projects.get_mode(project)
+        worker = _Worker(self._number, project, config, local_prompt.system_prompt(mode),
                          messages, text, prompt, images)
+        self._first, self._training = len(messages), None
+        if training.enabled():
+            try:
+                self._training = training.begin(self._source, mode, worker.agent, self._safe)
+            except Exception as exc:         # the training data must never be in the way of a request
+                App.Console.PrintWarning(f"CADprompt: no training data for this request: {exc}\n")
         queued = QtCore.Qt.QueuedConnection
         worker.event.connect(self._on_event, queued)
         worker.need_tool.connect(self._on_tool, queued)
@@ -566,6 +574,7 @@ class LocalRun(QtCore.QObject):
         self._worker = None
         self._live[:] = []
         try:
+            saved = False
             if not self._changed:
                 pass                      # a question alone does not rewrite the user's file
             elif res.get("is_error") or res.get("incomplete"):
@@ -573,15 +582,26 @@ class LocalRun(QtCore.QObject):
                 # there: the file on disk stays the last good state
                 self.text.emit(NOT_SAVED)
             else:
-                self._save_document()
+                saved = self._save_document()
+            self._keep_for_training(res, saved)
         finally:
             self.finished.emit(res)       # whatever the save step does, the panel must hear the end
 
+    def _keep_for_training(self, res, saved):
+        """Settings > training data: a request that ended well becomes one line of a file in
+        the project (training.py). Nothing is sent. The chat names the file the first time."""
+        info, self._training = self._training, None
+        if info is None or not training.enabled():       # off, or turned off while the request ran
+            return
+        note = training.keep(self._project, info, self._safe, self._first, res, saved)
+        if note:                             # once: where the file is, or that it cannot be written
+            self.text.emit(f"*{note}*")
+
     def _save_document(self):
-        """Save the model after a request that worked. Not left to the model."""
+        """Save the model after a request that worked. Not left to the model. True when it is saved."""
         doc = _document(self._doc)
         if doc is None:
-            return
+            return False
         try:
             if doc.FileName:
                 doc.save()
@@ -595,7 +615,7 @@ class LocalRun(QtCore.QObject):
                 doc.saveAs(path)
         except Exception as exc:
             self.text.emit(f"*The document could not be saved: {exc}*")
-            return
+            return False
         name = os.path.basename(path)
         try:
             rel = os.path.relpath(os.path.realpath(path), os.path.realpath(self._project))
@@ -604,6 +624,7 @@ class LocalRun(QtCore.QObject):
         except ValueError:
             pass                          # Windows: the document is on another drive than the project
         self.tool.emit("save", name)
+        return True
 
 
 def _active_name():
