@@ -168,6 +168,26 @@ class Plate(Case):
         self.box(self.quiet(cad.plate, "60", "4 cm", App.Units.Quantity("5 mm")), (0, 0, 0), (60, 40, 5))
         self.box(self.quiet(cad.box, 10, 20, 30), (0, 0, 0), (10, 20, 30))
 
+    def test_text_that_is_not_one_number_with_one_unit(self):
+        # FreeCAD's unit parser reads these as a sum of two quantities, and its error ended FreeCAD
+        for text in ("1 Welle", "2 Wellen", "10 mm 2 deg", "5 kg 3 m", "12 mm 3", "3 elem", "elem", "1 el", "12 e",
+                     "2 pi", "mm", "", " ", "1/2 in", "10 + 2", "+7", "12 Platte"):
+            with self.subTest(text=text):
+                self.wrong(TypeError, "the length must be a number, not %r." % text, cad.plate, text, 80, 10)
+        for text, number in (("12", 12), (" 12.5 ", 12.5), ("12,5", 12.5), (".5", 0.5), ("1e1", 10), ("12mm", 12),
+                             ("12 mm", 12), ("4 cm", 40), ("0.5 in", 12.7), ("0.2 m", 200)):
+            with self.subTest(text=text):
+                self.doc = new_doc()
+                self.box(self.quiet(cad.plate, text, 80, 10), (0, 0, 0), (number, 80, 10))
+        self.doc = new_doc()
+        plate = self.quiet(cad.plate, 100, 60, 8)
+        self.wrong(TypeError, "the y must be a number, not '10 mm 2 deg'.", cad.move, plate, 5, "10 mm 2 deg")
+        self.box(self.quiet(cad.move, plate, "-5 mm", "1 cm"), (-5, 10, 0), (95, 70, 8))
+        self.assertEqual(holes(self.doc), [])
+        self.wrong(TypeError, "the start angle must be a number", cad.bolt_circle, plate, 5, 4, 30, start="45 deg 1")
+        self.quiet(cad.bolt_circle, plate, 5, 4, 30, start="45 deg")
+        self.assertIn((round(45 + 15 * math.cos(PI / 4), 3), round(40 + 15 * math.sin(PI / 4), 3), 4.0, 5.0), holes(self.doc))
+
     def test_a_second_plate_has_its_own_name_and_parameters(self):
         first = self.quiet(cad.plate, 120, 80, 10)
         second, line = self.made(cad.plate, 50, 40, 5)

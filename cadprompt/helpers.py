@@ -54,6 +54,8 @@ TURN = {"z": App.Rotation(), "x": App.Rotation(App.Vector(1, 1, 1), 120), "y": A
 LETTERS = {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}
 EDGE_WORDS = {"vertical": "z", "corners": "z", "upright": "z"}
 # Other words for an argument, taken where the function has no argument of that name.
+# A size as text: one number, then no unit or one unit of letters ("12", "12 mm", "0.5 in").
+SIZE_TEXT = re.compile(r"\s*-?(?:\d+[.,]?\d*|[.,]\d+)(?:[eE][-+]?\d+)?\s*([^\W\d_]*)\s*")
 SPELLINGS = (("d", "diameter"), ("dia", "diameter"), ("outer_diameter", "diameter"), ("outside_diameter", "diameter"),
              ("inner_diameter", "bore"), ("inside_diameter", "bore"), ("t", "thickness"), ("h", "thickness"),
              ("height", "thickness"), ("t", "wall"), ("thickness", "wall"), ("wall_thickness", "wall"),
@@ -111,10 +113,17 @@ def _number(value, what):
     elif hasattr(value, "Value"):
         number = float(value.Value)
     elif isinstance(value, str):
-        try:
-            number = float(App.Units.Quantity(value).Value)
-        except Exception:
-            pass
+        # Other text does not go to FreeCAD's unit parser: it reads "1 Welle" and "10 mm 2 deg" as
+        # a sum of two quantities, and that error is not a Python error, it ends FreeCAD. "e" and
+        # "pi" are numbers there, so text that starts with them is not taken as a unit.
+        found = SIZE_TEXT.fullmatch(value)
+        if found and not found.group(1).startswith(("e", "pi")):
+            try:
+                if found.group(1):
+                    App.Units.Quantity(found.group(1))       # the unit alone: an error when it is not one
+                number = float(App.Units.Quantity(value).Value)
+            except Exception:
+                pass
     if number is None or math.isnan(number) or math.isinf(number):
         raise _Wrong("the %s must be a number, not %r." % (what, value), TypeError)
     return number
