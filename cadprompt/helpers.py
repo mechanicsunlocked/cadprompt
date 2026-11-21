@@ -16,7 +16,8 @@ cad.plate lies like a Part::Box (x from 0 to length, y from 0 to width, z from
 shaft, a tube and a pipe stand on the origin along z; axis="x" or "y" lays
 them down. Holes and slots go through along z; a depth makes them blind from
 the top, an axis turns a hole. A hole, a slot or a pattern without a place is
-in the middle of the part.
+in the middle of the part. A hole or a slot that would break through a side
+of the part (an open notch) is refused.
 
 A part can be given as the object, its Name or its Label. When a later step
 used it up (the plate, after its holes were cut), the newest result of that
@@ -318,9 +319,13 @@ class _Where:
         low, high = SIDES[axis]
         return (self.number(low) + self.number(high)) / 2
 
-    def inside(self, axis, value):
+    def inside(self, axis, value, reach=None):
+        """Is the place on the part, or with `reach`: is a cut that goes that far to both sides
+        of the place fully in the part, with a wall left?"""
         low, high = SIDES[axis]
-        return self.number(low) - TOL <= value <= self.number(high) + TOL
+        if reach is None:
+            return self.number(low) - TOL <= value <= self.number(high) + TOL
+        return self.number(low) + TOL < value - reach and value + reach < self.number(high) - TOL
 
     def span(self, axis):
         low, high = SIDES[axis]
@@ -706,13 +711,22 @@ def _deep(depth):
     return None if depth is None else _size(depth, "depth")
 
 
-def _outside(where, axes, places, what="hole"):
-    """Raise when a place is not on the part. `places` are (u, v) numbers across the axis."""
-    for u, v in places:
-        if not (where.inside(axes[0], u) and where.inside(axes[1], v)):
-            raise _Wrong("the %s at %s %s, %s %s is outside the part, which goes from %s %s and from %s %s."
-                         % (what, axes[0], _text(u), axes[1], _text(v), axes[0], where.span(axes[0]),
-                            axes[1], where.span(axes[1])))
+def _outside(where, axes, places, reach, what="hole"):
+    """Raise when a cut is not fully in the part: its middle is outside, or its rim reaches a side
+    (an open notch, not a hole). `places` are (u, v) numbers across the axis, `reach` is how far
+    the cut goes from its place along the two axes (a hole: its radius)."""
+    spans = "from %s %s and from %s %s" % (axes[0], where.span(axes[0]), axes[1], where.span(axes[1]))
+    for place in places:
+        at = "at %s %s, %s %s" % (axes[0], _text(place[0]), axes[1], _text(place[1]))
+        if not all(where.inside(a, v) for a, v in zip(axes, place)):
+            raise _Wrong("the %s %s is outside the part, which goes %s." % (what, at, spans))
+        if not all(where.inside(a, v, far) for a, v, far in zip(axes, place, reach)):
+            kind = what.split()[-1]
+            goes = " and from ".join("%s %s to %s" % (a, _text(v - far), _text(v + far))
+                                     for a, v, far in zip(axes, place, reach))
+            middle = ", ".join("%s %s" % (a, _text(where.middle_number(a))) for a in axes)
+            raise _Wrong("the %s %s breaks through the side of the part: the %s goes from %s, the part %s "
+                         "(middle of the part: %s)." % (kind, at, kind, goes, spans, middle))
 
 
 def _reach(b, where, tag, depth, axis):
@@ -781,7 +795,7 @@ def hole(part, diameter, x=None, y=None, depth=None, axis="z", name=None):
         raise _Wrong("%d holes are too many for one call (at most %d)." % (len(points), MAX_HOLES))
     where = _Where(base)
     numbers = [tuple(where.middle_number(a) if v is None else v for a, v in zip(axes, p)) for p in points]
-    _outside(where, axes, numbers)
+    _outside(where, axes, numbers, (diameter / 2, diameter / 2))
     with _Build(base.Document) as b:
         tag = b.tag(name, "Hole" if len(points) == 1 else "Holes")
         d, places = b.param(tag, "Diameter", diameter), []
@@ -839,7 +853,7 @@ def hole_grid(part, diameter, nx, ny=1, dx=None, dy=None, edge=None, center=None
         mid = (low + high) / 2 if middle is None else middle[i]
         return [mid + (k - (n - 1) / 2) * (pitches[i] or 0) for k in range(n)]
 
-    _outside(where, axes, [(u, v) for u in numbers(0) for v in numbers(1)])
+    _outside(where, axes, [(u, v) for u in numbers(0) for v in numbers(1)], (diameter / 2, diameter / 2))
     with _Build(base.Document) as b:
         tag = b.tag(name, "HoleGrid")
         d, texts = b.param(tag, "Diameter", diameter), []
@@ -890,7 +904,8 @@ def bolt_circle(part, diameter, count, circle, start=0, center=None, depth=None,
     mid = middle or [where.middle_number(a) for a in axes]
     angles = [start + k * 360.0 / count for k in range(count)]
     _outside(where, axes, [(mid[0] + circle / 2 * math.cos(math.radians(a)),
-                            mid[1] + circle / 2 * math.sin(math.radians(a))) for a in angles])
+                            mid[1] + circle / 2 * math.sin(math.radians(a))) for a in angles],
+             (diameter / 2, diameter / 2))
     with _Build(base.Document) as b:
         tag = b.tag(name, "BoltCircle")
         d = b.param(tag, "Diameter", diameter)
@@ -929,7 +944,10 @@ def slot(part, width, length, x=None, y=None, angle=0, depth=None, name=None):
         x, y = _across(x, "z")               # cad.slot(bar, 9, 40, (85, 20))
     point = [None if v is None else _number(v, a) for v, a in ((x, "x"), (y, "y"))]
     numbers = [where.middle_number(a) if v is None else v for a, v in zip("xy", point)]
-    _outside(where, "xy", [numbers], "middle of the slot")
+    # how far the turned slot goes from its middle along x and along y
+    run, turned = (length - width) / 2, math.radians(angle)
+    _outside(where, "xy", [numbers], (run * abs(math.cos(turned)) + width / 2, run * abs(math.sin(turned)) + width / 2),
+             "middle of the slot")
     with _Build(base.Document) as b:
         tag = b.tag(name, "Slot")
         w, long = b.param(tag, "Width", width), b.param(tag, "Length", length)

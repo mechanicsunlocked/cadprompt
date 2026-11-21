@@ -613,8 +613,10 @@ class Hole(Case):
                    cad.hole, "Plat3", 9)
         self.wrong(ValueError, "the diameter must be above 0", cad.hole, plate, 0, 20, 30)
         self.wrong(ValueError, "the depth must be above 0", cad.hole, plate, 9, 20, 30, depth=-3)
-        self.wrong(ValueError, "the hole takes the whole part away.", cad.hole, plate, 500)
-        self.wrong(ValueError, "the hole cuts the part into 2 pieces.", cad.hole, plate, 100)
+        self.wrong(ValueError, "the hole at x 60, y 40 breaks through the side of the part: the hole goes from "
+                               "x -190 to 310 and from y -210 to 290, the part from x 0 to 120 and from y 0 to 80",
+                   cad.hole, plate, 500)
+        self.wrong(ValueError, "breaks through the side of the part", cad.hole, plate, 100)
         self.wrong(ValueError, "give the places as one list, or x and y as two numbers.",
                    cad.hole, plate, 9, [(10, 10)], 20)
         self.wrong(ValueError, "the list of places is empty.", cad.hole, plate, 9, [])
@@ -624,6 +626,44 @@ class Hole(Case):
         self.assertEqual(len(self.doc.Objects), 2)       # the plate and Params
         self.assertTrue(plate.Visibility)
         self.assertEqual(plate.Label, "Plate")
+
+    def test_a_hole_that_would_be_an_open_notch(self):
+        # a model that thinks from the middle writes 0, 0 for "the centre": no notch in the corner
+        plate = self.quiet(cad.plate, 100, 100, 10)
+        part = self.quiet(cad.fillet, plate, 12, "z")
+        text = self.wrong(ValueError, "the hole at x 0, y 0 breaks through the side of the part: the hole goes "
+                                      "from x -20 to 20 and from y -20 to 20, the part from x 0 to 100 and from "
+                                      "y 0 to 100 (middle of the part: x 50, y 50).", cad.hole, plate, 40, 0, 0)
+        self.assertIn("Example: cad.hole(plate, 9, 20, 30)", text)
+        self.wrong(ValueError, "the hole at x 2, y 2 breaks through the side", cad.hole, plate, 9, 2, 2)
+        self.wrong(ValueError, "the hole at x 20, y 0 breaks through the side", cad.hole, plate, 9, 20, 0)
+        self.wrong(ValueError, "the hole at x 97, y 50 breaks through the side", cad.hole, plate, 9, [(50, 50), (97, 50)])
+        self.wrong(ValueError, "breaks through the side", cad.hole, plate, 9, 2, 2, depth=3)
+        self.wrong(ValueError, "the hole at x 50, z 8 breaks through the side of the part: the hole goes from "
+                               "x 45.5 to 54.5 and from z 3.5 to 12.5", cad.hole, plate, 9, 50, 8, axis="y")
+        # no wall is left when the rim only touches the side
+        self.wrong(ValueError, "the hole at x 5, y 50 breaks through the side", cad.hole, plate, 10, 5, 50)
+        self.assertEqual(len(self.doc.Objects), 3)       # the plate, its fillet and Params
+        self.assertTrue(part.Visibility)
+        part = self.quiet(cad.hole, plate, 10, 5.5, 50)  # a wall of 0.5 is a hole
+        self.assertEqual(holes(self.doc), [(5.5, 50.0, 5.0, 10.0)])
+        self.one_part(part)
+
+    def test_zero_is_the_middle_of_a_part_that_stands_on_the_origin(self):
+        disc_ = self.quiet(cad.shaft, 120, 12)
+        part = self.quiet(cad.hole, disc_, 40, 0, 0)
+        self.volume(part, disc(120, 12) - disc(40, 12))
+        self.doc = new_doc()
+        shaft = self.quiet(cad.shaft, 30, 100)
+        part = self.quiet(cad.hole, shaft, 8, 0, 30, axis="x")
+        self.assertEqual(holes(self.doc), [(0.0, 0.0, 30.0, 8.0)])
+        self.wrong(ValueError, "the hole at y 0, z 2 breaks through the side", cad.hole, shaft, 8, 0, 2, axis="x")
+
+    def test_a_hole_inside_the_sides_that_cuts_the_part_into_pieces(self):
+        ring = self.quiet(cad.pipe, 100, 10, 10)
+        a = 45 * math.cos(math.radians(45))              # in the middle of the wall
+        self.wrong(ValueError, "the hole cuts the part into 2 pieces.", cad.hole, ring, 30, [(a, a), (-a, -a)])
+        self.assertEqual(len(holes(self.doc)), 1)        # the bore of the ring
 
     def test_an_object_that_is_gone(self):
         plate = self.quiet(cad.plate, 120, 80, 10)
@@ -682,6 +722,10 @@ class HoleGrid(Case):
         self.wrong(ValueError, "60 from both edges is more than the part has along y (100).",
                    cad.hole_grid, plate, 9, 2, 2, edge=60)
         self.wrong(ValueError, "holes are too many for one call", cad.hole_grid, plate, 1, 50, 50, 2, 2)
+        # the holes at the edges would be open notches
+        self.wrong(ValueError, "the hole at x 2, y 2 breaks through the side of the part: the hole goes from "
+                               "x -2.5 to 6.5", cad.hole_grid, plate, 9, 2, 2, edge=2)
+        self.wrong(ValueError, "the hole at x 0, y 25 breaks through the side", cad.hole_grid, plate, 9, 3, 2, 80, 50)
         self.assertEqual(len(self.doc.Objects), 2)
 
 
@@ -720,6 +764,10 @@ class BoltCircle(Case):
     def test_wrong_calls(self):
         disc_ = self.quiet(cad.shaft, 120, 12)
         self.wrong(ValueError, "is outside the part", cad.bolt_circle, disc_, 11, 6, 200)
+        # a circle as large as the part: half of each hole would be outside
+        self.wrong(ValueError, "the hole at x 60, y 0 breaks through the side of the part: the hole goes from "
+                               "x 54.5 to 65.5 and from y -5.5 to 5.5, the part from x -60 to 60 and from y -60 to 60 "
+                               "(middle of the part: x 0, y 0).", cad.bolt_circle, disc_, 11, 6, 120)
         self.wrong(ValueError, "the number of holes must be a whole number from 1, not 0.",
                    cad.bolt_circle, disc_, 11, 0, 90)
         text = self.wrong(TypeError, "circle", cad.bolt_circle, disc_, 11, 6)
@@ -772,11 +820,26 @@ class Slot(Case):
         self.wrong(ValueError, "a slot as long as it is wide is a round hole: use cad.hole(part, 9).",
                    cad.slot, bar, 9, 9, 85, 20)
         self.wrong(ValueError, "the middle of the slot at x 185, y 20 is outside the part", cad.slot, bar, 9, 40, 185, 20)
-        self.wrong(ValueError, "the slot cuts the part into 2 pieces.", cad.slot, bar, 9, 60, 60, 20, angle=90)
+        # its middle is on the part, but it would be open to the side
+        self.wrong(ValueError, "the slot at x 60, y 20 breaks through the side of the part: the slot goes from "
+                               "x 55.5 to 64.5 and from y -10 to 50, the part from x 0 to 120 and from y 0 to 40 "
+                               "(middle of the part: x 60, y 20).", cad.slot, bar, 9, 60, 60, 20, angle=90)
+        self.wrong(ValueError, "the slot at x 85, y 0 breaks through the side", cad.slot, bar, 9, 40, 85, 0)
+        self.wrong(ValueError, "the slot at x 110, y 20 breaks through the side of the part: the slot goes from "
+                               "x 90 to 130", cad.slot, bar, 9, 40, 110, 20)
+        self.wrong(ValueError, "the slot at x 100, y 20 breaks through the side", cad.slot, bar, 9, 40, 100, 20)
         text = self.wrong(TypeError, "length", cad.slot, bar, 9)
         self.assertIn("Example: cad.slot(bar, 9, 40, 85, 20)", text)
         self.assertEqual(len(self.doc.Objects), 2)
         self.assertTrue(bar.Visibility)
+        self.quiet(cad.slot, bar, 9, 40, 99.5, 20)       # 0.5 from the end of the bar
+        self.assertEqual(holes(self.doc, "arc"), [(84.0, 20.0, 3.0, 9.0), (115.0, 20.0, 3.0, 9.0)])
+
+    def test_a_slot_inside_the_sides_that_cuts_the_part_into_pieces(self):
+        round_ = self.quiet(cad.shaft, 100, 10)          # the slot is longer than the disc is wide at 45 degrees
+        self.wrong(ValueError, "the slot cuts the part into 2 pieces.", cad.slot, round_, 9, 110, angle=45)
+        self.quiet(cad.slot, round_, 9, 90, angle=45)
+        self.assertEqual(len(holes(self.doc, "arc")), 2)
 
 
 class Edges(Case):
