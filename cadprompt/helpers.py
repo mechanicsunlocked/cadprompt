@@ -473,7 +473,7 @@ class _Build:
             if len(_solids(result)) != pieces:
                 raise _Wrong("the %s cuts the part into %d pieces." % (what, len(_solids(result))))
             if result.Shape.Volume > volume - TOL:
-                raise _Wrong("the %s is outside the part: nothing was cut." % what)
+                raise _Wrong("the %s takes nothing away: the part has no material at that place." % what)
         return self.done(result)
 
     def line(self, result, what, loose=()):

@@ -175,7 +175,7 @@ class Plate(Case):
         self.assertIn("%s_Length" % second.Name, line)
         # a first try that stays in the document is a second body for the user: the line names it
         self.assertTrue(line.endswith(" Other parts in the document: Plate."), line)
-        part, line = self.made(cad.hole, first, 9)
+        line = self.made(cad.hole, first, 9)[1]
         self.assertTrue(line.endswith(" Other parts in the document: %s." % second.Name), line)
         self.doc.removeObject(second.Name)
         self.assertNotIn("Other parts", self.made(cad.hole, first, 5, 20, 20)[1])
@@ -392,10 +392,16 @@ class Frame(Case):
         self.assertEqual(bench_checks._joined(frame.Shape.Solids), "")
         self.assertEqual(line, "Frame: frame 500 x 300 of 4 mitred bars (4 solids) from tube 30 x 30 x 2. Params: "
                                "Frame_Length, Frame_Width, Frame_ProfileWidth, Frame_ProfileHeight, Frame_Wall.")
-        # a mitre: at the corner x = y the cut through a bar is the full section of the tube
+        # a cut across the middle goes through the two long bars: two sections of the tube
         m = bench_checks.measure(self.doc)
-        area, sizes = bench_checks._cut_through(m, 0, 250)
-        self.assertAlmostEqual(area, 2 * section, places=4)
+        self.assertAlmostEqual(bench_checks._cut_through(m, 0, 250)[0], 2 * section, places=4)
+        # the mitre at the corner (0, 0): under the line x = y is the bar along x, over it the bar along y
+        bottom = [s for s in frame.Shape.Solids if s.BoundBox.XLength > 499 and s.BoundBox.YMax < 31][0]
+        left = [s for s in frame.Shape.Solids if s.BoundBox.YLength > 299 and s.BoundBox.XMax < 31][0]
+        for solid, inside, outside in ((bottom, (20, 10, 1), (10, 20, 1)), (left, (10, 20, 1), (20, 10, 1))):
+            self.assertTrue(solid.isInside(App.Vector(*inside), 1e-6, True))
+            self.assertFalse(solid.isInside(App.Vector(*outside), 1e-6, True))
+        self.assertFalse(bottom.isInside(App.Vector(250, 15, 15), 1e-6, True))        # hollow
 
     def test_rectangular_profile_and_new_sizes(self):
         frame = self.quiet(cad.frame, 600, 400, 40, 60, 3)
@@ -451,7 +457,7 @@ class Hole(Case):
 
     def test_one_number_puts_it_on_the_centre_line(self):
         bar = self.quiet(cad.plate, 120, 40, 6)
-        part, line = self.made(cad.hole, bar, 9, x=20)
+        line = self.made(cad.hole, bar, 9, x=20)[1]
         self.assertEqual(holes(self.doc), [(20.0, 20.0, 3.0, 9.0)])
         self.assertIn("Hole_X", line)
         self.assertNotIn("Hole_Y", line)
@@ -557,6 +563,13 @@ class Hole(Case):
         self.change(Pa_PosX=200)
         self.box(other, (200, 0, 5), (210, 10, 15))
 
+    def test_a_hole_where_the_part_has_no_material(self):
+        tube = self.quiet(cad.tube, 60, 40, 4, 200)
+        self.wrong(ValueError, "the hole takes nothing away: the part has no material at that place.", cad.hole, tube, 9)
+        cross = self.quiet(cad.hole, tube, 9, 0, 100, axis="x")          # through both walls
+        self.volume(cross, (60 * 40 - 52 * 32) * 200 - 2 * disc(9, 4))
+        self.one_part(cross)
+
     def test_wrong_calls(self):
         plate = self.quiet(cad.plate, 120, 80, 10)
         text = self.wrong(ValueError, "the hole at x 150, y 20 is outside the part, which goes from x 0 to 120 "
@@ -617,7 +630,7 @@ class HoleGrid(Case):
 
     def test_one_row_one_pitch_and_a_centre(self):
         plate = self.quiet(cad.plate, 200, 100, 10)
-        part, line = self.made(cad.hole_grid, plate, 6, 3, dx=20, center=(50, 30))
+        line = self.made(cad.hole_grid, plate, 6, 3, dx=20, center=(50, 30))[1]
         self.assertEqual(holes(self.doc), spots([(x, 30, 5) for x in (30, 50, 70)], 6.0))
         self.assertIn("centre at x 50, y 30", line)
         self.change(HoleGrid_X=100, HoleGrid_Y=70)
@@ -917,7 +930,7 @@ class Join(Case):
         b = self.quiet(cad.plate, 50, 50, 10)
         self.quiet(cad.move, b, 50, 0, 0)
         a2 = self.quiet(cad.hole, a, 9)
-        joined, line = self.made(cad.join, [a, b], name="Bracket")
+        joined = self.quiet(cad.join, [a, b], name="Bracket")
         self.assertEqual(joined.Name, "Bracket")
         self.assertEqual({o.Name for o in joined.Shapes}, {a2.Name, b.Name})
         self.volume(joined, 2 * 50 * 50 * 10 - disc(9, 10))
@@ -969,12 +982,12 @@ class Chains(Case):
         self.quiet(cad.fillet, plate, 10, "z")
         rounded = self.quiet(cad.fillet, plate, 2, "top")
         self.assertGreater(rounded.Shape.BoundBox.XLength, 100.5)
-        part, line = self.made(cad.hole, plate, 8)
+        line = self.made(cad.hole, plate, 8)[1]
         self.assertIn((50.0, 30.0, 5.0, 8.0), holes(self.doc))
         self.assertIn("Not bound: the sides of the part (the cut does not follow when the part changes).", line)
         self.change(Plate_Thickness=20)                  # the height is exact, so the hole still goes through
         self.assertTrue([f for f in bench_checks.measure(self.doc)["features"] if f["kind"] == "hole"][0]["through"])
-        corner, line = self.made(cad.hole_grid, plate, 4, 2, 2, edge=12)
+        self.quiet(cad.hole_grid, plate, 4, 2, 2, edge=12)
         self.assertEqual(sorted(h[:2] for h in holes(self.doc) if h[3] == 4.0),
                          [(12.0, 12.0), (12.0, 48.0), (88.0, 12.0), (88.0, 48.0)])
 
@@ -1028,7 +1041,7 @@ def bench_slot_bar():
 
 
 def bench_slot_bar_on_the_centre_line():
-    bar = cad.plate(120, 40, 6, name="Flat bar")
+    cad.plate(120, 40, 6, name="Flat bar")
     cad.hole("Flat bar", 9, x=20)
     cad.slot("Flat bar", 9, 40, x=120 - 35)
 

@@ -516,6 +516,14 @@ class Helpers(unittest.TestCase):
         self.assertIn("  made from: Frame_Bar1_Outside, Frame_Bar1_Inside, Frame_Bar1,", state)
         self.assertNotIn("PROBLEM", state)
 
+    def test_the_size_of_a_part_with_a_rounded_edge_is_its_real_size(self):
+        doc = new_doc()
+        out = T.run_python('shaft = cad.shaft(40, 100)\nshaft = cad.fillet(shaft, 5, "top")')
+        self.assertGreater(doc.getObject("Fillet").Shape.BoundBox.XLength, 42)      # FreeCAD's quick box
+        self.assertIn("+ new Fillet: Part::Fillet, label \"Shaft\", size 40.000 x 40.000 x 100.000, "
+                      "min (-20.000, -20.000, 0.000)", out)
+        self.assertIn("- Fillet: Part::Fillet, label \"Shaft\", size 40.000 x 40.000 x 100.000", T.get_document_state())
+
     def test_a_document_is_made_for_the_first_helper(self):
         for d in list(App.listDocuments()):
             App.closeDocument(d)

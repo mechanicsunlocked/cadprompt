@@ -178,7 +178,11 @@ def _describe(obj):
             elif max(shape.BoundBox.XLength, shape.BoundBox.YLength, shape.BoundBox.ZLength) > 1e9:
                 pass      # a datum axis or plane has no size: its numbers would be 100 digits long
             else:
-                bb = shape.BoundBox
+                try:
+                    # the quick box is too large for a rounded edge: a shaft d40 with a fillet was "42.472"
+                    bb = shape.optimalBoundingBox(False, False)
+                except Exception:
+                    bb = shape.BoundBox
                 parts.append("size %.3f x %.3f x %.3f" % (bb.XLength, bb.YLength, bb.ZLength))
                 # + 0.0: a corner at -0.0000000001 is at 0.000, not at -0.000
                 parts.append("min (%.3f, %.3f, %.3f)" % tuple(round(v, 3) + 0.0 for v in (bb.XMin, bb.YMin, bb.ZMin)))
