@@ -423,6 +423,94 @@ class RunPython(unittest.TestCase):
         self.assertIn("output cut, ", out)
 
 
+class Helpers(unittest.TestCase):
+    """`cad` in run_python is cadprompt/helpers.py. Its own tests are in test_helpers.py."""
+
+    def test_cad_is_there_and_a_call_reports_what_it_made(self):
+        doc = new_doc()
+        out = T.run_python("plate = cad.plate(120, 80, 10)")
+        self.assertIn("OUTPUT:\n  Plate: plate 120 x 80 x 10. Params: Plate_Length, Plate_Width, Plate_Thickness.", out)
+        self.assertIn("+ new Plate: Part::Box, size 120.000 x 80.000 x 10.000", out)
+        self.assertIn("expressions: Height = Params.Plate_Thickness; Length = Params.Plate_Length", out)
+        self.assertIn("+ new Params: App::VarSet, ", out)
+        for text in ("Plate_Length = 120.0 mm", "Plate_Width = 80.0 mm", "Plate_Thickness = 10.0 mm"):
+            self.assertIn(text, out)
+        self.assertNotIn("ERROR", out)
+        out = T.run_python("plate = cad.hole(plate, 9, 20, 30)\nprint(plate.Name)")     # the variable stays
+        self.assertIn("OUTPUT:\n  Hole: 1 through hole d9 along z at x 20, y 30 in Plate.", out)
+        self.assertIn("+ new Hole: Part::Cut, label \"Plate\", size 120.000 x 80.000 x 10.000", out)
+        self.assertIn("volume %.3f" % (120 * 80 * 10 - 3.141592653589793 / 4 * 81 * 10), out)
+        self.assertIn("~ changed Params:", out)
+        self.assertIn("Hole_Diameter = 9.0 mm", out)
+        self.assertNotIn("PROBLEM", out)
+        self.assertEqual(len(doc.getObject("Hole").Shape.Solids), 1)
+        self.assertEqual(doc.UndoCount, 2)                    # one undo step for each call
+        doc.undo()
+        doc.recompute()
+        self.assertEqual(sorted(o.Name for o in doc.Objects), ["Params", "Plate"])
+        self.assertTrue(doc.getObject("Plate").Visibility)
+        self.assertNotIn("Hole_Diameter", doc.getObject("Params").PropertiesList)
+
+    def test_a_document_is_made_for_the_first_helper(self):
+        for d in list(App.listDocuments()):
+            App.closeDocument(d)
+        T.reset()
+        out = T.run_python("cad.shaft(30, 40, 20, 60)")
+        self.assertIn('No document was open: the new document "Model" was made.', out)
+        self.assertIn("+ new Shaft: Part::MultiFuse", out)
+        self.assertEqual(list(App.listDocuments()), ["Model"])
+
+    def test_an_error_of_a_helper_takes_the_run_back_and_shows_the_example(self):
+        doc = new_doc()
+        T.run_python("plate = cad.plate(120, 80, 10)")
+        undo = doc.UndoCount
+        out = T.run_python("part = cad.hole(plate, 9, 20, 30)\npart = cad.fillet(part, 3)\n"
+                           "part = cad.hole(part, 9, 150, 30)")
+        self.assertIn("\nERROR:\nTraceback (most recent call last):\n"
+                      '  File "<ai>", line 3, in <module>\n    part = cad.hole(part, 9, 150, 30)', out)
+        self.assertIn("ValueError: cad.hole: the hole at x 150, y 30 is outside the part, which goes from "
+                      "x 0 to 120 and from y 0 to 80.\nExample: cad.hole(plate, 9, 20, 30)", out)
+        self.assertNotIn("helpers.py", out)                   # the model's own line, not the lines of the library
+        self.assertEqual(out.count("  File "), 1)
+        self.assertIn("The changes of this run were taken back.", out)
+        self.assertEqual(sorted(o.Name for o in doc.Objects), ["Params", "Plate"])     # the good steps of the run too
+        plate = doc.getObject("Plate")
+        self.assertTrue(plate.Visibility)
+        self.assertEqual(plate.Label, "Plate")
+        self.assertEqual([p for p in doc.getObject("Params").PropertiesList if p.startswith(("Hole", "Fillet"))], [])
+        self.assertEqual(doc.UndoCount, undo)
+        out = T.run_python("part = cad.hole(plate, 9, 100, 30)")        # the old variable works after that
+        self.assertIn("+ new Hole: Part::Cut", out)
+        self.assertNotIn("ERROR", out)
+
+    def test_a_wrong_call_of_a_helper(self):
+        doc = new_doc()
+        out = T.run_python("cad.plate(120, 80)")
+        self.assertIn("TypeError: cad.plate: missing a required argument: 'thickness'.\n"
+                      "Example: cad.plate(120, 80, 10)", out)
+        self.assertNotIn("helpers.py", out)
+        out = T.run_python("cad.cylinder(10, 20)")
+        self.assertIn("AttributeError: cad has no function cylinder. It has: plate, shaft,", out)
+        out = T.run_python("import cad\ncad.plate(1, 2, 3)")
+        self.assertIn("HINT: cad is there already, like App and Part. Do not import it.", out)
+        self.assertEqual(doc.Objects, [])
+
+    def test_the_model_cannot_lose_cad(self):
+        new_doc()
+        T.run_python("cad = None")
+        self.assertIn("Plate: plate 10 x 10 x 2.", T.run_python("cad.plate(10, 10, 2)"))
+
+    def test_the_library_is_loaded_by_the_first_run_not_with_the_tools(self):
+        # FreeCAD loads local_tools with the panel; the library is for the first run_python call
+        import ast
+        with open(T.__file__.replace(".pyc", ".py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        at_the_top = [a.name for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+                      for a in node.names]
+        self.assertNotIn("helpers", at_the_top)
+        self.assertIn("time_limit", at_the_top)               # the check does see such an import
+
+
 class Keys(unittest.TestCase):
     def tearDown(self):
         backends.set_api_key("")
@@ -683,7 +771,7 @@ class Dispatch(unittest.TestCase):
 
 
 suite = unittest.TestSuite()
-for case in (RunPython, Keys, State, ReadProjectFile, Dispatch):
+for case in (RunPython, Helpers, Keys, State, ReadProjectFile, Dispatch):
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
 result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(suite)
 sys.stdout.flush()

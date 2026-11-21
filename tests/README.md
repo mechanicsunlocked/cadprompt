@@ -126,7 +126,8 @@ For the unpacked `.7z` archive, in PowerShell:
 | `test_workbench` | python | Starts `freecadcmd` and `freecad` itself (found the same way as above). FreeCAD loads a copy of the addon from a new profile. |
 | `test_backends` | freecadcmd | The AI sources, what the built-in engine gets for each, and the environment for Claude Code. Every key is made up. |
 | `test_drawing_headless` | freecadcmd | The drawing rules, and a drawing call without a window. |
-| `test_local_tools` | freecadcmd | The four tools of the built-in engine. |
+| `test_helpers` | freecadcmd | The helper library `cad` (`cadprompt/helpers.py`): each function makes the part with the right volume, size and holes (the numbers come from formulas in the test), the part follows a changed value in `Params`, the one printed line, and the error text of a wrong call. The parts of the benchmark that a helper fits pass the benchmark's own checks. |
+| `test_local_tools` | freecadcmd | The four tools of the built-in engine, and `cad` in `run_python`. |
 | `test_local_bench` | freecadcmd | The checks of the benchmark `local_bench.py`: for each of its 20 requests a correct part passes and a part with a usual mistake fails. A scripted server plays the model. |
 | `test_migrate` | freecadcmd | A project that an older version made gets the new template files; a file that the user changed stays, and nothing is written through a link that leads out of the project. `old_template.json` holds the old files. |
 | `hoischen/gui_check` | freecad-gui | The DIN dimension layout in a real TechDraw page. FreeCAD loads the addon (`--module-path`), with the setting `ShowInTechDraw` on. |

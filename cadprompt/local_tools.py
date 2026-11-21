@@ -2,6 +2,7 @@
 
 run_python runs the model's code in one namespace that stays between calls,
 as one undo step, and reports what changed in words a small model can act on.
+`cad` in that namespace is the helper library (helpers.py).
 The built-in engine and the bridge to Claude Code use the same functions
 (local_prompt.TOOLS names them); get_view is for the bridge only.
 """
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import textwrap
 import traceback
+import types
 
 import FreeCAD as App
 
@@ -44,6 +46,7 @@ HINTS = (
                                           "object: for example doc.removeObject(obj.Name)."),
     ("Unit mismatch", 'HINT: a size and a plain number cannot be added. Give the number its unit in '
                       'the expression: "Params.X + 1 mm", not "Params.X + 1".'),
+    ("No module named 'cad'", "HINT: cad is there already, like App and Part. Do not import it."),
 )
 
 # The system prompt forbids shell, network and deleting files. This refuses the
@@ -301,11 +304,29 @@ def get_document_state():
     return "\n".join([line for line in lines if line] + _problem_lines(doc))
 
 
+def _not_in_helpers(tb):
+    """The same traceback without the frames inside the helper library `cad`.
+
+    Its errors say what is wrong and show a correct call. The lines of the
+    library, with the path of the addon, would only take room in the result.
+    """
+    library = (__package__ or "cadprompt") + ".helpers"
+    frames = []
+    while tb is not None:
+        if tb.tb_frame.f_globals.get("__name__") != library:
+            frames.append(tb)
+        tb = tb.tb_next
+    for frame in reversed(frames):
+        tb = types.TracebackType(tb, frame.tb_frame, frame.tb_lasti, frame.tb_lineno)
+    return tb
+
+
 def _traceback(code):
     """The traceback of the model's code only, with its source lines, without our own frames."""
     etype, exc, tb = sys.exc_info()
     while tb is not None and tb.tb_frame.f_code.co_filename != "<ai>":
         tb = tb.tb_next
+    tb = _not_in_helpers(tb)
     linecache.cache["<ai>"] = (len(code), None, code.splitlines(True), "<ai>")
     try:
         return "".join(traceback.format_exception(etype, exc, tb, limit=-3))
@@ -332,8 +353,9 @@ def run_python(code, project=""):
         return ("ERROR: this code was not run, because `%s` is not allowed here. Use FreeCAD only: "
                 "no shell, no network, no deleting of files." % refused)
     import Part
+    from . import helpers       # here, not at the top: FreeCAD does not load it when it starts
     ns = _namespace
-    ns.update({"App": App, "FreeCAD": App, "Part": Part, "math": math,
+    ns.update({"App": App, "FreeCAD": App, "Part": Part, "math": math, "cad": helpers,
                "doc": App.ActiveDocument, "PROJECT": project})
     for mod in ("Sketcher", "Draft"):
         if mod not in ns:
