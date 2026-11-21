@@ -285,6 +285,7 @@ class Shaft(Case):
         self.volume(self.quiet(cad.shaft, [30, 40, 20, 60]), wanted)
         self.volume(self.quiet(cad.shaft, diameter=30, length=40), disc(30, 40))
         self.volume(self.quiet(cad.shaft, d=30, l=40), disc(30, 40))
+        self.volume(self.quiet(cad.shaft, diameter=30, height=40), disc(30, 40))
         self.box(self.quiet(cad.shaft, 30, 40, "x"), (0, -15, -15), (40, 15, 15))
 
     def test_along_another_axis(self):

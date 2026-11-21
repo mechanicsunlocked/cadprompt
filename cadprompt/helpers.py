@@ -13,9 +13,10 @@ a FreeCAD that does not have this addon.
 Places: millimetres and degrees, in the coordinates of the document.
 cad.plate lies like a Part::Box (x from 0 to length, y from 0 to width, z from
 0 to thickness), so x and y of a hole are its distances from two edges. A
-shaft, a tube and a pipe stand on the origin along z. Holes and slots go
-through along z. A hole, a slot or a pattern without a place is in the middle
-of the part.
+shaft, a tube and a pipe stand on the origin along z; axis="x" or "y" lays
+them down. Holes and slots go through along z; a depth makes them blind from
+the top, an axis turns a hole. A hole, a slot or a pattern without a place is
+in the middle of the part.
 
 A part can be given as the object, its Name or its Label. When a later step
 used it up (the plate, after its holes were cut), the newest result of that
@@ -52,7 +53,8 @@ EDGE_WORDS = {"vertical": "z", "corners": "z", "upright": "z"}
 SPELLINGS = (("d", "diameter"), ("dia", "diameter"), ("outer_diameter", "diameter"), ("outside_diameter", "diameter"),
              ("inner_diameter", "bore"), ("inside_diameter", "bore"), ("t", "thickness"), ("h", "thickness"),
              ("height", "thickness"), ("t", "wall"), ("thickness", "wall"), ("wall_thickness", "wall"),
-             ("l", "length"), ("w", "width"), ("r", "radius"), ("distance", "size"), ("centre", "center"),
+             ("l", "length"), ("height", "length"), ("h", "length"), ("w", "width"), ("r", "radius"),
+             ("distance", "size"), ("centre", "center"),
              ("n", "count"), ("holes", "count"), ("number", "count"), ("columns", "nx"), ("cols", "nx"),
              ("rows", "ny"), ("pitch_x", "dx"), ("pitch_y", "dy"), ("pitch", "dx"), ("spacing", "dx"),
              ("margin", "edge"), ("pcd", "circle"), ("circle_diameter", "circle"), ("start_angle", "start"),
@@ -512,6 +514,7 @@ def plate(length, width, thickness, name=None):
 @_helper("cad.shaft(30, 40, 20, 60)")
 def shaft(*steps, axis="z", name=None, diameter=None, length=None):
     """A round bar, a disc or a stepped shaft from the origin along z: diameter, length of each step.
+    axis="x" lays it along x.
 
         shaft = cad.shaft(30, 40, 20, 60)      # d30 for 40, then d20 for 60
         disc = cad.shaft(120, 12)
