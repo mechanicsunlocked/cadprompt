@@ -98,6 +98,10 @@ works at once: Claude Code is stopped when it is at work for that service.
   When you turn it on, a warning tells you what that means. While it is on,
   the panel shows the marker "runs without asking"; one click on the marker
   turns it off again.
+- **Training data** (Settings): off in a new installation. When you turn it
+  on, the good requests to a local model or with an API key are also kept in
+  the file `training/requests.jsonl` of the project. Nothing is sent. See
+  "Training data" below.
 - **Undo**: each step of the AI is one Undo step in FreeCAD. Before the first
   change of a request, the model file is copied to `model/.backup/`. A request
   that ends with an error is not saved over your file.
@@ -199,6 +203,54 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   `127.0.0.1` and `localhost` to `NO_PROXY` for Claude Code, so the requests to
   FreeCAD stay on this computer.
 
+### Training data: a file in the project, off until you turn it on
+
+Settings has the check box **Save good requests as training data in the
+project**. It is off in a new installation. Off means: no file is made, nothing
+is written, and a file that is there already is left alone.
+
+When it is on, each request to a local model or with an API key that ended
+without a problem is added as one line to the file `training/requests.jsonl`
+in the project folder. The file is there so that a small local model can learn
+from real, good requests later. **Nothing is sent anywhere, and no connection
+is made for it.** The file stays on this computer, and CADprompt only adds
+lines to it. It is a text file: you can open it in an editor and delete it at
+any time. The first time a request is saved in a project, the chat says so in
+one line and names the file.
+
+- **Which requests.** Only those that ended well: no error, not stopped, not
+  cut off, the step limit not reached, no problem left in the model, no
+  drawing that failed, no step that you answered with Skip, and the model was
+  saved. A question that changed nothing is not written. A request in which a
+  step failed and the AI repaired it is written whole, with the error and the
+  repair.
+- **What a line holds.** The time, the source (local model or API key), the
+  name of the model, the mode (Build or Teach), the instructions that CADprompt
+  gave the model, the names of the tools, and the messages of the request: your
+  message, the code that the AI wrote, what the tools reported, and the final
+  answer. When the request was a follow-up, the earlier messages that the model
+  got are there too, marked as context.
+- **What is never written.** A saved key, or the token of the server for Claude
+  Code. The pixels of an image: only its path in the project. The text of a
+  project file that the AI read with `read_project_file`: only its path and
+  its length, because `refs/` can hold pages of a book. Claude's thinking
+  blocks. The path of the project folder and of your home folder, which has
+  your user name in it: the words `PROJECT` and `~` stand for them.
+- **What is written as it is.** Your own words, the code of the AI and the
+  answers of the AI. A name or an address that you type into a message is in
+  the file. When the AI says in its own words what a file holds, that is in the
+  file too; a long line that it copies from the file is taken out. Read the
+  file before you give it to another person.
+- **Claude Code.** Requests that Claude Code ran (the Claude account, or
+  another endpoint) are not written.
+- **Where the file is safe.** On Linux and macOS only you can read the file and
+  its folder (modes 0600 and 0700). Windows has no such modes: there the file
+  has the permissions of the project folder. The file is a part of the project
+  folder: when you share or sync that folder, the file goes with it. CADprompt
+  writes only inside the project: when `training` or the file is a link to
+  another place, nothing is written, and the chat says so once. A file that
+  cannot be written never stops a request.
+
 ### Every connection that CADprompt can make
 
 | Connection | When | What is sent | What must be true first |
@@ -213,7 +265,9 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
 | The server inside FreeCAD for Claude Code (`127.0.0.1`, incoming only) | listens from your first message to Claude until the panel closes | nothing leaves the computer | your Allow for Claude Code; each request needs the token |
 
 CADprompt makes no other connection: no update check, no telemetry, no
-download. FreeCAD's Addon Manager, not CADprompt, gets the updates.
+download. FreeCAD's Addon Manager, not CADprompt, gets the updates. The
+training data (above) is a file on this computer: it has no row here, because
+nothing is sent.
 
 ## What is not done yet
 
