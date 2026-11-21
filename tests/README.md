@@ -135,6 +135,7 @@ For the unpacked `.7z` archive, in PowerShell:
 | `test_consent_gui` | freecad-gui | The question before data leaves the computer, and a new installation. Counting servers and the pretend `claude` prove that nothing is contacted and nothing is started before Allow: a new profile, a model server on another computer, the API key, Find models, Claude Code and its sign-in check. Also: a server on this computer needs no question, a new host asks again, Forget, and the TechDraw checkbox. |
 | `test_bridge_gui` | freecad-gui | The bridge for Claude Code in a real FreeCAD: tool calls from other threads run in the main thread, the approval question, start and stop of the server. Client threads play Claude Code. |
 | `test_drawing_gui` | freecad-gui | Drawings with pages, views and PDF files. |
+| `test_helpers_gui` | freecad-gui | The helper library `cad` in the window: a helper call that fails shows the same objects as before (FreeCAD's window switches the inputs of a cut and of a fuse off itself), also when the code of the model catches the error. |
 | `test_integration_gui` | freecad-gui | The whole addon. A scripted server plays the model. |
 | `test_local_engine` | freecad-gui | The built-in engine with both formats, images, and the gate for outgoing requests. Scripted servers play the model. |
 | `test_panel` | freecad-gui | The panel and the settings dialog. A stub engine, and a pretend `claude` that calls the real bridge as Claude Code does. |

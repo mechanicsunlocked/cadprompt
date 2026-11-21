@@ -355,6 +355,9 @@ class _Build:
         self.opened = doc is None and App.ActiveDocument is None
         self.doc = doc or App.ActiveDocument or App.newDocument("Model")
         self.before = {o.Name for o in self.doc.Objects}
+        # what the user sees now. FreeCAD's window switches the inputs of a cut or a fuse off itself
+        # when the link is set, so hide() cannot know what it must put back.
+        self.shown = [o.Name for o in self.doc.Objects if getattr(o, "Visibility", False)]
         self.params = None
         self.bound = []          # the parameters of this call, for the printed line
         self.added = []          # those that were not there before
@@ -389,6 +392,9 @@ class _Build:
                 call()
             except Exception:
                 pass
+        for obj in filter(None, map(doc.getObject, self.shown)):
+            if not obj.Visibility:
+                obj.Visibility = True
         doc.recompute()
 
     def _varset(self, make=True):
@@ -439,8 +445,7 @@ class _Build:
         for obj in objects:
             try:
                 if obj.Visibility:
-                    obj.Visibility = False
-                    self.back.append(functools.partial(setattr, obj, "Visibility", True))
+                    obj.Visibility = False       # undo() shows it again
             except Exception:
                 view = getattr(obj, "ViewObject", None)      # a FreeCAD without that property
                 if view is not None:
