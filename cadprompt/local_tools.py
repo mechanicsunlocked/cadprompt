@@ -25,6 +25,7 @@ from . import time_limit
 
 MAX_OUTPUT = 3000        # characters of a tool result; a small model has a short context
 MAX_FILE = 6000          # characters of a project file
+MAX_NAMES = 8            # names in one line of a report; the rest is a number
 BINARY = (".fcstd", ".fcbak", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf", ".step",
           ".stp", ".iges", ".igs", ".stl", ".zip", ".brep")
 RUN_SECONDS = 60         # the longest that the Python lines of one run_python call may run
@@ -179,7 +180,8 @@ def _describe(obj):
             else:
                 bb = shape.BoundBox
                 parts.append("size %.3f x %.3f x %.3f" % (bb.XLength, bb.YLength, bb.ZLength))
-                parts.append("min (%.3f, %.3f, %.3f)" % (bb.XMin, bb.YMin, bb.ZMin))
+                # + 0.0: a corner at -0.0000000001 is at 0.000, not at -0.000
+                parts.append("min (%.3f, %.3f, %.3f)" % tuple(round(v, 3) + 0.0 for v in (bb.XMin, bb.YMin, bb.ZMin)))
                 if shape.Solids:
                     parts.append("volume %.3f" % shape.Volume)
                 parts.append("%d solids, %d faces" % (len(shape.Solids), len(shape.Faces)))
@@ -223,6 +225,30 @@ def _snapshot():
     if doc is None:
         return {}
     return {o.Name: _describe(o) for o in doc.Objects if not _origin_part(o)}
+
+
+def _used_up(doc, bad):
+    """{name of an object: name of the part that it went into}.
+
+    The base and the tool bodies of a cut, a fuse, a fillet or a compound of the
+    Part workbench. A report gives the part in full and only the names of what
+    it was made from: one pattern of holes has ten such objects, and their lines
+    pushed the result itself out of what a small model can read. A broken
+    object keeps its own line, and so do the features of a PartDesign body.
+    `bad` is the result of _bad(doc).
+    """
+    from . import helpers
+    out = {}
+    for obj in doc.Objects if doc is not None else []:
+        if obj.Name not in bad and any(u.TypeId.startswith("Part::") for u in helpers.users(obj)):
+            out[obj.Name] = helpers.newest(obj).Name
+    return out
+
+
+def _names(names):
+    if len(names) > MAX_NAMES:
+        return "%s ... (%d objects)" % (", ".join(names[:MAX_NAMES]), len(names))
+    return ", ".join(names)
 
 
 def _no_input(obj):
@@ -288,11 +314,20 @@ def get_document_state():
     if doc is None:
         return "There is no open document."
     snap = _snapshot()
+    bad = _bad(doc)
+    part_of = _used_up(doc, bad)
     lines = ['Document "%s"%s, %d objects:' % (
         doc.Name, ", file " + os.path.basename(doc.FileName) if doc.FileName else ", not saved yet",
         len(snap))]
+    rows = []
+    for name, text in snap.items():
+        if part_of.get(name) not in snap:
+            rows.append("- %s: %s" % (name, text))
+            inside = [n for n in snap if part_of.get(n) == name]
+            if inside:
+                rows.append("  made from: " + _names(inside))
     # only the list is cut: the selection and the problem lines after it must always arrive
-    lines.append(_clip("\n".join("- %s: %s" % (name, text) for name, text in snap.items())))
+    lines.append(_clip("\n".join(rows)))
     if App.GuiUp:
         import FreeCADGui as Gui
         sel = Gui.Selection.getSelectionEx()
@@ -301,7 +336,7 @@ def get_document_state():
                 s.ObjectName + (" " + ",".join(s.SubElementNames) if s.SubElementNames else "") for s in sel))
         else:
             lines.append("Selection: none")
-    return "\n".join([line for line in lines if line] + _problem_lines(doc))
+    return "\n".join([line for line in lines if line] + _problem_lines(doc, bad))
 
 
 def _not_in_helpers(tb):
@@ -454,12 +489,18 @@ def run_python(code, project=""):
     if out.getvalue().strip():
         # indented, so that a printed line can never look like one of the tool's own lines
         lines.append("OUTPUT:\n" + textwrap.indent(_clip(out.getvalue().strip(), MAX_OUTPUT // 2), "  "))
-    changes = []
+    # after a step back the lists of bad_now are old: look again
+    bad = _bad(doc) if failed or doc is None or doc.Name not in bad_now else bad_now[doc.Name]
+    part_of = _used_up(doc, bad)
+    changes, inside = [], {}
     for name, text in after.items():
-        if name not in before:
-            changes.append("+ new %s: %s" % (name, text))
-        elif before[name] != text:
-            changes.append("~ changed %s: %s" % (name, text))
+        mark = "+ new" if name not in before else "~ changed" if before[name] != text else ""
+        if mark and part_of.get(name) in after:
+            inside.setdefault((mark, part_of[name]), []).append(name)
+        elif mark:
+            changes.append("%s %s: %s" % (mark, name, text))
+    # the parts first, then what they are made from: when the list is cut, the parts stay
+    changes += ["%s, used for %s: %s" % (mark, part, _names(names)) for (mark, part), names in inside.items()]
     changes += ["- removed %s" % n for n in before if n not in after]
     if made is not None:
         lines.append('No document was open: the new document "%s" was made.' % made.Name)
@@ -478,8 +519,7 @@ def run_python(code, project=""):
         # cut the list only: the lines above and the problem lines below must always arrive
         room = max(MAX_OUTPUT - sum(len(line) + 1 for line in lines), MAX_OUTPUT // 4)
         lines.append(_clip("CHANGES:\n" + ("\n".join(changes) if changes else "no object changed"), room))
-    # after a step back the lists of bad_now are old: look again
-    lines += _problem_lines(doc, None if failed or doc is None else bad_now.get(doc.Name))
+    lines += _problem_lines(doc, bad)
     if App.GuiUp and changes and not error:
         try:
             ns["Gui"].SendMsgToActiveView("ViewFit")

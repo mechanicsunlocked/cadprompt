@@ -191,8 +191,9 @@ def _linked(value):
         yield value
 
 
-def _users(obj):
-    """The solid objects that are made from `obj`: through a link, not through an expression."""
+def users(obj):
+    """The solid objects that are made from `obj`: through a link, not through an expression.
+    The report of run_python uses it too."""
     out = []
     for other in obj.InList:
         if other.TypeId in COPIES or not other.isDerivedFrom("Part::Feature"):
@@ -213,10 +214,10 @@ def newest(obj):
     """The last result that was made from `obj`, or `obj` itself. make_drawing uses it too."""
     seen = {obj.Name}
     while True:
-        users = [u for u in _users(obj) if u.Name not in seen]
-        if not users:
+        later = [u for u in users(obj) if u.Name not in seen]
+        if not later:
             return obj
-        obj = max(users, key=lambda u: u.ID)
+        obj = max(later, key=lambda u: u.ID)
         seen.add(obj.Name)
 
 
@@ -224,7 +225,7 @@ def _parts(doc):
     """The names of the parts of the document: every solid object that nothing was made from."""
     if doc is None:
         return []
-    return [o.Name for o in doc.Objects if _solids(o) and not _users(o) and getattr(o, "Visibility", True)]
+    return [o.Name for o in doc.Objects if _solids(o) and not users(o) and getattr(o, "Visibility", True)]
 
 
 def _find(part):
@@ -279,22 +280,29 @@ class _Where:
 
     The expression reads the bounding box of the part, so a hole stays in the
     middle and stays a through hole when a size of the part changes. Where
-    FreeCAD's quick bounding box is not exact (a rounded edge), the number of
-    today is used and `loose` is set.
+    FreeCAD does not give the right number for that expression, the number of
+    today is used and `loose` is set: the bounding box that an expression can
+    read is too large for a part with a rounded edge, and an object with the
+    name of a unit ("T", "Pa") cannot be read at all.
     """
 
     def __init__(self, base):
-        self.base, self.loose = base, False
-        self.box, self.quick = _true_box(base.Shape), base.Shape.BoundBox
+        self.base, self.loose, self.texts = base, False, {}
+        self.box = _true_box(base.Shape)
 
     def number(self, side):
         return getattr(self.box, side)
 
     def side(self, side):
-        if abs(getattr(self.quick, side) - self.number(side)) < TOL:
-            return "%s.Shape.BoundBox.%s * 1 mm" % (self.base.Name, side)
-        self.loose = True
-        return "%.12g mm" % self.number(side)
+        if side not in self.texts:
+            text = "%s.Shape.BoundBox.%s * 1 mm" % (self.base.Name, side)
+            try:
+                follows = abs(self.base.evalExpression(text).Value - self.number(side)) < TOL
+            except Exception:
+                follows = False
+            self.texts[side] = text if follows else "%.12g mm" % self.number(side)
+        self.loose = self.loose or "BoundBox" not in self.texts[side]
+        return self.texts[side]
 
     def middle(self, axis):
         low, high = SIDES[axis]
@@ -524,12 +532,12 @@ def shaft(*steps, axis="z", name=None, diameter=None, length=None):
             b.bind(result, "Height", b.param(tag, "Length", pairs[0][1]))
         else:
             parts, lengths = [], []
-            for n, (diameter, length) in enumerate(pairs, 1):
+            for n, (thick, long) in enumerate(pairs, 1):
                 step = b.add("Part::Cylinder", "%s_Step%d" % (tag, n))
-                b.bind(step, "Radius", b.param(tag, "D%d" % n, diameter) + " / 2")
+                b.bind(step, "Radius", b.param(tag, "D%d" % n, thick) + " / 2")
                 if lengths:
-                    b.bind(step, "Placement.Base.z", " + ".join(lengths))
-                lengths.append(b.param(tag, "L%d" % n, length))
+                    b.bind(step, "Placement.Base.z", " + ".join(lengths))      # on top of the steps before it
+                lengths.append(b.param(tag, "L%d" % n, long))
                 b.bind(step, "Height", lengths[-1])
                 parts.append(step)
             result = b.add("Part::MultiFuse", tag, name)
@@ -539,7 +547,7 @@ def shaft(*steps, axis="z", name=None, diameter=None, length=None):
         b.done(result)
         if len(_solids(result)) != 1:
             raise _Wrong("the steps do not make one solid.")
-        what = " + ".join("d%s x %s" % (_text(d), _text(length)) for d, length in pairs)
+        what = " + ".join("d%s x %s" % (_text(d), _text(long)) for d, long in pairs)
         return b.line(result, "shaft along %s, %s, %s long" % (axis, what, _text(sum(p[1] for p in pairs))))
 
 
@@ -596,7 +604,8 @@ def pipe(diameter, wall=None, length=None, bore=None, axis="z", name=None):
     inside = _size(bore, "bore") if wall is None else diameter - 2 * _size(wall, "wall")
     if not 0 < inside < diameter:
         raise _Wrong("the %s does not fit into the diameter %s." % (
-            "bore %s" % _text(bore) if wall is None else "wall %s" % _text(wall), _text(diameter)))
+            "bore %s" % _text(bore) if wall is None
+            else "wall %s (for an inside diameter give bore=)" % _text(wall), _text(diameter)))
     axis = _axis(axis)
     with _Build() as b:
         tag = b.tag(name, "Pipe")
@@ -699,18 +708,21 @@ def _outside(where, axes, places, what="hole"):
                             axes[1], where.span(axes[1])))
 
 
+def _reach(b, where, tag, depth, axis):
+    """(where a tool starts along the axis, how long it is), as the texts of expressions."""
+    low, high = SIDES[axis]
+    if depth is None:        # through: 1 mm longer than the part at both ends, so no face lies on a face
+        return "%s - 1 mm" % where.side(low), "%s - (%s) + 2 mm" % (where.side(high), where.side(low))
+    deep = b.param(tag, "Depth", depth)          # from the high side (the top) down
+    return "%s - %s" % (where.side(high), deep), deep + " + 1 mm"
+
+
 def _drill(b, base, where, tag, diameter, places, depth, axis):
     """Cut one round hole for each place into `base`. `diameter` and the two coordinates of a
     place (across the axis) are the texts of expressions."""
-    low, high = SIDES[axis]
     axes = [a for a in "xyz" if a != axis]
     radius = diameter + " / 2"
-    if depth is None:        # 1 mm longer than the part at both ends
-        start = "%s - 1 mm" % where.side(low)
-        height = "%s - (%s) + 2 mm" % (where.side(high), where.side(low))
-    else:                    # from the top (the high side) down
-        deep = b.param(tag, "Depth", depth)
-        start, height = "%s - %s" % (where.side(high), deep), deep + " + 1 mm"
+    start, height = _reach(b, where, tag, depth, axis)
     tools = []
     for n, (u, v) in enumerate(places, 1):
         tool = b.add("Part::Cylinder", "%s_Tool%s" % (tag, n if len(places) > 1 else ""))
@@ -731,7 +743,9 @@ def _holes(count, diameter, depth, axis):
 
 
 def _loose(where, more=()):
-    return list(more) + (["the place (the part has a rounded edge there)"] if where.loose else [])
+    """What the printed line names as not bound."""
+    return list(more) + (["the sides of the part (the cut does not follow when the part changes)"]
+                         if where.loose else [])
 
 
 @_helper("cad.hole(plate, 9, 20, 30)")
@@ -914,12 +928,7 @@ def slot(part, width, length, x=None, y=None, angle=0, depth=None, name=None):
         w, long = b.param(tag, "Width", width), b.param(tag, "Length", length)
         centre = [_spot(b, where, tag, a, v, a.upper()) for a, v in zip("xy", point)]
         turn = b.param(tag, "Angle", angle, "Angle")
-        if depth is None:
-            start = "%s - 1 mm" % where.side("ZMin")
-            height = "%s - (%s) + 2 mm" % (where.side("ZMax"), where.side("ZMin"))
-        else:
-            deep = b.param(tag, "Depth", depth)
-            start, height = "%s - %s" % (where.side("ZMax"), deep), deep + " + 1 mm"
+        start, height = _reach(b, where, tag, depth, "z")
         # Built along x around the origin, then the fuse of the three is put into its place.
         half = "(%s - %s) / 2" % (long, w)
         ends = [b.add("Part::Cylinder", "%s_End%d" % (tag, n)) for n in (1, 2)]
@@ -1029,10 +1038,10 @@ def _edge_feature(kind, part, size, what, edges, name):
         b.name_after(result, base)
         b.hide(base)
         b.doc.recompute()
-        if _problem(result) or len(_solids(result)) != pieces:
+        problem = _problem(result)
+        if problem or len(_solids(result)) != pieces:
             raise _Wrong("FreeCAD could not make a %s of %s on these %d edges%s. Use a smaller %s, or other edges."
-                         % (kind.lower(), _text(size), len(numbers),
-                            " (%s)" % _problem(result) if _problem(result) else "", what))
+                         % (kind.lower(), _text(size), len(numbers), " (%s)" % problem if problem else "", what))
         b.done(result)
         return b.line(result, "%s %s%s on %d edges (%s) of %s" % (
             kind.lower(), "r" if kind == "Fillet" else "", _text(size) + ("" if kind == "Fillet" else " x 45 degrees"),

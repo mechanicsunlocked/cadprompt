@@ -371,7 +371,8 @@ class Pipe(Case):
         self.box(self.quiet(cad.pipe, 20, 2, 30, axis="x"), (0, -10, -10), (30, 10, 10))
 
     def test_wrong_calls(self):
-        self.wrong(ValueError, "the wall 10 does not fit into the diameter 20.", cad.pipe, 20, 10, 15)
+        self.wrong(ValueError, "the wall 10 (for an inside diameter give bore=) does not fit into the diameter 20.",
+                   cad.pipe, 20, 10, 15)
         self.wrong(ValueError, "the bore 25 does not fit into the diameter 20.", cad.pipe, 20, bore=25, length=15)
         self.wrong(ValueError, "give the wall or bore=, one of the two.", cad.pipe, 20, length=15)
         self.wrong(ValueError, "give the wall or bore=, one of the two.", cad.pipe, 20, 2, 15, bore=10)
@@ -537,6 +538,24 @@ class Hole(Case):
         self.volume(part, 40 * 30 * 10 - disc(8, 10))
         self.assertEqual(holes(self.doc), [(120.0, 65.0, 10.0, 8.0)])
         self.one_part(part, also=("Part::Feature",))
+
+    def test_a_part_with_the_name_of_a_unit(self):
+        # "A" is ampere in an expression: FreeCAD cannot read A.Shape there, so the place is a number
+        raw = self.doc.addObject("Part::Box", "A")
+        raw.Length, raw.Width, raw.Height = 40, 30, 10
+        self.doc.recompute()
+        part, line = self.made(cad.hole, "A", 8)
+        self.volume(part, 40 * 30 * 10 - disc(8, 10))
+        self.assertEqual(holes(self.doc), [(20.0, 15.0, 5.0, 8.0)])
+        self.assertIn("Not bound: the sides of the part", line)
+        self.change(Hole_Diameter=10)
+        self.volume(part, 40 * 30 * 10 - disc(10, 10))
+        other = self.doc.addObject("Part::Box", "Pa")
+        self.doc.recompute()
+        moved = self.quiet(cad.move, "Pa", 100, 0, 5)    # the names of its own parameters can be read
+        self.box(moved, (100, 0, 5), (110, 10, 15))
+        self.change(Pa_PosX=200)
+        self.box(other, (200, 0, 5), (210, 10, 15))
 
     def test_wrong_calls(self):
         plate = self.quiet(cad.plate, 120, 80, 10)
@@ -952,7 +971,7 @@ class Chains(Case):
         self.assertGreater(rounded.Shape.BoundBox.XLength, 100.5)
         part, line = self.made(cad.hole, plate, 8)
         self.assertIn((50.0, 30.0, 5.0, 8.0), holes(self.doc))
-        self.assertIn("Not bound: the place (the part has a rounded edge there).", line)
+        self.assertIn("Not bound: the sides of the part (the cut does not follow when the part changes).", line)
         self.change(Plate_Thickness=20)                  # the height is exact, so the hole still goes through
         self.assertTrue([f for f in bench_checks.measure(self.doc)["features"] if f["kind"] == "hole"][0]["through"])
         corner, line = self.made(cad.hole_grid, plate, 4, 2, 2, edge=12)

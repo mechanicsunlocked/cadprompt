@@ -93,6 +93,43 @@ class RunPython(unittest.TestCase):
         self.assertEqual([o.Name for o in doc.Objects], ["Plate"])
         self.assertAlmostEqual(doc.Plate.Shape.Volume, 50000.0)     # recomputed for the model
 
+    def test_what_a_cut_is_made_from_is_named_not_described(self):
+        doc = new_doc()
+        out = T.run_python('blank = doc.addObject("Part::Box", "Blank")\n'
+                           'blank.Length, blank.Width, blank.Height = 100, 50, 10\n'
+                           'drill = doc.addObject("Part::Cylinder", "Drill")\ndrill.Radius, drill.Height = 5, 10\n'
+                           'drill.Placement.Base = App.Vector(50, 25, 0)\n'
+                           'spare = doc.addObject("Part::Cylinder", "Spare")\n'
+                           'cut = doc.addObject("Part::Cut", "Plate")\ncut.Base, cut.Tool = blank, drill')
+        rows = out.splitlines()
+        self.assertEqual(rows[0], "CHANGES:")
+        self.assertTrue(rows[1].startswith("+ new Spare: Part::Cylinder, size 4.000 x 4.000 x 10.000"), out)   # not used: a body
+        self.assertTrue(rows[2].startswith("+ new Plate: Part::Cut, size 100.000 x 50.000 x 10.000"), out)
+        self.assertEqual(rows[3:], ["+ new, used for Plate: Blank, Drill"])
+        out = T.run_python("drill.Radius = 8")                # a change of a tool shows in the part
+        self.assertIn("~ changed Plate: Part::Cut", out)
+        self.assertIn("~ changed, used for Plate: Drill", out.splitlines())
+        state = T.get_document_state().splitlines()
+        self.assertEqual(state[0], 'Document "Model", not saved yet, 4 objects:')
+        self.assertTrue(state[1].startswith("- Spare: Part::Cylinder"))
+        self.assertTrue(state[2].startswith("- Plate: Part::Cut"))
+        self.assertEqual(state[3], "  made from: Blank, Drill")
+        self.assertEqual(len(doc.Objects), 4)
+
+    def test_a_broken_object_keeps_its_own_line(self):
+        doc = doc_without_undo(self)
+        out = T.run_python('inner = doc.addObject("Part::Cut", "Inner")\n'
+                           'box = doc.addObject("Part::Box", "Box")\n'
+                           'outer = doc.addObject("Part::Cut", "Outer")\nouter.Base, outer.Tool = inner, box')
+        self.assertIn("+ new Inner: Part::Cut, EMPTY SHAPE", out)        # used for Outer, but broken: with its reason
+        self.assertIn("error: ", [r for r in out.splitlines() if r.startswith("+ new Inner")][0])
+        self.assertIn("+ new, used for Outer: Box", out.splitlines())
+        self.assertIn("PROBLEM OBJECTS: Inner, Outer", out.splitlines())
+        state = T.get_document_state()
+        self.assertIn("- Inner: Part::Cut, EMPTY SHAPE", state)
+        self.assertIn("  made from: Box", state.splitlines())
+        self.assertEqual(len(doc.Objects), 3)
+
     def test_changed_and_removed_objects(self):
         new_doc()
         T.run_python('b = doc.addObject("Part::Box", "Plate")\nc = doc.addObject("Part::Cylinder", "Pin")')
@@ -443,6 +480,10 @@ class Helpers(unittest.TestCase):
         self.assertIn("~ changed Params:", out)
         self.assertIn("Hole_Diameter = 9.0 mm", out)
         self.assertNotIn("PROBLEM", out)
+        # what the part was made from: the names only
+        self.assertIn("~ changed, used for Hole: Plate", out.splitlines())
+        self.assertIn("+ new, used for Hole: Hole_Tool", out.splitlines())
+        self.assertNotIn("Hole_Tool:", out)
         self.assertEqual(len(doc.getObject("Hole").Shape.Solids), 1)
         self.assertEqual(doc.UndoCount, 2)                    # one undo step for each call
         doc.undo()
@@ -450,6 +491,30 @@ class Helpers(unittest.TestCase):
         self.assertEqual(sorted(o.Name for o in doc.Objects), ["Params", "Plate"])
         self.assertTrue(doc.getObject("Plate").Visibility)
         self.assertNotIn("Hole_Diameter", doc.getObject("Params").PropertiesList)
+
+    def test_the_result_of_a_pattern_is_short_and_the_part_is_in_it(self):
+        doc = new_doc()
+        T.run_python("plate = cad.plate(300, 200, 12)")
+        out = T.run_python("cad.hole_grid(plate, 9, 6, 4, 40, 40)")
+        self.assertLess(len(out), 1000, out)                  # was cut at 3000, with the cut itself not in it
+        self.assertIn("OUTPUT:\n  HoleGrid: 24 through holes d9 along z, 6 along x by 4 along y", out)
+        self.assertIn("+ new HoleGrid: Part::Cut, label \"Plate\", size 300.000 x 200.000 x 12.000", out)
+        self.assertIn("1 solids, 30 faces", out)
+        self.assertIn("+ new, used for HoleGrid: HoleGrid_Tool1, HoleGrid_Tool2, HoleGrid_Tool3, HoleGrid_Tool4, "
+                      "HoleGrid_Tool5, HoleGrid_Tool6, HoleGrid_Tool7, HoleGrid_Tool8 ... (25 objects)", out.splitlines())
+        self.assertNotIn("output cut", out)
+        out = T.run_python("cad.fillet(plate, 10)\nframe = cad.frame(500, 300, 30, 30, 2)")
+        self.assertIn("+ new Frame: Part::Compound, size 500.000 x 300.000 x 30.000", out)
+        self.assertIn("4 solids", out)
+        state = T.get_document_state()
+        self.assertLess(len(state), 1200, state)
+        self.assertIn('Document "Model", not saved yet, %d objects:' % len(doc.Objects), state)
+        rows = state.splitlines()
+        self.assertEqual([r.split(":")[0] for r in rows if r.startswith("- ")], ["- Params", "- Fillet", "- Frame"])
+        after = rows[rows.index([r for r in rows if r.startswith("- Fillet: Part::Fillet, label \"Plate\"")][0]) + 1]
+        self.assertTrue(after.startswith("  made from: Plate, HoleGrid_Tool1,") and after.endswith("... (27 objects)"), after)
+        self.assertIn("  made from: Frame_Bar1_Outside, Frame_Bar1_Inside, Frame_Bar1,", state)
+        self.assertNotIn("PROBLEM", state)
 
     def test_a_document_is_made_for_the_first_helper(self):
         for d in list(App.listDocuments()):
