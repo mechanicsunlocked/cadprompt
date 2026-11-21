@@ -1367,6 +1367,33 @@ class Library(Case):
                 self.assertTrue(result.Shape.isValid() and result.Shape.Solids)
         self.assertTrue(cad.__doc__ and "Params" in cad.__doc__)
 
+    def test_the_prompt_lists_every_helper_and_each_of_its_lines_runs(self):
+        # local_prompt.REMINDERS is what a small model writes its calls from: a line there that
+        # fails, or a helper that is not there, costs the model its steps
+        import re
+        from cadprompt import local_prompt
+        text = local_prompt.REMINDERS
+        calls = re.findall(r"cad\.\w+\((?:[^()]|\([^()]*\))*\)", text)
+        self.assertEqual(sorted(set(c.split("(")[0][4:] for c in calls)), sorted(cad.__all__))
+        self.assertIn("Use a cad helper when one fits, raw FreeCAD code only for the rest.", text)
+        for call in calls:
+            new_doc()
+            with contextlib.redirect_stdout(io.StringIO()):
+                names = {"cad": cad, "p": cad.plate(90, 50, 8), "s": cad.shaft(40, 50, 25, 80)}
+                names["t"] = cad.move(cad.tube(50, 30, 3, 70), 45, 25, 8)
+                with self.subTest(line=call):
+                    result = eval(call, names)
+                    self.assertTrue(result.Shape.isValid() and result.Shape.Solids)
+        raw = re.search(r"o = Part\.show\(.*\"Wedge\"\)", text)
+        self.assertTrue(raw)
+        new_doc()
+        names = {"cad": cad, "App": App, "Part": Part}
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(raw.group(0), names)
+            part = cad.hole(names["o"], 7, 50, 15)
+        self.assertAlmostEqual(part.Shape.Volume, (90 * 45 / 2 - PI / 4 * 49) * 6, places=3)
+        self.assertEqual([o.Name for o in bench_checks.part_objects(part.Document)[0]], [part.Name])
+
     def test_a_name_that_is_not_there_says_what_is_there(self):
         with self.assertRaises(AttributeError) as cm:
             cad.cylinder
