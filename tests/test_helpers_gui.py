@@ -40,9 +40,10 @@ QtCore.QLoggingCategory.setFilterRules("default.warning=false")
 
 
 def shown(doc):
-    """The names of the objects that the user sees: the switch of the object and that of its view."""
+    """The names of the bodies that the user sees: the switch of the object and that of its view."""
     QtWidgets.QApplication.processEvents()
-    return sorted(o.Name for o in doc.Objects if o.Visibility and o.ViewObject is not None and o.ViewObject.Visibility)
+    return sorted(o.Name for o in doc.Objects if o.isDerivedFrom("Part::Feature") and o.Visibility
+                  and o.ViewObject is not None and o.ViewObject.Visibility)
 
 
 def parts(doc):
@@ -90,7 +91,7 @@ class Failed(Case):
         plate = self.quiet(cad.plate, 100, 60, 8)
         tube = self.quiet(cad.tube, 40, 40, 3, 100)
         self.quiet(cad.move, tube, 200, 0, 0)
-        self.assertEqual(shown(self.doc), ["Params", "Plate", "Tube"])
+        self.assertEqual(shown(self.doc), ["Plate", "Tube"])
         self.fails("the hole takes nothing away", cad.hole, tube, 6)
         self.assertEqual(parts(self.doc), ["Plate", "Tube"])
         self.assertTrue(plate.Visibility and tube.Visibility)
@@ -125,7 +126,7 @@ class Failed(Case):
         self.fails("the hole takes nothing away", cad.hole, tube, 6)
         self.assertFalse(tube.Visibility)
         self.assertTrue(plate.Visibility)
-        self.assertEqual(shown(self.doc), ["Params", "Plate"])
+        self.assertEqual(shown(self.doc), ["Plate"])
 
     def test_the_code_of_the_model_catches_the_error(self):
         # run_python does not take the run back then: the helper itself must show the part again
@@ -139,7 +140,7 @@ class Failed(Case):
         self.assertIn("failed: cad.hole: the hole takes nothing away", text)
         self.assertNotIn("ERROR", text)
         doc = App.ActiveDocument
-        self.assertEqual(shown(doc), ["Params", "Plate", "Tube"])
+        self.assertEqual(shown(doc), ["Plate", "Tube"])
         self.assertEqual(parts(doc), ["Plate", "Tube"])
         text = local_tools.run_python(
             "try:\n"
@@ -147,7 +148,7 @@ class Failed(Case):
             "except Exception as e:\n"
             "    print('failed:', e)\n")
         self.assertIn("failed: cad.join: the parts do not touch", text)
-        self.assertEqual(shown(doc), ["Params", "Plate", "Tube"])
+        self.assertEqual(shown(doc), ["Plate", "Tube"])
         self.assertEqual(parts(doc), ["Plate", "Tube"])
 
 
@@ -156,11 +157,11 @@ class Worked(Case):
         plate = self.quiet(cad.plate, 120, 100, 8)
         for function, args in ((cad.hole_grid, (9, 2, 2, 80, 60)), (cad.slot, (8, 30)), (cad.fillet, (10, "z"))):
             part = self.quiet(function, plate, *args)
-            self.assertEqual(shown(self.doc), sorted(["Params", part.Name]))
+            self.assertEqual(shown(self.doc), [part.Name])
         tube = self.quiet(cad.tube, 60, 40, 4, 200)
         self.quiet(cad.move, tube, 60, 50, 8)
         post = self.quiet(cad.join, plate, tube)
-        self.assertEqual(shown(self.doc), ["Joined", "Params"])
+        self.assertEqual(shown(self.doc), ["Joined"])
         self.assertEqual(parts(self.doc), [post.Name])
 
 
