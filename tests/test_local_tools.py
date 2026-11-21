@@ -542,7 +542,7 @@ class Helpers(unittest.TestCase):
         self.assertIn("\nERROR:\nTraceback (most recent call last):\n"
                       '  File "<ai>", line 3, in <module>\n    part = cad.hole(part, 9, 150, 30)', out)
         self.assertIn("ValueError: cad.hole: the hole at x 150, y 30 is outside the part, which goes from "
-                      "x 0 to 120 and from y 0 to 80.\nExample: cad.hole(plate, 9, 20, 30)", out)
+                      "x 0 to 120 and from y 0 to 80.\nExample: cad.hole(plate, 6.6, 15, 25)", out)
         self.assertNotIn("helpers.py", out)                   # the model's own line, not the lines of the library
         self.assertEqual(out.count("  File "), 1)
         self.assertIn("The changes of this run were taken back.", out)
@@ -560,7 +560,7 @@ class Helpers(unittest.TestCase):
         doc = new_doc()
         out = T.run_python("cad.plate(120, 80)")
         self.assertIn("TypeError: cad.plate: ", out)
-        self.assertIn("'thickness'.\nExample: cad.plate(120, 80, 10)", out)
+        self.assertIn("'thickness'.\nExample: cad.plate(200, 100, 12)", out)
         self.assertNotIn("helpers.py", out)
         out = T.run_python("cad.cylinder(10, 20)")
         self.assertIn("AttributeError: cad has no function cylinder. It has: plate, shaft,", out)

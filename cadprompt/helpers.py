@@ -533,11 +533,11 @@ class _Build:
 
 
 # ---- blanks -------------------------------------------------------------------------------
-@_helper("cad.plate(120, 80, 10)")
+@_helper("cad.plate(200, 100, 12)")
 def plate(length, width, thickness, name=None):
     """A plate, a flat bar or a block: x from 0 to length, y from 0 to width, z from 0 to thickness.
 
-        plate = cad.plate(120, 80, 10)
+        plate = cad.plate(200, 100, 12)
     """
     sizes = [_size(v, w) for v, w in ((length, "length"), (width, "width"), (thickness, "thickness"))]
     with _Build() as b:
@@ -549,13 +549,13 @@ def plate(length, width, thickness, name=None):
         return b.line(box, "plate %s x %s x %s" % tuple(map(_text, sizes)))
 
 
-@_helper("cad.shaft(30, 40, 20, 60)")
+@_helper("cad.shaft(40, 50, 25, 80)")
 def shaft(*steps, axis="z", name=None, diameter=None, length=None):
     """A round bar, a disc or a stepped shaft from the origin along z: diameter, length of each step.
     axis="x" lays it along x.
 
-        shaft = cad.shaft(30, 40, 20, 60)      # d30 for 40, then d20 for 60
-        disc = cad.shaft(120, 12)
+        shaft = cad.shaft(40, 50, 25, 80)      # d40 for 50, then d25 for 80
+        disc = cad.shaft(150, 10)
     """
     numbers = list(_flat(steps)) + [v for v in (diameter, length) if v is not None]
     if numbers and isinstance(numbers[-1], str) and numbers[-1].strip().lower() in SIDES:
@@ -592,12 +592,12 @@ def shaft(*steps, axis="z", name=None, diameter=None, length=None):
         return b.line(result, "shaft along %s, %s, %s long" % (axis, what, _text(sum(p[1] for p in pairs))))
 
 
-@_helper("cad.tube(60, 40, 4, 200)")
+@_helper("cad.tube(50, 30, 3, 400)")
 def tube(width, height, wall, length, axis="z", name=None):
     """A square or rectangular tube with sharp corners. It stands on the origin along z, the axis
     in the middle of the section: width along x, height along y.
 
-        tube = cad.tube(60, 40, 4, 200)        # 60 x 40 x 4, 200 long
+        tube = cad.tube(50, 30, 3, 400)        # 50 x 30 x 3, 400 long
     """
     width, height, wall, length = (_size(v, w) for v, w in (
         (width, "width"), (height, "height"), (wall, "wall"), (length, "length")))
@@ -634,7 +634,7 @@ def pipe(diameter, wall=None, length=None, bore=None, axis="z", name=None):
     Give bore= in place of the wall when the inside diameter is known.
 
         pipe = cad.pipe(48.3, 3.2, 250)
-        sleeve = cad.pipe(20, bore=10.5, length=15)
+        sleeve = cad.pipe(30, bore=16, length=25)
     """
     diameter = _size(diameter, "diameter")
     if length is None:
@@ -670,14 +670,14 @@ def pipe(diameter, wall=None, length=None, bore=None, axis="z", name=None):
                       % (_text(diameter), _text(inside), axis, _text(length)))
 
 
-@_helper("cad.frame(500, 300, 30, 30, 2)")
+@_helper("cad.frame(800, 600, 40, 40, 3)")
 def frame(length, width, profile_width, profile_height, wall, name=None):
     """A flat frame of four bars from a square or rectangular tube, the corners mitred at 45
     degrees. Outside size length x width, like a plate: x from 0 to length, y from 0 to width.
     The profile is profile_width wide (in the frame) and profile_height high (along z). The
     result is one object that holds the four bars as four solids.
 
-        frame = cad.frame(500, 300, 30, 30, 2)     # 500 x 300 from tube 30 x 30 x 2
+        frame = cad.frame(800, 600, 40, 40, 3)     # 800 x 600 from tube 40 x 40 x 3
     """
     length, width, a, high, wall = (_size(v, w) for v, w in (
         (length, "length"), (width, "width"), (profile_width, "profile width"),
@@ -798,16 +798,16 @@ def _loose(where, more=()):
                          if where.loose else [])
 
 
-@_helper("cad.hole(plate, 9, 20, 30)")
+@_helper("cad.hole(plate, 6.6, 15, 25)")
 def hole(part, diameter, x=None, y=None, depth=None, axis="z", name=None):
     """A round hole through the part along z. Without x and y it is in the middle of the part (a
     centre bore); with only one of them it is on the centre line. x can be a list of places.
     depth makes a blind hole from the top. With axis="x" the two numbers are y and z, with
     axis="y" they are x and z.
 
-        plate = cad.hole(plate, 9, 20, 30)                     # 20 from the edge x = 0, 30 from y = 0
-        disc = cad.hole(disc, 50)                               # centre bore
-        plate = cad.hole(plate, 9, [(10, 10), (90, 10)])
+        plate = cad.hole(plate, 6.6, 15, 25)                   # 15 from the edge x = 0, 25 from y = 0
+        disc = cad.hole(disc, 35)                               # centre bore
+        plate = cad.hole(plate, 6.6, [(15, 15), (185, 15)])
     """
     base, given = _find(part)
     diameter, depth, axis = _size(diameter, "diameter"), _deep(depth), _axis(axis)
@@ -842,15 +842,15 @@ def hole(part, diameter, x=None, y=None, depth=None, axis="z", name=None):
                       _loose(where))
 
 
-@_helper("cad.hole_grid(plate, 9, 3, 2, 40, 50)")
+@_helper("cad.hole_grid(plate, 6.6, 4, 2, 30, 60)")
 def hole_grid(part, diameter, nx, ny=1, dx=None, dy=None, edge=None, center=None, depth=None, axis="z",
               name=None):
     """Holes in rows: nx holes along x with the pitch dx, in ny rows with the pitch dy. The pattern
     is in the middle of the part unless center=(x, y) is given. With edge= in place of the
     pitches the outer holes are that far from the edges of the part.
 
-        plate = cad.hole_grid(plate, 9, 3, 2, 40, 50)       # 3 x 2 holes, pitch 40 and 50, centred
-        plate = cad.hole_grid(plate, 9, 2, 2, edge=10)      # one hole in each corner, 10 from the edges
+        plate = cad.hole_grid(plate, 6.6, 4, 2, 30, 60)     # 4 x 2 holes, pitch 30 and 60, centred
+        plate = cad.hole_grid(plate, 6.6, 2, 2, edge=15)    # one hole in each corner, 15 from the edges
     """
     base, given = _find(part)
     diameter, depth, axis = _size(diameter, "diameter"), _deep(depth), _axis(axis)
@@ -912,14 +912,14 @@ def hole_grid(part, diameter, nx, ny=1, dx=None, dy=None, edge=None, center=None
             _of(base, given)), _loose(where, ["the number of holes"]))
 
 
-@_helper("cad.bolt_circle(disc, 11, 6, 90)")
+@_helper("cad.bolt_circle(disc, 14, 8, 110)")
 def bolt_circle(part, diameter, count, circle, start=0, center=None, depth=None, axis="z", name=None):
     """Holes equally spaced on a circle: hole diameter, number of holes, diameter of the circle. The
     circle is in the middle of the part unless center=(x, y) is given. The first hole is at
     the angle `start`, measured from the x axis.
 
-        disc = cad.bolt_circle(disc, 11, 6, 90)             # 6 holes d11 on a circle of 90
-        plate = cad.bolt_circle(plate, 9, 4, 70, start=45)  # one hole towards each corner
+        disc = cad.bolt_circle(disc, 14, 8, 110)            # 8 holes d14 on a circle of 110
+        plate = cad.bolt_circle(plate, 6.6, 4, 60, start=45)  # one hole towards each corner
     """
     base, given = _find(part)
     diameter, depth, axis = _size(diameter, "diameter"), _deep(depth), _axis(axis)
@@ -954,12 +954,12 @@ def bolt_circle(part, diameter, count, circle, start=0, center=None, depth=None,
             _of(base, given)), _loose(where, ["the number of holes"]))
 
 
-@_helper("cad.slot(bar, 9, 40, 85, 20)")
+@_helper("cad.slot(bar, 11, 30, 110, 25)")
 def slot(part, width, length, x=None, y=None, angle=0, depth=None, name=None):
     """A slot with round ends through the part along z: width, length overall, and x, y of its
     middle (without them: the middle of the part). It runs along x; angle turns it, 90 is along y.
 
-        bar = cad.slot(bar, 9, 40, 85, 20)      # 9 wide, 40 long overall, its middle at x 85, y 20
+        bar = cad.slot(bar, 11, 30, 110, 25)    # 11 wide, 30 long overall, its middle at x 110, y 25
     """
     base, given = _find(part)
     width, length, depth, angle = _size(width, "width"), _size(length, "length"), _deep(depth), \
@@ -1102,25 +1102,25 @@ def _edge_feature(kind, part, size, what, edges, name):
             len(numbers), words, _of(base, given)), ["the %s (FreeCAD keeps it in %s.Edges)" % (what, result.Name)])
 
 
-@_helper('cad.fillet(plate, 15, "z")')
+@_helper('cad.fillet(plate, 8, "z")')
 def fillet(part, radius, edges="z", name=None):
     """Round edges of the part. The edges are chosen by where they are, never by number: "z" is
     all edges parallel to z (the four corners of a plate), also "x" and "y"; "top" and "bottom"
     are the edges around that face; "all"; a point (x, y, z) takes the edge next to it. A
     list takes several.
 
-        plate = cad.fillet(plate, 15, "z")      # the four corners of a plate
+        plate = cad.fillet(plate, 8, "z")      # the four corners of a plate
         shaft = cad.fillet(shaft, 2, "top")
     """
     return _edge_feature("Fillet", part, radius, "radius", edges, name)
 
 
-@_helper('cad.chamfer(plate, 10, "z")')
+@_helper('cad.chamfer(plate, 5, "z")')
 def chamfer(part, size, edges="z", name=None):
     """Chamfer edges of the part, size x 45 degrees. The edges are chosen as in cad.fillet: "x",
     "y", "z", "top", "bottom", "all", a point (x, y, z) near one edge, or a list of these.
 
-        plate = cad.chamfer(plate, 10, "z")                 # the four corners cut off
+        plate = cad.chamfer(plate, 5, "z")                 # the four corners cut off
         shaft = cad.chamfer(shaft, 1, ["top", "bottom"])    # both ends
     """
     return _edge_feature("Chamfer", part, size, "size", edges, name)
@@ -1148,13 +1148,13 @@ def _results_above(obj, whole):
     return total
 
 
-@_helper("cad.move(tube, 60, 50, 8)")
+@_helper("cad.move(tube, 100, 50, 12)")
 def move(part, x=0, y=0, z=0):
     """Put the part so that its origin is at x, y, z (not: move it by x, y, z). The origin of a
     plate is its corner, the origin of a shaft, a tube or a pipe is the middle of its lower end.
     A part that was joined moves inside the joined part; give the joined part to move all of it.
 
-        tube = cad.move(tube, 60, 50, 8)        # stands at x 60, y 50 on a plate that is 8 thick
+        tube = cad.move(tube, 100, 50, 12)      # stands at x 100, y 50 on a plate that is 12 thick
     """
     whole, given = _find(part)
     if isinstance(x, (list, tuple, App.Vector)):
@@ -1220,7 +1220,7 @@ def join(*parts, name=None):
         b.done(result)
         if len(_solids(result)) != 1:
             raise _Wrong("the parts do not touch: the result would be %d loose bodies. Put one in its place "
-                         "first, for example cad.move(tube, 60, 50, 8)." % len(_solids(result)))
+                         "first, for example cad.move(tube, 100, 50, 12)." % len(_solids(result)))
         return b.line(result, "one solid from %s" % " and ".join(_of(o, g) for o, g in found))
 
 

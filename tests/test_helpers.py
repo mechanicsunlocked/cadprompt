@@ -285,7 +285,7 @@ class Plate(Case):
         self.wrong(TypeError, "the length must be a number, not 'long'.", cad.plate, "long", 80, 10)
         self.wrong(TypeError, "the length must be a number, not None.", cad.plate, None, 80, 10)
         text = self.wrong(TypeError, "thickness", cad.plate, 120, 80)
-        self.assertIn("Example: cad.plate(120, 80, 10)", text)
+        self.assertIn("Example: cad.plate(200, 100, 12)", text)
         self.wrong(TypeError, "colour", cad.plate, 120, 80, 10, colour="red")
         self.assertEqual(self.doc.Objects, [])           # no Params either
 
@@ -394,7 +394,7 @@ class Tube(Case):
     def test_wrong_calls(self):
         self.wrong(ValueError, "the wall 20 is too thick for a section of 60 x 40.", cad.tube, 60, 40, 20, 200)
         text = self.wrong(TypeError, "length", cad.tube, 40, 3, 250)
-        self.assertIn("Example: cad.tube(60, 40, 4, 200)", text)
+        self.assertIn("Example: cad.tube(50, 30, 3, 400)", text)
         self.wrong(ValueError, "the wall must be above 0", cad.tube, 60, 40, 0, 200)
         self.assertEqual(self.doc.Objects, [])
 
@@ -625,7 +625,7 @@ class Hole(Case):
         plate = self.quiet(cad.plate, 120, 80, 10)
         text = self.wrong(ValueError, "the hole at x 150, y 20 is outside the part, which goes from x 0 to 120 "
                                       "and from y 0 to 80.", cad.hole, plate, 9, 150, 20)
-        self.assertIn("Example: cad.hole(plate, 9, 20, 30)", text)
+        self.assertIn("Example: cad.hole(plate, 6.6, 15, 25)", text)
         self.wrong(TypeError, "the first argument must be the part (the object, its name or its label), not 9. "
                               "The parts of the document are: Plate.", cad.hole, 9, 20, 30)
         self.wrong(TypeError, "not None. The parts of the document are: Plate.", cad.hole, None, 9)
@@ -654,7 +654,7 @@ class Hole(Case):
         text = self.wrong(ValueError, "the hole at x 0, y 0 breaks through the side of the part: the hole goes "
                                       "from x -20 to 20 and from y -20 to 20, the part from x 0 to 100 and from "
                                       "y 0 to 100 (middle of the part: x 50, y 50).", cad.hole, plate, 40, 0, 0)
-        self.assertIn("Example: cad.hole(plate, 9, 20, 30)", text)
+        self.assertIn("Example: cad.hole(plate, 6.6, 15, 25)", text)
         self.wrong(ValueError, "the hole at x 2, y 2 breaks through the side", cad.hole, plate, 9, 2, 2)
         self.wrong(ValueError, "the hole at x 20, y 0 breaks through the side", cad.hole, plate, 9, 20, 0)
         self.wrong(ValueError, "the hole at x 97, y 50 breaks through the side", cad.hole, plate, 9, [(50, 50), (97, 50)])
@@ -791,7 +791,7 @@ class BoltCircle(Case):
         self.wrong(ValueError, "the number of holes must be a whole number from 1, not 0.",
                    cad.bolt_circle, disc_, 11, 0, 90)
         text = self.wrong(TypeError, "circle", cad.bolt_circle, disc_, 11, 6)
-        self.assertIn("Example: cad.bolt_circle(disc, 11, 6, 90)", text)
+        self.assertIn("Example: cad.bolt_circle(disc, 14, 8, 110)", text)
         self.wrong(TypeError, "a centre is two numbers such as (20, 30), not 5.", cad.bolt_circle, disc_, 11, 6, 90,
                    center=5)
         self.assertEqual(len(self.doc.Objects), 2)
@@ -849,7 +849,7 @@ class Slot(Case):
                                "x 90 to 130", cad.slot, bar, 9, 40, 110, 20)
         self.wrong(ValueError, "the slot at x 100, y 20 breaks through the side", cad.slot, bar, 9, 40, 100, 20)
         text = self.wrong(TypeError, "length", cad.slot, bar, 9)
-        self.assertIn("Example: cad.slot(bar, 9, 40, 85, 20)", text)
+        self.assertIn("Example: cad.slot(bar, 11, 30, 110, 25)", text)
         self.assertEqual(len(self.doc.Objects), 2)
         self.assertTrue(bar.Visibility)
         self.quiet(cad.slot, bar, 9, 40, 99.5, 20)       # 0.5 from the end of the bar
@@ -971,7 +971,7 @@ class Edges(Case):
         plate = self.quiet(cad.plate, 150, 100, 6)
         text = self.wrong(ValueError, ["FreeCAD could not make a fillet of 80 on these 4 edges", "Use a smaller radius"],
                           cad.fillet, plate, 80, "z")
-        self.assertIn('Example: cad.fillet(plate, 15, "z")', text)
+        self.assertIn('Example: cad.fillet(plate, 8, "z")', text)
         self.wrong(ValueError, ['the edges are "x", "y" or "z"', "not 'Edge3'."], cad.fillet, plate, 5, "Edge3")
         self.wrong(ValueError, ['the edges are "x", "y" or "z"', "not 7."], cad.chamfer, plate, 5, 7)
         self.wrong(ValueError, "a point near an edge is three numbers (x, y, z), not (10, 20).",
@@ -1351,8 +1351,8 @@ class Library(Case):
         for name in cad.__all__:
             new_doc()
             with contextlib.redirect_stdout(io.StringIO()):
-                names = {"cad": cad, "plate": cad.plate(120, 80, 10), "bar": cad.plate(120, 40, 6),
-                         "disc": cad.shaft(120, 12), "tube": cad.tube(60, 40, 4, 200)}
+                names = {"cad": cad, "plate": cad.plate(200, 100, 12), "bar": cad.plate(160, 50, 8),
+                         "disc": cad.shaft(150, 10), "tube": cad.tube(50, 30, 3, 400)}
             function = getattr(cad, name)
             example = cad.EXAMPLES[name]
             with self.subTest(function=name):
