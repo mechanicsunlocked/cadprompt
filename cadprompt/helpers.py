@@ -49,11 +49,15 @@ TURN = {"z": App.Rotation(), "x": App.Rotation(App.Vector(1, 1, 1), 120), "y": A
 LETTERS = {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue", "ß": "ss"}
 EDGE_WORDS = {"vertical": "z", "corners": "z", "upright": "z"}
 # Other words for an argument, taken where the function has no argument of that name.
-SPELLINGS = (("d", "diameter"), ("dia", "diameter"), ("t", "thickness"), ("h", "thickness"),
-             ("height", "thickness"), ("t", "wall"), ("thickness", "wall"), ("l", "length"), ("w", "width"),
-             ("r", "radius"), ("centre", "center"), ("n", "count"), ("pitch_x", "dx"), ("pitch_y", "dy"),
-             ("pitch", "dx"), ("pcd", "circle"), ("circle_diameter", "circle"), ("start_angle", "start"),
-             ("obj", "part"), ("label", "name"))
+SPELLINGS = (("d", "diameter"), ("dia", "diameter"), ("outer_diameter", "diameter"), ("outside_diameter", "diameter"),
+             ("inner_diameter", "bore"), ("inside_diameter", "bore"), ("t", "thickness"), ("h", "thickness"),
+             ("height", "thickness"), ("t", "wall"), ("thickness", "wall"), ("wall_thickness", "wall"),
+             ("l", "length"), ("w", "width"), ("r", "radius"), ("distance", "size"), ("centre", "center"),
+             ("n", "count"), ("holes", "count"), ("number", "count"), ("columns", "nx"), ("cols", "nx"),
+             ("rows", "ny"), ("pitch_x", "dx"), ("pitch_y", "dy"), ("pitch", "dx"), ("spacing", "dx"),
+             ("margin", "edge"), ("pcd", "circle"), ("circle_diameter", "circle"), ("start_angle", "start"),
+             ("at", "x"), ("position", "x"), ("positions", "x"), ("points", "x"), ("center", "x"),
+             ("centre", "x"), ("obj", "part"), ("label", "name"))
 
 
 class _Wrong(Exception):
@@ -205,8 +209,8 @@ def _users(obj):
     return out
 
 
-def _newest(obj):
-    """The last result that was made from `obj`, or `obj` itself."""
+def newest(obj):
+    """The last result that was made from `obj`, or `obj` itself. make_drawing uses it too."""
     seen = {obj.Name}
     while True:
         users = [u for u in _users(obj) if u.Name not in seen]
@@ -243,10 +247,11 @@ def _find(part):
             raise _Wrong("that object is not in the document any more (its run was taken back, or it "
                          "was deleted). Make the part again.") from None
     else:
-        raise _Wrong("the first argument must be the part (the object, its name or its label), not %r."
-                     % (part,), TypeError)
+        raise _Wrong("the first argument must be the part (the object, its name or its label), not %r. "
+                     "The parts of the document are: %s." % (part, ", ".join(_parts(App.ActiveDocument)) or "none"),
+                     TypeError)
     given = obj.Name
-    obj = _newest(obj)
+    obj = newest(obj)
     if not _solids(obj):
         raise _Wrong("%s is not a solid part. The parts of the document are: %s."
                      % (obj.Name, ", ".join(_parts(obj.Document)) or "none"))
@@ -471,6 +476,10 @@ class _Build:
         text = "%s: %s." % (result.Name, what)
         text += " Params: %s." % ", ".join(names) if names else ""
         text += " Not bound: %s." % ", ".join(loose) if loose else ""
+        # a first try or a tool body that was left behind: the user sees it beside the part
+        others = [n for n in _parts(self.doc) if n != result.Name]
+        if others:
+            text += " Other parts in the document: %s." % ", ".join(others[:5] + ["..."] * (len(others) > 5))
         print(text)
         return result
 
@@ -493,13 +502,15 @@ def plate(length, width, thickness, name=None):
 
 
 @_helper("cad.shaft(30, 40, 20, 60)")
-def shaft(*steps, axis="z", name=None):
+def shaft(*steps, axis="z", name=None, diameter=None, length=None):
     """A round bar, a disc or a stepped shaft from the origin along z: diameter, length of each step.
 
         shaft = cad.shaft(30, 40, 20, 60)      # d30 for 40, then d20 for 60
         disc = cad.shaft(120, 12)
     """
-    numbers = list(_flat(steps))
+    numbers = list(_flat(steps)) + [v for v in (diameter, length) if v is not None]
+    if numbers and isinstance(numbers[-1], str) and numbers[-1].strip().lower() in SIDES:
+        axis = numbers.pop()                 # cad.shaft(30, 40, "x")
     if not numbers or len(numbers) % 2:
         raise _Wrong("give a diameter and a length for each step, %d numbers were given." % len(numbers))
     numbers = [_size(v, "length" if i % 2 else "diameter") for i, v in enumerate(numbers)]
@@ -893,6 +904,8 @@ def slot(part, width, length, x=None, y=None, angle=0, depth=None, name=None):
     if length - width < TOL:
         raise _Wrong("a slot as long as it is wide is a round hole: use cad.hole(part, %s)." % _text(width))
     where = _Where(base)
+    if isinstance(x, (list, tuple, App.Vector)) and y is None:
+        x, y = _across(x, "z")               # cad.slot(bar, 9, 40, (85, 20))
     point = [None if v is None else _number(v, a) for v, a in ((x, "x"), (y, "y"))]
     numbers = [where.middle_number(a) if v is None else v for a, v in zip("xy", point)]
     _outside(where, "xy", [numbers], "middle of the slot")

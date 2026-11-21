@@ -263,6 +263,23 @@ class WhichObject(unittest.TestCase):
         doc.recompute()
         self.assertEqual(D.pick_object(doc), (cut, None))
         self.assertEqual(D._solids(doc), [cut])
+        # their names mean the part that they went into: a model names the plate, not the cut
+        self.assertEqual(D.pick_object(doc, "Plate"), (cut, None))
+        self.assertEqual(D.pick_object(doc, "pin"), (cut, None))
+        self.assertEqual(D.pick_object(doc, "Drilled"), (cut, None))
+        fillet = doc.addObject("Part::Fillet", "Rounded")
+        fillet.Base = cut
+        fillet.Edges = [(n + 1, 2, 2) for n, e in enumerate(cut.Shape.Edges)        # the two corners at x = 100
+                        if e.BoundBox.XMin > 99 and e.BoundBox.ZLength > 9]
+        doc.recompute()
+        self.assertEqual(len(fillet.Edges), 2)
+        self.assertTrue(fillet.Shape.isValid())
+        self.assertEqual(D.pick_object(doc, "Plate"), (fillet, None))
+        other = doc.addObject("Part::Box", "Other")              # its length follows the plate: that uses nothing up
+        other.setExpression("Length", "Rounded.Shape.BoundBox.XLength * 1 mm")
+        other.Placement.Base = App.Vector(0, 200, 0)
+        doc.recompute()
+        self.assertEqual(D.pick_object(doc, "Plate"), (fillet, None))
 
     def test_a_feature_inside_a_body_is_not_the_part(self):
         doc = self.doc("BodyDoc")

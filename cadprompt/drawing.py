@@ -108,6 +108,11 @@ def pick_object(doc, obj_name=""):
         if obj is None:
             return None, (f"ERROR: there is no object named '{obj_name}' in this document. "
                           f"Solids you can draw: {names}.")
+        if _body_of(obj) is None and not _top_level(obj):
+            # A later step used this object up (the plate, after its holes were cut): the name
+            # means the part that it went into, as in the helper library.
+            from . import helpers
+            obj = helpers.newest(obj)
         body = _body_of(obj)
         if body is not None and getattr(body, "Tip", None) == obj:
             obj = body    # the last feature of a Body is the Body

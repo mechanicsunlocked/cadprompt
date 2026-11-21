@@ -173,6 +173,13 @@ class Plate(Case):
         second, line = self.made(cad.plate, 50, 40, 5)
         self.assertNotEqual(first.Name, second.Name)
         self.assertIn("%s_Length" % second.Name, line)
+        # a first try that stays in the document is a second body for the user: the line names it
+        self.assertTrue(line.endswith(" Other parts in the document: Plate."), line)
+        part, line = self.made(cad.hole, first, 9)
+        self.assertTrue(line.endswith(" Other parts in the document: %s." % second.Name), line)
+        self.doc.removeObject(second.Name)
+        self.assertNotIn("Other parts", self.made(cad.hole, first, 5, 20, 20)[1])
+        second = self.quiet(cad.plate, 50, 40, 5)
         self.change(**{"%s_Length" % second.Name: 70})
         self.box(second, (0, 0, 0), (70, 40, 5))
         self.box(first, (0, 0, 0), (120, 80, 10))
@@ -276,6 +283,9 @@ class Shaft(Case):
         self.volume(self.quiet(cad.shaft, (30, 40), (20, 60)), wanted)
         self.volume(self.quiet(cad.shaft, [(30, 40), (20, 60)]), wanted)
         self.volume(self.quiet(cad.shaft, [30, 40, 20, 60]), wanted)
+        self.volume(self.quiet(cad.shaft, diameter=30, length=40), disc(30, 40))
+        self.volume(self.quiet(cad.shaft, d=30, l=40), disc(30, 40))
+        self.box(self.quiet(cad.shaft, 30, 40, "x"), (0, -15, -15), (40, 15, 15))
 
     def test_along_another_axis(self):
         shaft, line = self.made(cad.shaft, 30, 40, 20, 60, axis="x")
@@ -323,6 +333,12 @@ class Tube(Case):
     def test_along_x_the_width_is_along_y(self):
         self.box(self.quiet(cad.tube, 60, 40, 4, 200, axis="x"), (0, -30, -20), (200, 30, 20))
         self.box(self.quiet(cad.tube, 60, 40, 4, 200, axis="y"), (-30, 0, -20), (30, 200, 20))
+
+    def test_other_words_for_the_arguments(self):
+        tube = self.quiet(cad.tube, width=60, height=40, wall_thickness=4, length=200)
+        self.volume(tube, (60 * 40 - 52 * 32) * 200)
+        self.volume(self.quiet(cad.tube, 60, 40, t=4, l=200), (60 * 40 - 52 * 32) * 200)
+        self.volume(self.quiet(cad.pipe, outer_diameter=20, inner_diameter=10, length=15), disc(20, 15) - disc(10, 15))
 
     def test_wrong_calls(self):
         self.wrong(ValueError, "the wall 20 is too thick for a section of 60 x 40.", cad.tube, 60, 40, 20, 200)
@@ -457,7 +473,9 @@ class Hole(Case):
         plate = self.quiet(cad.plate, 100, 60, 8)
         part = self.quiet(cad.holes, plate, 5, [(10, 10, 0), App.Vector(30, 20, 8)])
         part = self.quiet(cad.hole, part, 5, (50, 30))
-        self.assertEqual(holes(self.doc), spots([(10, 10, 4), (30, 20, 4), (50, 30, 4)], 5.0))
+        part = self.quiet(cad.hole, part, d=5, center=(70, 40))
+        part = self.quiet(cad.hole, part, diameter=5, positions=[(90, 50)])
+        self.assertEqual(holes(self.doc), spots([(10, 10, 4), (30, 20, 4), (50, 30, 4), (70, 40, 4), (90, 50, 4)], 5.0))
 
     def test_blind_hole_from_the_top(self):
         block = self.quiet(cad.plate, 60, 40, 20)
@@ -525,8 +543,9 @@ class Hole(Case):
         text = self.wrong(ValueError, "the hole at x 150, y 20 is outside the part, which goes from x 0 to 120 "
                                       "and from y 0 to 80.", cad.hole, plate, 9, 150, 20)
         self.assertIn("Example: cad.hole(plate, 9, 20, 30)", text)
-        self.wrong(TypeError, "the first argument must be the part (the object, its name or its label), not 9.",
-                   cad.hole, 9, 20, 30)
+        self.wrong(TypeError, "the first argument must be the part (the object, its name or its label), not 9. "
+                              "The parts of the document are: Plate.", cad.hole, 9, 20, 30)
+        self.wrong(TypeError, "not None. The parts of the document are: Plate.", cad.hole, None, 9)
         self.wrong(ValueError, ['there is no object "Plat3" in the document. Its parts are: Plate.'],
                    cad.hole, "Plat3", 9)
         self.wrong(ValueError, "the diameter must be above 0", cad.hole, plate, 0, 20, 30)
@@ -585,7 +604,7 @@ class HoleGrid(Case):
         self.change(HoleGrid_X=100, HoleGrid_Y=70)
         self.assertEqual(holes(self.doc), spots([(x, 70, 5) for x in (80, 100, 120)], 6.0))
         plate = self.quiet(cad.plate, 100, 100, 10)
-        self.quiet(cad.hole_grid, plate, 6, 2, 2, 40)          # one pitch for both directions
+        self.quiet(cad.hole_grid, plate, 6, columns=2, rows=2, spacing=40)      # one pitch for both directions
         self.assertEqual([h for h in holes(self.doc) if h[0] in (30.0, 70.0) and h[1] in (30.0, 70.0)],
                          spots([(x, y, 5) for x in (30, 70) for y in (30, 70)], 6.0))
 
@@ -617,7 +636,7 @@ class BoltCircle(Case):
 
     def test_start_angle_and_new_values(self):
         plate = self.quiet(cad.plate, 100, 100, 10)
-        part = self.quiet(cad.bolt_circle, plate, 9, 4, 70, start=45)
+        part = self.quiet(cad.bolt_circle, plate, d=9, holes=4, pcd=70, start_angle=45)
         k = 35 * math.sqrt(0.5)
         self.assertEqual(holes(self.doc), spots([(50 + x, 50 + y, 5) for x in (-k, k) for y in (-k, k)], 9.0))
         self.change(BoltCircle_Circle=60, BoltCircle_Start=0, BoltCircle_Diameter=7, Plate_Length=120)
@@ -679,10 +698,11 @@ class Slot(Case):
         self.change(Plate_Length=140)                    # stays in the middle
         self.assertEqual(holes(self.doc, "arc"), [(70.0, 35.0, 8.0, 10.0), (70.0, 65.0, 8.0, 10.0)])
 
-    def test_length_and_width_the_other_way_round(self):
+    def test_length_and_width_the_other_way_round_and_the_middle_as_a_point(self):
         bar = self.quiet(cad.plate, 120, 40, 6)
-        part = self.quiet(cad.slot, bar, 40, 9, 85, 20)
+        part = self.quiet(cad.slot, bar, 40, 9, (85, 20))
         self.volume(part, 120 * 40 * 6 - self.slot_volume(9, 40, 6))
+        self.assertEqual(holes(self.doc, "arc"), [(69.5, 20.0, 3.0, 9.0), (100.5, 20.0, 3.0, 9.0)])
 
     def test_wrong_calls(self):
         bar = self.quiet(cad.plate, 120, 40, 6)

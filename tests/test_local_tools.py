@@ -486,8 +486,8 @@ class Helpers(unittest.TestCase):
     def test_a_wrong_call_of_a_helper(self):
         doc = new_doc()
         out = T.run_python("cad.plate(120, 80)")
-        self.assertIn("TypeError: cad.plate: missing a required argument: 'thickness'.\n"
-                      "Example: cad.plate(120, 80, 10)", out)
+        self.assertIn("TypeError: cad.plate: ", out)
+        self.assertIn("'thickness'.\nExample: cad.plate(120, 80, 10)", out)
         self.assertNotIn("helpers.py", out)
         out = T.run_python("cad.cylinder(10, 20)")
         self.assertIn("AttributeError: cad has no function cylinder. It has: plate, shaft,", out)

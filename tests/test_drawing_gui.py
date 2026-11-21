@@ -454,6 +454,37 @@ class Shapes(Case):
             self.assertEqual(scale, want, sheet)
 
 
+class Helpers(Case):
+    """A part that the helper library (cadprompt/helpers.py, `cad` in run_python) made."""
+
+    def test_the_window_shows_the_part_only_and_the_drawing_is_of_the_part(self):
+        from cadprompt import helpers as cad
+        for d in list(App.listDocuments()):
+            App.closeDocument(d)
+        doc = App.newDocument("FlangeDoc")
+        plate = cad.plate(100, 60, 8, name="Flange")
+        cad.hole_grid(plate, 9, 2, 2, edge=10)
+        cad.hole(plate, 30)
+        part = cad.fillet(plate, 8)                      # always the first variable, as a small model does
+        QtWidgets.QApplication.processEvents()
+        solids = [o for o in doc.Objects if getattr(o, "Shape", None) is not None and o.Shape.Solids]
+        self.assertGreater(len(solids), 8)               # the blank, the tool cylinders, the cuts, the fillet
+        # FreeCAD's window does not switch the base of a fillet off by itself: the library does
+        self.assertEqual([o.Name for o in solids if o.ViewObject.Visibility], [part.Name])
+        self.assertEqual((part.Label, plate.Name), ("Flange", "Flange"))
+        Gui.Selection.clearSelection()
+        out = D.make_drawing(self.project("Flange"), "A3")
+        self.assertIn("Object: Flange, 100 x 60 x 8 mm", out)
+        self.check_drawing(doc, "Flange", (100.0, 60.0, 8.0), "A3", out, [100, 60, 8])
+        self.assertEqual(self.centre_lines(doc)["Front"], 10)        # a cross in each of the five holes
+        # "Flange" is also the internal name of the blank, without holes: the name means the part
+        out = D.make_drawing(self.project("Flange"), "A3", "Flange")
+        self.assertIn("it replaced the earlier page", out)
+        self.check_drawing(doc, "Flange", (100.0, 60.0, 8.0), "A3", out, [100, 60, 8])
+        self.assertEqual(self.centre_lines(doc)["Front"], 10)
+        self.assertEqual([p.Label for p in pages(doc)], ["Drawing Flange"])
+
+
 class NoHoischen(Case):
     def test_it_works_without_the_hoischen_addon(self):
         saved = {k: v for k, v in sys.modules.items() if k == "hoischen" or k.startswith("hoischen.")}
@@ -484,7 +515,7 @@ def run():
     try:
         with open(REPORT, "w", encoding="utf-8") as stream:
             suite = unittest.TestSuite()
-            for case in (Parts, Choice, Shapes, NoHoischen):
+            for case in (Parts, Choice, Shapes, Helpers, NoHoischen):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
             result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
             code = 0 if result.wasSuccessful() else 1
