@@ -995,6 +995,122 @@ class Move(Case):
         self.assertIn((20.0, 20.0, 24.0, 5.0), holes(self.doc))
         self.one_part(again)
 
+    def test_a_second_move_after_a_feature_is_a_place_too(self):
+        # the result of a hole has its own Placement, which FreeCAD adds to that of the moved tube
+        tube = self.quiet(cad.tube, 60, 40, 4, 200)
+        self.quiet(cad.move, tube, 60, 50, 8)
+        part = self.quiet(cad.hole, tube, 9, 60, 150, axis="y")
+        self.box(part, (30, 30, 8), (90, 70, 208))
+        moved, line = self.made(cad.move, tube, 60, 50, 8)       # the same place again: nothing moves
+        self.assertEqual(moved.Name, part.Name)
+        self.box(part, (30, 30, 8), (90, 70, 208))
+        self.assertEqual(line, "Hole: moved, the origin of Hole (the newest result of Tube) is now at (60, 50, 8). "
+                               "Params: Hole_PosX, Hole_PosY, Hole_PosZ.")
+        self.quiet(cad.move, part, 10, 20, 30)
+        self.box(part, (-20, 0, 30), (40, 40, 230))
+        self.assertEqual(holes(self.doc), [(10.0, 2.0, 172.0, 9.0), (10.0, 38.0, 172.0, 9.0)])   # in the walls
+        rounded = self.quiet(cad.chamfer, tube, 1, "z")
+        self.quiet(cad.move, tube, 60, 50, 8)                    # two earlier moves under it
+        self.box(rounded, (30, 30, 8), (90, 70, 208))
+        self.quiet(cad.move, "Tube", 0, 0, 0)
+        self.box(rounded, (-30, -20, 0), (30, 20, 200))
+        self.change(**{rounded.Name + "_PosX": 100})
+        self.box(rounded, (70, -20, 0), (130, 20, 200))
+        self.one_part(rounded)
+
+    def test_a_moved_plate_with_a_hole_goes_back_to_zero(self):
+        plate = self.quiet(cad.plate, 100, 60, 8)
+        self.quiet(cad.move, plate, 0, 0, 20)
+        part = self.quiet(cad.hole, plate, 9, 20, 30)
+        self.box(part, (0, 0, 20), (100, 60, 28))
+        line = self.made(cad.move, plate, 0, 0, 0)[1]
+        self.assertIn("is now at (0, 0, 0)", line)
+        self.box(part, (0, 0, 0), (100, 60, 8))
+        self.assertEqual(holes(self.doc), [(20.0, 30.0, 4.0, 9.0)])
+        self.wrong(TypeError, "the y must be a number", cad.move, plate, 1, "left", 3)
+        self.box(part, (0, 0, 0), (100, 60, 8))
+
+    def test_a_shaft_along_x_between_three_moves(self):
+        shaft = self.quiet(cad.shaft, 30, 40, 20, 60, axis="x")
+        self.quiet(cad.move, shaft, 10, 0, 50)
+        self.quiet(cad.hole, shaft, 8, 0, 50, axis="x")          # along the axis, which is at z 50 now
+        self.quiet(cad.move, shaft, 0, 0, 0)
+        part = self.quiet(cad.chamfer, shaft, 1, (0, 15, 0))      # the rim of the thick end
+        self.quiet(cad.move, shaft, 5, 6, 7)
+        self.box(part, (5, -9, -8), (105, 21, 22))
+
+    def test_a_part_with_the_name_of_a_unit_under_a_hole(self):
+        raw = self.doc.addObject("Part::Box", "Pa")              # an expression cannot read Pa.Placement
+        self.doc.recompute()
+        self.quiet(cad.move, raw, 100, 0, 5)
+        part = self.quiet(cad.hole, raw, 4)
+        self.quiet(cad.move, raw, 0, 0, 0)
+        self.box(part, (0, 0, 0), (10, 10, 10))
+
+    def test_a_part_that_was_joined_moves_inside_the_joined_part(self):
+        # the usual repair of "tube on a plate": joined first, the place of the tube after it
+        plate = self.quiet(cad.plate, 120, 100, 8)
+        tube = self.quiet(cad.tube, 60, 40, 4, 200)
+        post = self.quiet(cad.join, plate, tube)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            moved = cad.move(tube, 60, 50, 8)
+        self.assertEqual(out.getvalue(), "Joined: Tube inside it was moved, the origin of Tube is now at (60, 50, 8). "
+                                         "Params: Tube_PosX, Tube_PosY, Tube_PosZ.\n")
+        self.assertEqual(moved.Name, "Tube")                     # `tube = cad.move(tube, ...)` keeps the tube
+        self.box(post, (0, 0, 0), (120, 100, 208))
+        self.volume(post, 120 * 100 * 8 + (60 * 40 - 52 * 32) * 200)
+        self.one_part(post)
+        spec = [r for r in REQUESTS if r["id"] == "18-stuetze"][0]
+        self.assertEqual(bench_checks.first_failure(bench_checks.check(spec, bench_checks.measure(self.doc))), "")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cad.move("Tube", 60, 50, 8).Name, "Tube")       # by name, and again
+            self.assertEqual(cad.move(moved, 50, 50, 8).Name, "Tube")
+        self.box(post, (0, 0, 0), (120, 100, 208))
+        self.volume(post, 120 * 100 * 8 + (60 * 40 - 52 * 32) * 200)
+        self.change(Tube_PosX=60, Tube_Length=100)               # the tube follows inside the joined part
+        self.box(post, (0, 0, 0), (120, 100, 108))
+        # away from the plate: refused, and everything is as before
+        self.wrong(ValueError, 'at that place Tube does not touch the rest of Joined any more. To move the whole '
+                               'part: cad.move("Joined", x, y, z).', cad.move, tube, 500, 50, 8)
+        self.box(post, (0, 0, 0), (120, 100, 108))
+
+    def test_the_joined_part_moves_as_a_whole_and_a_place_stays_a_place(self):
+        plate = self.quiet(cad.plate, 120, 100, 8)
+        tube = self.quiet(cad.tube, 60, 40, 4, 200)
+        post = self.quiet(cad.join, plate, tube)
+        moved, line = self.made(cad.move, post, 10, 20, 30)
+        self.assertEqual(moved.Name, "Joined")
+        self.assertIn("Joined: moved, the origin of Joined is now at (10, 20, 30).", line)
+        self.box(post, (-20, 0, 30), (130, 120, 230))
+        with contextlib.redirect_stdout(io.StringIO()):
+            cad.move(tube, 60, 50, 8)                            # a place of the document, not of the joined part
+        self.box(post, (10, 20, 8), (130, 120, 208))
+        self.change(Tube_PosZ=38)                                # on the plate, which is at z 30 to 38
+        self.box(post, (10, 20, 30), (130, 120, 238))
+        self.volume(post, 120 * 100 * 8 + (60 * 40 - 52 * 32) * 200)
+        part = self.quiet(cad.hole, post, 9, 25, 35)             # a feature on the joined part
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cad.move(tube, 80, 60, 38).Name, "Tube")
+        self.box(part, (10, 20, 30), (130, 120, 238))
+        self.volume(part, 120 * 100 * 8 + (60 * 40 - 52 * 32) * 200 - disc(9, 8))
+        self.one_part(part)
+
+    def test_a_step_a_bar_and_a_tool_body_are_not_parts(self):
+        shaft = self.quiet(cad.shaft, 30, 40, 20, 60)
+        self.assertEqual(self.quiet(cad.move, "Shaft_Step2", 0, 0, 10).Name, shaft.Name)
+        self.box(shaft, (-15, -15, 10), (15, 15, 110))
+        self.doc = new_doc()
+        frame = self.quiet(cad.frame, 500, 300, 30, 30, 2)
+        self.assertEqual(self.quiet(cad.move, "Frame_Bar1", 0, 0, 10).Name, frame.Name)
+        self.box(frame, (0, 0, 10), (500, 300, 40))
+        self.doc = new_doc()
+        plate = self.quiet(cad.plate, 100, 60, 8)
+        part = self.quiet(cad.hole, plate, 9, [(20, 20), (80, 40)])
+        self.assertEqual(self.quiet(cad.move, "Holes_Tool1", 0, 0, 10).Name, part.Name)
+        self.box(part, (0, 0, 10), (100, 60, 18))
+        self.assertEqual(holes(self.doc), [(20.0, 20.0, 14.0, 9.0), (80.0, 40.0, 14.0, 9.0)])
+
     def test_wrong_calls(self):
         tube = self.quiet(cad.tube, 60, 40, 4, 200)
         self.quiet(cad.move, tube, 1, 2, 3)

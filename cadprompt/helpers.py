@@ -30,6 +30,7 @@ leaves nothing in the document.
 import functools
 import inspect
 import math
+import re
 
 import FreeCAD as App
 import Part
@@ -44,6 +45,8 @@ TOL = 1e-6
 
 ATTACHED = ("AttachmentSupport", "Support", "_Body")     # links that do not use an object up
 COPIES = ("Part::Mirroring",)                             # their source stays a body of its own
+JOINS = ("Part::MultiFuse", "Part::Fuse", "Part::Compound")   # one result from several parts
+ON_BASE = ("Part::Cut", "Part::Fillet", "Part::Chamfer")      # one part with a feature more
 SIDES = {"x": ("XMin", "XMax"), "y": ("YMin", "YMax"), "z": ("ZMin", "ZMax")}
 # Turns a shape that is built along z so that it runs along x or y. Along x the two sizes of
 # a section lie along y and z, along y they lie along x and z.
@@ -217,14 +220,26 @@ def users(obj):
     return out
 
 
-def newest(obj):
-    """The last result that was made from `obj`, or `obj` itself. make_drawing uses it too."""
+def _piece(obj, result):
+    """Did a helper make `obj` only as a piece of `result` (a step of a shaft, a bar of a frame,
+    a tool body)? It is not a part that was joined then."""
+    rest = obj.Name[len(result.Name):] if obj.Name.startswith(result.Name) else ""
+    return result.Name.endswith(("_Tool", "_Tools")) or re.fullmatch(r"_(Step|Bar)\d+", rest) is not None
+
+
+def newest(obj, joined=True):
+    """The last result that was made from `obj`, or `obj` itself. make_drawing uses it too.
+    With joined=False it stops before a fuse or a compound of several parts: the tube in a
+    joined post is still the tube."""
     seen = {obj.Name}
     while True:
         later = [u for u in users(obj) if u.Name not in seen]
         if not later:
             return obj
-        obj = max(later, key=lambda u: u.ID)
+        after = max(later, key=lambda u: u.ID)
+        if not joined and after.TypeId in JOINS and not _piece(obj, after):
+            return obj
+        obj = after
         seen.add(obj.Name)
 
 
@@ -1103,30 +1118,75 @@ def chamfer(part, size, edges="z", name=None):
 
 
 # ---- whole parts --------------------------------------------------------------------------
+def _moved_before(obj):
+    """The earlier states of the part, under its holes, slots and rounded edges, that cad.move
+    put in a place. FreeCAD adds the Placement of a result to that of its base."""
+    out = []
+    while obj.TypeId in ON_BASE and isinstance(getattr(obj, "Base", None), App.DocumentObject):
+        obj = obj.Base
+        mark = ".%s_Pos" % obj.Name          # its Placement reads its own parameters
+        if any("Placement.Base" in prop and mark in text for prop, text in obj.ExpressionEngine):
+            out.append(obj)
+    return out
+
+
+def _results_above(obj, whole):
+    """The Placement that FreeCAD puts on `obj` after its own: that of the results made from it."""
+    total = App.Placement()
+    while obj.Name != whole.Name:
+        obj = max(users(obj), key=lambda u: u.ID)        # the same way up as newest()
+        total = obj.Placement.multiply(total)
+    return total
+
+
 @_helper("cad.move(tube, 60, 50, 8)")
 def move(part, x=0, y=0, z=0):
     """Put the part so that its origin is at x, y, z (not: move it by x, y, z). The origin of a
     plate is its corner, the origin of a shaft, a tube or a pipe is the middle of its lower end.
+    A part that was joined moves inside the joined part; give the joined part to move all of it.
 
         tube = cad.move(tube, 60, 50, 8)        # stands at x 60, y 50 on a plate that is 8 thick
     """
-    obj, given = _find(part)
+    whole, given = _find(part)
     if isinstance(x, (list, tuple, App.Vector)):
         if len(x) != 3:
             raise _Wrong("the place is three numbers x, y, z, not %r." % (x,))
         x, y, z = x
     place = [_number(v, a) for v, a in ((x, "x"), (y, "y"), (z, "z"))]
+    obj = newest(whole.Document.getObject(given), joined=False)
+    inside = obj.Name != whole.Name
+    pieces = len(_solids(whole))
+    # The place is one of the document, whatever came before. The moves of the earlier states
+    # are taken off as expressions, the place of the joined part around it as numbers (an
+    # expression cannot read a result that is made from this object).
+    earlier = _moved_before(obj)
+    above = _results_above(obj, whole).inverse().multVec(App.Vector(*place)) - App.Vector(*place)
     with _Build(obj.Document) as b:
         old = obj.Placement
         texts = dict(obj.ExpressionEngine)
-        for letter, value in zip("xyz", place):
+        for letter, value, shift in zip("xyz", place, above):
             prop = "Placement.Base." + letter
             b.back.append(functools.partial(obj.setExpression, prop, texts.get(prop) or texts.get("." + prop)))
-            b.bind(obj, prop, b.param(obj.Name, "Pos" + letter.upper(), value, "Distance"))
+            terms = [b.param(obj.Name, "Pos" + letter.upper(), value, "Distance")]
+            for lower in earlier:
+                term = "%s.Placement.Base.%s" % (lower.Name, letter)
+                try:
+                    obj.evalExpression(term)
+                except Exception:        # an object with the name of a unit: the number of today
+                    term = "%.12g mm" % getattr(lower.Placement.Base, letter)
+                terms.append(term)
+            text = " - ".join(terms)
+            b.bind(obj, prop, text + (" + %.12g mm" % shift if abs(shift) > TOL else ""))
         b.back.insert(0, functools.partial(setattr, obj, "Placement", old))
         b.done(obj)
-        return b.line(obj, "moved, the origin of %s is now at (%s)" % (
-            _of(obj, given), ", ".join(_text(v) for v in place)))
+        what = "moved, the origin of %s is now at (%s)" % (_of(obj, given), ", ".join(_text(v) for v in place))
+        if not inside:
+            return b.line(obj, what)
+        if _problem(whole) or len(_solids(whole)) != pieces:
+            raise _Wrong('at that place %s does not touch the rest of %s any more. To move the whole part: '
+                         'cad.move("%s", x, y, z).' % (obj.Name, whole.Name, whole.Name))
+        b.line(whole, "%s inside it was %s" % (obj.Name, what))
+        return obj
 
 
 @_helper("cad.join(plate, tube)")
