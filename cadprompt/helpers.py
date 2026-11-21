@@ -167,11 +167,15 @@ def _identifier(name):
     if not text or not text[0].isalpha():
         text = "Part_" + text
     text = text[0].upper() + text[1:]
-    try:
-        App.Units.Quantity("1 " + text)      # "T", "Ohm": an expression would read a unit, not the object
-        text += "_part"
-    except Exception:
-        pass
+    if text.isalpha():
+        # "T", "Ohm": an expression would read a unit, not the object. The unit parser gets the
+        # name alone and only letters, never a number before it: it reads "1 Welle" as 1 W + e l,
+        # and that error is not a Python error, it ends FreeCAD.
+        try:
+            App.Units.Quantity(text)
+            text += "_part"
+        except Exception:
+            pass
     return text
 
 

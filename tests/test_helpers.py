@@ -197,6 +197,36 @@ class Plate(Case):
         self.volume(hole, 10 * 10 * 2 - disc(4, 2))
         self.assertEqual(self.quiet(cad.plate, 10, 10, 2, name="2 mm sheet").Label, "2 mm sheet")
 
+    def test_usual_names_of_parts_that_the_unit_parser_of_freecad_cannot_take(self):
+        # "1 Welle" is 1 W + e l for FreeCAD's unit parser, and its error ended FreeCAD: a name
+        # never goes there with a number before it
+        names = ("Welle", "Welle_1", "Wellenende", "Getriebewelle", "Test_Welle", "Weld", "Weldment",
+                 "Welded_frame", "Well", "Kegel", "Kegelrad", "Gehäuse", "Gehaeuse", "Getriebe", "Gestell",
+                 "Kette", "Kessel", "Kelle", "Messer", "Membran", "Metal", "Mesh", "Helix", "Nest", "Cell",
+                 "Gel", "Jet", "1 Welle", "W e l l e", "5 kg 3 m", "kg", "mm", "GeV", "e", "pi", "Platte", "Flansch",
+                 "Hexagon")
+        for name in names:
+            with self.subTest(name=name):
+                self.doc = new_doc()
+                shaft = self.quiet(cad.shaft, 30, 40, name=name)
+                self.assertEqual(shaft.Label, name)
+                self.volume(self.quiet(cad.hole, shaft, 10), disc(30, 40) - disc(10, 40))
+        self.assertEqual(shaft.Name, "Hexagon")
+        self.assertEqual(self.quiet(cad.plate, 100, 50, 10, "Kegel").Name, "Kegel")      # the name by position
+        plate = self.quiet(cad.plate, 100, 50, 10, label="Weldment")
+        self.assertEqual(plate.Name, "Weldment")
+        self.assertEqual(self.quiet(cad.hole, plate, 8, 20, 20, name="Metal").Name, "Metal")
+        # the name of a unit still gets another name, so that an expression can read the object
+        for unit in ("T", "Ohm", "A", "Pa"):
+            with self.subTest(unit=unit):
+                self.doc = new_doc()
+                shaft = self.quiet(cad.shaft, 30, 40, name=unit)
+                self.assertEqual(shaft.Name, unit + "_part")
+                part, line = self.made(cad.hole, shaft, 10)
+                self.assertNotIn("Not bound", line)
+                self.change(**{shaft.Name + "_Diameter": 40, shaft.Name + "_Length": 50})
+                self.volume(part, disc(40, 50) - disc(10, 50))
+
     def test_the_users_params_are_used_and_stay(self):
         p = self.doc.addObject("App::VarSet", "Params")
         p.addProperty("App::PropertyLength", "Gap", "Mine")
