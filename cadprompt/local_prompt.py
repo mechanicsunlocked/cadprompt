@@ -6,7 +6,8 @@ sent with every step. Pure data, no FreeCAD import.
 
 TOOLS is the one list of tools, for the built-in engine and for the bridge to
 Claude Code (bridge_tools): the same names, the same arguments, the same
-functions in local_tools. Read AGENTS.md before you change a name.
+functions in local_tools. The names and the arguments are fixed: stored
+conversations, the bridge and training data use them.
 """
 
 RULES = """You are CADprompt, a CAD assistant that works inside the user's FreeCAD 1.1. The user is a craftsman or a student. You do the work yourself with the tools. Answer in the language the user writes in.
