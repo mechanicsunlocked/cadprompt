@@ -21,7 +21,7 @@ In FreeCAD, no command line:
 
 1. **Edit → Preferences → Addon Manager Options**.
 2. Under **Custom repositories** press **+**.
-   Repository URL: `https://github.com/mechanicsunlocked/cadprompt`  Branch: `weldment`
+   Repository URL: `https://github.com/mechanicsunlocked/cadprompt`  Branch: `freecad-addon`
    (the test branch; it will be `main` after the tests on Windows and macOS)
 3. Close the preferences, open **Tools → Addon manager**, search **CADprompt**, install.
 4. Restart FreeCAD.
