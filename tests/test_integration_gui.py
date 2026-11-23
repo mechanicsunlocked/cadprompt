@@ -246,11 +246,11 @@ def main():
           and results[1].startswith("Drawing made:") and "Scale: 1:1" in results[1]
           and "PDF: " + pdf in results[1] and "Open points:" in results[1] and "ERROR" not in results[1],
           str(results)[:1500])
-    check("the system prompt and the four tools went to the server; the model's thinking never came back",
+    check("the system prompt and the six tools went to the server; the model's thinking never came back",
           bodies and bodies[0]["messages"][0]["role"] == "system"
           and "make_drawing" in bodies[0]["messages"][0]["content"]
           and sorted(t["function"]["name"] for t in bodies[0]["tools"]) ==
-          ["get_document_state", "make_drawing", "read_project_file", "run_python"]
+          ["find_joints", "get_document_state", "make_drawing", "make_weld", "read_project_file", "run_python"]
           and "reasoning_content" not in json.dumps(bodies) and "A box will do." not in json.dumps(bodies))
     undo = list(doc.UndoNames) if doc else []
     check("the work is on FreeCAD's undo list: the model's step and the drawing steps",

@@ -103,7 +103,13 @@ def main():
     mod = os.path.join(HOME, "Mod", "CADprompt")
     import cadprompt
     from cadprompt import workbench as W
-    OURS = (W.PANEL,) + W.DRAWING
+    OURS = (W.PANEL,) + W.DRAWING + W.WELD
+    # FreeCAD started with --disable-addon TechDraw still imports the TechDraw module, so the
+    # weld tools load there too; only a broken copy would leave the Weld toolbar out
+    WELD_OK = True
+    BARS = {"CADprompt": [W.PANEL], "Drawing": list(W.DRAWING), **({"Weld": list(W.WELD)} if WELD_OK else {})}
+    MENUS = (["CADprompt/" + W.PANEL] + ["CADprompt/Drawing/" + c for c in W.DRAWING]
+             + (["CADprompt/Weld/" + c for c in W.WELD] if WELD_OK else []))
 
     def ours_on_screen():
         """Toolbars on screen and menus that hold one of our commands."""
@@ -157,11 +163,11 @@ def main():
     if CASE == "autoload":
         check("FreeCAD is in the CADprompt workbench, with its two toolbars and the chat dock, without a click",
               first == classname and dock_shown() and registered == list(OURS)
-              and ours_on_screen()[0] == {"CADprompt": [W.PANEL], "Drawing": list(W.DRAWING)}, str(ours_on_screen()))
+              and ours_on_screen()[0] == BARS, str(ours_on_screen()))
     else:
         check("the chat command is registered at start, the drawing commands "
               + ("too (TechDraw buttons asked for)" if opt_in else "are not yet"),
-              registered == (list(OURS) if opt_in else [W.PANEL]), str(registered))
+              registered == ([W.PANEL] + list(W.DRAWING) if opt_in else [W.PANEL]), str(registered))
         check(f"before the workbench is opened ({first} is active): no dock, no button and no menu of ours",
               not docks() and ours_on_screen() == ({}, []) and first != classname, str(ours_on_screen()))
     check("the saved choice ShowInTechDraw is " + ("on" if opt_in else "off (the default)"),
@@ -193,12 +199,17 @@ def main():
     check("and the toolbar Drawing with the four Hoischen buttons in order",
           toolbars().get("Drawing") == (True, list(W.DRAWING)), str(toolbars().get("Drawing")))
     check("no other toolbar holds a command of ours",
-          bars == {"CADprompt": [W.PANEL], "Drawing": list(W.DRAWING)}, str(bars))
+          bars == BARS, str(bars))
     check("the menu CADprompt holds the chat command and the submenu Drawing",
-          menus == ["CADprompt/" + W.PANEL] + ["CADprompt/Drawing/" + c for c in W.DRAWING], str(menus))
-    check("all five commands are registered now, each with an icon file that exists",
+          menus == MENUS, str(menus))
+    check("all our commands are registered now, each with an icon file that exists",
           all(Gui.Command.get(c) is not None and os.path.isfile(Gui.Command.get(c).getInfo().get("pixmap", ""))
-              for c in OURS))
+              for c in (OURS if WELD_OK else (W.PANEL,) + W.DRAWING)))
+    if WELD_OK:
+        folder, ours = W.weldment_source()
+        check("the Weld toolbar has the five Weldment buttons, from the copy in this addon",
+              toolbars().get("Weld") == (True, list(W.WELD)) and ours
+              and same(folder, os.path.join(mod, "weldment")), f"{toolbars().get('Weld')} {folder}")
     check("(hoischen was loaded at start)" if opt_in else "hoischen is loaded now",
           all(m in sys.modules for m in HOISCHEN_MODULES))
     from hoischen import commands as H
@@ -279,8 +290,8 @@ def main():
     pump()
     check("the chat button hides and shows the same dock", hidden and dock_shown())
     bars, _menus = ours_on_screen()
-    check("the workbench still has its two toolbars, nothing twice",
-          bars == {"CADprompt": [W.PANEL], "Drawing": list(W.DRAWING)}, str(bars))
+    check("the workbench still has its toolbars, nothing twice",
+          bars == BARS, str(bars))
 
     # ---- 6. set_show_in_techdraw ----
     say("\n-- set_show_in_techdraw --")
@@ -288,7 +299,7 @@ def main():
         try:
             W.set_show_in_techdraw(False)
             W.set_show_in_techdraw(True)
-            ok = W.show_in_techdraw() and ours_on_screen()[0] == {"CADprompt": [W.PANEL], "Drawing": list(W.DRAWING)}
+            ok = W.show_in_techdraw() and ours_on_screen()[0] == BARS
             W.set_show_in_techdraw(False)
             detail = ""
         except Exception:

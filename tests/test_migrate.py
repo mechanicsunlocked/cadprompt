@@ -57,7 +57,8 @@ def main():
     with open(os.path.join(HERE, "old_template.json"), encoding="utf-8") as f:
         old = json.load(f)
     before, older = old["before"], old["older"]
-    changed = sorted(projects.OLD)                       # the files that have a new version
+    changed = sorted(r for r in projects.OLD if projects.OLD[r])   # the files that have a new version
+    # files that are new in the template (no old version) are made when a project has none
     same = sorted(set(before) - set(changed))            # the files that are as they were
 
     def new(rel):

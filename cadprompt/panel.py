@@ -527,6 +527,7 @@ class Panel(QtWidgets.QWidget):
         self._stop()
         self.project = projects.path_of(name)
         paths.params().SetString("LastProject", name)
+        paths.save_params()
         self._project_notes, self._migrated = [], False      # see _migrate: not when a project is picked
         runner.allow_web_in_project(self.project)
         self._sync_mode()
@@ -778,8 +779,8 @@ class Panel(QtWidgets.QWidget):
         if self._approval is not None:
             return False                     # one question at a time
         who = self._name(source, start=True)
-        title = (f"{who} wants to run this code in FreeCAD:" if tool_name == "run_python"
-                 else f"{who} wants to make a drawing:")
+        title = {"run_python": f"{who} wants to run this code in FreeCAD:",
+                 "make_weld": f"{who} wants to weld:"}.get(tool_name, f"{who} wants to make a drawing:")
         alive = self._alive
         self._approval = ""
         self.card.ask(title, text)

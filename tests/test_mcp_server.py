@@ -694,8 +694,8 @@ class Registry(unittest.TestCase):
     def test_the_bridge_offers_the_same_tools_as_the_engine(self):
         engine = {t["function"]["name"]: t["function"] for t in local_prompt.TOOLS}
         bridge = {t["name"]: t for t in local_prompt.bridge_tools()}
-        self.assertEqual(list(bridge), ["run_python", "get_document_state", "make_drawing", "get_view"])
-        for name in ("run_python", "get_document_state", "make_drawing"):
+        self.assertEqual(list(bridge), ["run_python", "get_document_state", "make_drawing", "find_joints", "make_weld", "get_view"])
+        for name in ("run_python", "get_document_state", "make_drawing", "find_joints", "make_weld"):
             self.assertEqual(bridge[name]["description"], engine[name]["description"])
             self.assertEqual(bridge[name]["inputSchema"], engine[name]["parameters"])
         self.assertEqual(sorted(bridge["run_python"]["inputSchema"]["properties"]), ["code"])
@@ -710,11 +710,12 @@ class Registry(unittest.TestCase):
         self.assertEqual(local_prompt.bridge_tools()[-1]["inputSchema"], {"type": "object", "properties": {}})
 
     def test_the_tools_that_need_the_users_yes(self):
-        self.assertEqual(local_prompt.CHANGING, ("run_python", "make_drawing"))
+        self.assertEqual(local_prompt.CHANGING, ("run_python", "make_drawing", "make_weld"))
 
     def test_tool_names_did_not_change(self):
         self.assertEqual([t["function"]["name"] for t in local_prompt.TOOLS],
-                         ["run_python", "get_document_state", "read_project_file", "make_drawing"])
+                         ["run_python", "get_document_state", "read_project_file", "make_drawing",
+                          "find_joints", "make_weld"])
 
 
 if __name__ == "__main__":

@@ -113,6 +113,7 @@ def records():
 def _store(rows):
     from . import paths
     paths.params().SetString(PARAM, json.dumps(rows))
+    paths.save_params()
 
 
 def allowed(kind, url):

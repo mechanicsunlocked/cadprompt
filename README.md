@@ -11,8 +11,8 @@
 A chat panel in FreeCAD, for a local model, an API key or a signed-in AI account.
 Linux, macOS and Windows.</p>
 
-> **Status: test version 0.2.** It works on Linux with FreeCAD 1.1.4. Windows and
-> macOS are written for but not yet tested by a person. Read "What is not done yet"
+> **Status: test version 0.3** (0.2 plus welding). The automatic tests pass on Linux
+> and on Windows 11 with FreeCAD 1.1.4. macOS is written for but not yet tested by a person. Read "What is not done yet"
 > before you give it to a class.
 
 ## Install
@@ -21,7 +21,7 @@ In FreeCAD, no command line:
 
 1. **Edit → Preferences → Addon Manager Options**.
 2. Under **Custom repositories** press **+**.
-   Repository URL: `https://github.com/mechanicsunlocked/cadprompt`  Branch: `freecad-addon`
+   Repository URL: `https://github.com/mechanicsunlocked/cadprompt`  Branch: `weldment`
    (the test branch; it will be `main` after the tests on Windows and macOS)
 3. Close the preferences, open **Tools → Addon manager**, search **CADprompt**, install.
 4. Restart FreeCAD.
@@ -84,6 +84,17 @@ works at once: Claude Code is stopped when it is at work for that service.
   `drawings/`. The sheet is made by fixed rules, not by the AI. Tolerances,
   surface marks and detail dimensions you add yourself.
 - **Check**: the AI reviews the model before it goes to the shop.
+- **Welding**: say "weld the upright to the plate, a4" or type `/weld`. The
+  AI lists the corners where two parts meet (`find_joints`) and makes a
+  parametric fillet weld in each one you agree to (`make_weld`): throat `a`,
+  whole seam or intermittent `n × l (e)`, one or both sides. You approve each
+  weld with one line ("Fillet weld a4, whole seam between Plate.Face6 and
+  Upright.Face1"). The welds come from the
+  [Weldment](https://github.com/mechanicsunlocked/freecad-weldment) workbench,
+  which is part of this addon: its buttons are on the **Weld** toolbar, for
+  welding by hand. The **Drawing** of a welded part shows all its parts and
+  beads, an ISO 2553 symbol for each weld, and a second page with the weld
+  list and the cut list (a PDF of its own).
 - **Run or Skip**: when the AI wants to run code, the panel shows the code and
   waits. When the code is longer or wider than its box, a line under it says so:
   scroll to read all of it. **Run** runs exactly that text. **Skip** runs nothing
@@ -172,12 +183,12 @@ The **Drawing** toolbar of the workbench has the Hoischen tools for TechDraw
   a message to Claude and have allowed Claude Code, not when FreeCAD starts.
   It stops when you close the panel, choose a local model or an API key, take
   your yes for Claude Code back, or quit FreeCAD.
-- Claude Code gets four tools from that server: `run_python`,
-  `get_document_state`, `make_drawing` and `get_view`. Claude Code started by
-  the panel cannot show a question of its own, so the question is asked in
-  FreeCAD: `run_python` and `make_drawing` wait for your Run or Skip in the
-  panel, exactly as with a local model. The two tools that only look do not
-  ask. CADprompt starts Claude Code with the shell tool off and in its asking
+- Claude Code gets six tools from that server: `run_python`,
+  `get_document_state`, `make_drawing`, `find_joints`, `make_weld` and
+  `get_view`. Claude Code started by the panel cannot show a question of its
+  own, so the question is asked in FreeCAD: `run_python`, `make_drawing` and
+  `make_weld` wait for your Run or Skip in the panel, exactly as with a local
+  model. The three tools that only look do not ask. CADprompt starts Claude Code with the shell tool off and in its asking
   mode: its own file tools (Write, Edit) are refused in the panel; it can read
   the files of the project. Claude Code waits for your answer for up to one
   day (`"timeout"` in the `.mcp.json` of the addon).
@@ -252,6 +263,9 @@ Claude account source. It needs neither now.
 ```
 cadprompt/    the chat panel, the engines, the drawing tool
 hoischen/     DIN helpers for TechDraw (LGPL-2.1-or-later)
+weldment/     the Weldment workbench, a pinned copy (LGPL-2.1-or-later): do not edit here,
+              change freecad-weldment and run tools/vendor_weldment.py
+tools/        vendor_weldment.py
 template/     copied into every new project
 tests/        run_all.py and the test files
 ```
@@ -262,4 +276,5 @@ The older Omarchy launcher (hotkeys, bar menu, `setup`) is at the tag
 ## Licence
 
 MIT for CADprompt ([LICENSE](LICENSE)). The Hoischen tools in `hoischen/` are
-LGPL-2.1-or-later ([hoischen/LICENSE](hoischen/LICENSE)).
+LGPL-2.1-or-later ([hoischen/LICENSE](hoischen/LICENSE)), and so is the
+Weldment workbench in `weldment/` ([weldment/LICENSE](weldment/LICENSE)).

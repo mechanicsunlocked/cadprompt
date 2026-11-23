@@ -20,6 +20,15 @@ def params():
     return App.ParamGet(PARAMS)
 
 
+def save_params():
+    """Write user.cfg now. FreeCAD writes it only when it closes cleanly, so
+    after a crash every setting changed since the start would be gone."""
+    try:
+        App.saveParameter()
+    except Exception as e:      # a full disk or a locked file must not break the dialog
+        App.Console.PrintWarning(f"CADprompt: could not save the settings: {e}\n")
+
+
 def _candidates(name):
     exe = [name + ".exe", name + ".cmd", name] if WIN else [name]
     dirs = [

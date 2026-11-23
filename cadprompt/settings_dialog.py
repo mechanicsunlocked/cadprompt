@@ -458,4 +458,5 @@ class SettingsDialog(QtWidgets.QDialog):
         if self.techdraw.isChecked() != self._in_techdraw:
             from . import workbench
             workbench.set_show_in_techdraw(self.techdraw.isChecked())
+        paths.save_params()     # a crash later must not take the choice of AI with it
         self.accept()

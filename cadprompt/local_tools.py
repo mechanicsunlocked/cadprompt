@@ -533,6 +533,22 @@ def make_drawing(project, sheet="A3", obj_name=""):
         return "ERROR: the drawing failed: %s" % exc
 
 
+def find_joints():
+    try:
+        from . import welding
+        return welding.find_joints(App.ActiveDocument)
+    except Exception as exc:
+        return "ERROR: could not look for joints: %s" % exc
+
+
+def make_weld(args, project=""):
+    """A weld is one run_python step with a fixed code: one undo step, taken back on an error."""
+    from . import welding
+    if not str((args or {}).get("face_a", "")).strip() or not str((args or {}).get("face_b", "")).strip():
+        return "ERROR: make_weld needs face_a and face_b. Call find_joints() and copy two face names from it."
+    return run_python(welding.weld_code(args), project)
+
+
 class NoView(Exception):
     """get_view has no picture to give. The text is for the model."""
 
@@ -590,7 +606,12 @@ def _run_tool(project, name, args):
         return read_project_file(project, str(args.get("path", "")))
     if name == "make_drawing":
         return make_drawing(project, str(args.get("sheet") or "A3"), str(args.get("obj_name") or ""))
-    return "ERROR: there is no tool %s. Use run_python, get_document_state, read_project_file or make_drawing." % name
+    if name == "find_joints":
+        return find_joints()
+    if name == "make_weld":
+        return make_weld(args, project)
+    return ("ERROR: there is no tool %s. Use run_python, get_document_state, read_project_file, "
+            "make_drawing, find_joints or make_weld." % name)
 
 
 def run_tool(project, name, args):
