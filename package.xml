@@ -8,8 +8,8 @@
   <license file="LICENSE">MIT</license>
   <license file="hoischen/LICENSE">LGPL-2.1-or-later</license>
   <license file="weldment/LICENSE">LGPL-2.1-or-later</license>
-  <url type="repository" branch="freecad-addon">https://github.com/mechanicsunlocked/cadprompt</url>
-  <url type="readme">https://github.com/mechanicsunlocked/cadprompt/blob/freecad-addon/README.md</url>
+  <url type="repository" branch="main">https://github.com/mechanicsunlocked/cadprompt</url>
+  <url type="readme">https://github.com/mechanicsunlocked/cadprompt/blob/main/README.md</url>
   <icon>icons/cadprompt.svg</icon>
   <freecadmin>1.0.0</freecadmin>
   <content>

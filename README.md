@@ -16,7 +16,7 @@ CADprompt is installed from inside FreeCAD. You don't need a terminal.
 1. Open _Edit > Preferences > Addon Manager Options_.
 2. Under _Custom repositories_, press _+_ and fill in:
    - Repository URL: `https://github.com/mechanicsunlocked/cadprompt`
-   - Branch: `freecad-addon`
+   - Branch: `main`
 3. Open _Tools > Addon manager_, search for _CADprompt_ and install it.
 4. Restart FreeCAD.
 
