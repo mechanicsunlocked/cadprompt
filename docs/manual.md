@@ -31,6 +31,15 @@ models** asks Anthropic which models your key can use.
 a terminal and sign in. In Settings choose "Claude account". The panel starts
 Claude Code for each message; you do not need the terminal again.
 
+**How fast the Claude account is.** Almost all of the waiting time is Claude
+thinking and writing, not FreeCAD. Settings has **Thinking** for it: short,
+medium (the standard) or long. Measured with Opus 5.5: a plate with four holes
+takes about 20 s with short, 25 s with medium, and 45 s when Claude Code
+decides by itself. For a difficult part, short can cost more time than it
+saves, because a step fails and Claude does it again. In build mode Claude
+puts the steps that belong together into one piece of code, so a simple part
+is one **Run**. **Run all for this request** saves you the other clicks.
+
 The local model and the API key share one conversation in a project. You can
 change between them in the middle of the work.
 
@@ -88,7 +97,7 @@ works at once: Claude Code is stopped when it is at work for that service.
   on, the good requests to a local model or with an API key are also kept in
   the file `training/requests.jsonl` of the project. Nothing is sent. See
   [Training data](privacy.md#training-data-a-file-in-the-project-off-until-you-turn-it-on).
-- **Undo**: each step of the AI is one Undo step in FreeCAD. Before the first
+- **Undo**: each piece of code that ran is one Undo step in FreeCAD. Before the first
   change of a request, the model file is copied to `model/.backup/`. A request
   that ends with an error is not saved over your file.
 

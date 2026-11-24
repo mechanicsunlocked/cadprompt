@@ -269,6 +269,12 @@ def main():
           init.get("permissionMode") == "default", str(init.get("permissionMode")))
     check("Claude Code had no shell, though the settings of the project allow it",
           bool(tools) and "Bash" not in tools, str(tools))
+    check("its own tools were the three that read a file, and the FreeCAD tools were there from the start",
+          sorted(t for t in tools if not t.startswith("mcp__")) == sorted(runner.READ_TOOLS)
+          and "mcp__freecad__run_python" in tools, str(tools))
+    first_tools = [text for kind, text in pan.entries if kind == "tool"][:1]
+    check("the first thing Claude Code did was a step in FreeCAD: it read the state from the message",
+          bool(first_tools) and first_tools[0].startswith("`run_python`"), str(first_tools))
     bridge.stop()
 
 

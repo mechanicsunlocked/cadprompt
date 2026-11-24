@@ -4,6 +4,8 @@ It writes what it was started with (arguments, the ANTHROPIC_*, CLAUDE_CODE_* an
 variables of its environment, the prompt from stdin) as one JSON line to the
 file named in PANEL_FAKE_CLAUDE_LOG, then answers like Claude Code would:
 `auth status` with a small JSON, everything else with a stream-json result.
+The panel puts the state of the project under the user's words
+(runner.with_state): the log has the words as "stdin" and that block as "state".
 A session id that starts with "gone" is one it does not have any more.
 A prompt that starts with "slow" is one it works on for a minute: it writes
 its process id to the log first, so the test can see that Stop ends it.
@@ -26,7 +28,7 @@ import time
 
 args = sys.argv[1:]
 auth = args[:2] == ["auth", "status"]
-keep = ("ANTHROPIC_", "CLAUDE_CODE_", "FREECAD_MCP_", "CADPROMPT_", "PYTHON", "PANEL_BUNDLE_")
+keep = ("ANTHROPIC_", "CLAUDE_CODE_", "FREECAD_MCP_", "CADPROMPT_", "PYTHON", "PANEL_BUNDLE_", "ENABLE_TOOL_SEARCH")
 
 
 def expand(text):
@@ -98,7 +100,11 @@ def use_tools(code):
 
 if not auth:                     # the prompt is UTF-8, whatever the encoding of this system is
     prompt = sys.stdin.buffer.read().decode("utf-8", "replace")
-record = {"argv": args, "cwd": os.getcwd(), "stdin": "" if auth else prompt, "pid": os.getpid(),
+words, state = ("" if auth else prompt), ""
+at = words.rfind("\n\n<cadprompt-state>\n")
+if at >= 0 and words.rstrip().endswith("</cadprompt-state>"):
+    words, state = words[:at], words[at + 2:]
+record = {"argv": args, "cwd": os.getcwd(), "stdin": words, "state": state, "pid": os.getpid(),
           "env": {k: v for k, v in os.environ.items() if k.startswith(keep)},
           "path": os.environ.get("PATH", "").split(os.pathsep),
           "path0": os.environ.get("PATH", "").split(os.pathsep)[0]}

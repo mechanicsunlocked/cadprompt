@@ -28,11 +28,27 @@ MCP_SERVER = "freecad"           # the name of the bridge in the .mcp.json of th
 LOCAL_HOSTS = ("127.0.0.1", "localhost")   # the bridge, and a model server on this computer
 WEB_TOOLS = ("WebSearch", "WebFetch")
 # Claude Code's own tools that change a file. Started with -p it cannot ask anybody, so each
-# call is refused (--permission-mode default). template/CLAUDE.md tells it to save a file of
-# the project with run_python, where the user says Run or Skip; the panel says the same to
-# the user when one of these was refused (measured 2026-11-24 with 2.1.331: without that
-# text Claude Code asked the user for a permission that nobody can give).
+# call was refused (--permission-mode default), and Claude Code asked the user for a permission
+# that nobody can give (measured 2026-11-24 with 2.1.331). Now they are not in its tools
+# (READ_TOOLS), and template/CLAUDE.md tells it to save a file of the project with run_python,
+# where the user says Run or Skip. The panel says the same to the user should one of these
+# be refused all the same.
 FILE_TOOLS = ("Write", "Edit", "NotebookEdit")
+# Claude Code's own tools that the panel gives it: the ones that read a file of the project. With
+# --tools the others (its agents, its timers, its tool search) are not there at all, so they
+# take no room in every request and Claude Code cannot try one that nobody could approve.
+READ_TOOLS = ("Read", "Glob", "Grep")
+# Claude Code loads the tools of a server only after a search of its own ("ToolSearch"), which is
+# one more round trip to the service before the first step. With this variable set to "false"
+# the six FreeCAD tools are there from the start (read in the text of Claude Code 2.1.331).
+NO_TOOL_SEARCH = "ENABLE_TOOL_SEARCH"
+STATE = "cadprompt-state"        # the tag around what the panel puts under a message of the user
+# How long Claude thinks before each step (the Claude account only). Measured 2026-11-24 with
+# Claude Code 2.1.331 and Opus 5.5, a plate with four holes: its own setting 44 s, medium 23 s,
+# low 19 s. A bent bracket: medium 58 s and right the first time, low 66 s with one failed
+# step. So medium is what a new profile has. OWN_EFFORT leaves it to Claude Code's settings.
+EFFORTS = ("low", "medium", "high")
+EFFORT, OWN_EFFORT = "medium", "own"
 NO_STORED_TRUST = "CLAUDE_CODE_IGNORE_PERSISTED_TRUST"   # Claude Code: no "trust this folder" answer counts
 SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
 HOOKS = ("Claude Code was not started: this project has hooks in %s. A hook is a command that Claude Code "
@@ -96,6 +112,48 @@ def project_hooks(project):
             if head and re.search(r"^\s*hooks\s*:", head.group(1), re.M):
                 found.append(os.path.relpath(path, project).replace(os.sep, "/"))
     return found
+
+
+def with_state(text, state):
+    """The message that Claude Code gets: the user's words, then the state of the project.
+
+    `state` is bridge.state(): the mode, the references, the model files and the open
+    document. Claude Code needed three round trips to the service to read them, before
+    its first step (measured 2026-11-24: 7 of 56 seconds). The state comes after the words:
+    /build and the other commands must stay at the start, and the conversation before
+    this message stays the same text, so the service can use its cache.
+
+    The state holds names from the document and text from refs/INDEX.md, and both can come
+    from another person. The closing tag is taken out of them, so nothing in the state can
+    end the block and go on as words of the user.
+    """
+    state = (state or "").strip()
+    if not state:
+        return text
+    state = state.replace(STATE + ">", STATE + " >")
+    return "%s\n\n<%s>\n%s\n</%s>" % (text.rstrip(), STATE, state, STATE)
+
+
+def without_state(text):
+    """The words of the user, without the state that with_state() put under them."""
+    rest = text.rstrip()
+    if not rest.endswith("</%s>" % STATE):
+        return text
+    at = rest.rfind("<%s>" % STATE)
+    return rest[:at].rstrip() if at >= 0 else text
+
+
+def effort():
+    """The thinking effort from Settings: one of EFFORTS, or "" for Claude Code's own setting."""
+    value = paths.params().GetString("Effort", EFFORT).strip().lower()
+    if value == OWN_EFFORT:
+        return ""
+    return value if value in EFFORTS else EFFORT
+
+
+def own_tools():
+    """Claude Code's own tools in the panel: reading, and the web when the user allows it."""
+    return list(READ_TOOLS) + (list(WEB_TOOLS) if paths.params().GetBool("AllowWeb", False) else [])
 
 
 def _short_tool(name):
@@ -229,6 +287,7 @@ def claude_environment(claude, env=None):
     # around it) was trusted in a terminal before. CLAUDE.md and the commands are still read.
     # (Read in the text of Claude Code 2.1.327. An older version that does not know it ignores it.)
     pe.insert(NO_STORED_TRUST, "1")
+    pe.insert(NO_TOOL_SEARCH, "false")      # the FreeCAD tools from the start: see NO_TOOL_SEARCH
     return pe
 
 
@@ -317,12 +376,17 @@ class ClaudeRun(QtCore.QObject):
         model = paths.params().GetString("ModelOverride", "")
         if model and backends.current() == "account":
             args += ["--model", model]
+        if effort() and backends.current() == "account":     # another endpoint may not know the word
+            args += ["--effort", effort()]
         # Three things that a file of the project folder must not decide (it can come from
         # another person, and nobody can answer a question of Claude Code started with -p):
         # the MCP servers are those of the addon's file and no others; with no file, none.
         config = mcp_config()
         args += (["--mcp-config", config] if config else []) + ["--strict-mcp-config"]
-        # Claude Code asks before it changes a file (that is a no here), and it has no shell.
+        # Its own tools are the reading ones and no others (READ_TOOLS). Should one more be
+        # there all the same: Claude Code asks before it changes a file (that is a no here),
+        # and it has no shell.
+        args += ["--tools", ",".join(own_tools())]
         args += ["--permission-mode", "default", "--disallowedTools", "Bash"]
         args += ["--allowedTools"] + allowed_tools()
 
@@ -494,10 +558,10 @@ def _user_text(content):
     m = _CMD[0].search(content)
     if m:
         args = _CMD[1].search(content)
-        return (m.group(1) + " " + (args.group(1) if args else "")).strip()
+        return (m.group(1) + " " + (without_state(args.group(1)) if args else "")).strip()
     if content.lstrip().startswith("<"):
         return None
-    return content.strip()
+    return without_state(content).strip()
 
 
 def read_history(path, limit=200):

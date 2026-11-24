@@ -70,10 +70,18 @@
   `get_view`. Claude Code started by the panel cannot show a question of its
   own, so the question is asked in FreeCAD: `run_python`, `make_drawing` and
   `make_weld` wait for your Run or Skip in the panel, exactly as with a local
-  model. The three tools that only look do not ask. CADprompt starts Claude Code with the shell tool off and in its asking
-  mode: its own file tools (Write, Edit) are refused in the panel; it can read
-  the files of the project. Claude Code waits for your answer for up to one
-  day (`"timeout"` in the `.mcp.json` of the addon).
+  model. The three tools that only look do not ask. CADprompt starts Claude
+  Code in its asking mode and with three tools of its own, the ones that
+  read (Read, Glob, Grep): it can read the files of the project, and it has
+  no shell and no tool that writes a file. A file that you ask for (a
+  script, a note) is saved with `run_python`, so you see the code and press
+  Run. Claude Code waits for your answer for up to one day (`"timeout"` in
+  the `.mcp.json` of the addon).
+- With each message to Claude Code the panel sends the state of the project
+  along, so that Claude Code does not have to ask for it first: the mode,
+  the entries of `refs/INDEX.md`, the names of the files in `model/`, the
+  FreeCAD version, and the description of the open document (object names
+  and sizes).
 - **A project folder from another person** cannot give Claude Code other
   tools. CADprompt tells Claude Code to use the server list of the addon and
   no other, so a `.mcp.json` in the project folder is not read by the panel.
@@ -150,7 +158,7 @@ one line and names the file.
 | To `api.anthropic.com` (`GET /v1/models`) | when you press Find models | your API key | your Allow for Anthropic |
 | To the proxy of your computer, when its settings name one | before each https connection above to another computer | the name of the service (`CONNECT api.anthropic.com:443`), and the login for the proxy when the setting has one | the same Allow as for the connection |
 | The program `claude auth status` (it is started; CADprompt itself connects to nothing) | when the panel opens or the settings change, with a Claude Code source | nothing from CADprompt | your Allow for Claude Code |
-| The program `claude -p` (Claude Code; it sends the data to Anthropic or to your endpoint with its own connections) | once for each message | your message; through the tools: the results of the AI's code, descriptions of the document, pictures of the 3D view; and the project files that Claude Code reads | your Allow for Claude Code with that service |
+| The program `claude -p` (Claude Code; it sends the data to Anthropic or to your endpoint with its own connections) | once for each message | your message, and with it the mode, the entries of `refs/INDEX.md`, the names of the model files and the description of the open document; through the tools: the results of the AI's code, descriptions of the document, pictures of the 3D view; and the project files that Claude Code reads | your Allow for Claude Code with that service |
 | The server inside FreeCAD for Claude Code (`127.0.0.1`, incoming only) | listens from your first message to Claude until the panel closes | nothing leaves the computer | your Allow for Claude Code; each request needs the token |
 
 CADprompt makes no other connection: no update check, no telemetry, no

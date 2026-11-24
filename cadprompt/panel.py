@@ -928,6 +928,9 @@ class Panel(QtWidgets.QWidget):
             self._sync_mode()
         self._engine = self.run
         self._busy(True, f"{self._who(start=True)} is working…")
+        # the mode, the references and the open document go with the message: Claude Code
+        # then starts with its first step and not with the reading of all this
+        text = runner.with_state(text, bridge.state(self.project))
         self.run.start(self.claude, self.project, text, projects.get_session(self.project), env)
 
     def _start_local(self, text, backend, images=()):

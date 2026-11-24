@@ -8,7 +8,7 @@ import urllib.error
 
 from PySide import QtCore, QtWidgets
 
-from . import approval, ask_ui, backends, consent, local_agent, paths, training
+from . import approval, ask_ui, backends, consent, local_agent, paths, runner, training
 
 # Linux and macOS: the key file has mode 0600. Windows has no such modes; there the
 # folder of the user's own profile keeps other users out (backends.py).
@@ -27,6 +27,14 @@ HINTS = {
 }
 AUTO = "Run the AI's code without asking"
 AUTO_HINT = "Off: you see each piece of code before it runs, and press Run or Skip."
+# How long Claude thinks before each step: runner.EFFORTS, and runner.OWN_EFFORT
+EFFORT_CHOICES = (("low", "Short: the fastest, for simple parts"),
+                  ("medium", "Medium: fast and careful (standard)"),
+                  ("high", "Long: for a difficult part, about twice the time"),
+                  ("own", "As Claude Code is set"))
+EFFORT_HINT = ("How long Claude thinks before each step. Measured for a plate with four holes: "
+               "short 19 s, medium 23 s, as Claude Code is set 44 s. For a bent bracket, short made "
+               "a mistake and needed a second try; medium did not.")
 TECHDRAW = "Also show the drawing tools in the TechDraw workbench"
 NOT_ALLOWED = "Nothing was sent: you did not allow this service. Press Find models again to be asked again."
 PRIVACY_NONE = "No service outside this computer is allowed yet. CADprompt asks before it sends anything."
@@ -223,6 +231,13 @@ class SettingsDialog(QtWidgets.QDialog):
         self.model_override.setPlaceholderText("empty = Claude Code's default; or opus, sonnet, haiku")
         self.model_label = QtWidgets.QLabel("Claude model")
         f.addRow(self.model_label, self.model_override)
+        self.effort = QtWidgets.QComboBox()
+        for value, text in EFFORT_CHOICES:
+            self.effort.addItem(text, value)
+        self.effort.setCurrentIndex(max(0, self.effort.findData(runner.effort() or runner.OWN_EFFORT)))
+        self.effort.setToolTip(EFFORT_HINT)
+        self.effort_label = QtWidgets.QLabel("Thinking")
+        f.addRow(self.effort_label, self.effort)
         self.claude = QtWidgets.QLineEdit(p.GetString("claudePath", ""))
         self.claude.setPlaceholderText(paths.find_tool("claude") or "not found")
         f.addRow("claude program", self.claude)
@@ -354,7 +369,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.custom_box.setVisible(b == "custom")
         self.claude_box.setVisible(b in backends.CLAUDE_CODE)
         # another endpoint has its own model field: the Claude model names mean nothing there
-        for w in (self.model_label, self.model_override):
+        for w in (self.model_label, self.model_override, self.effort_label, self.effort):
             w.setVisible(b == "account")
         self.adjustSize()
 
@@ -464,6 +479,7 @@ class SettingsDialog(QtWidgets.QDialog):
         p.SetString("ApiModel", self.api_model.currentText().strip())
         p.SetBool("AllowWeb", self.web.isChecked())
         p.SetString("ModelOverride", self.model_override.text().strip())
+        p.SetString("Effort", self.effort.currentData() or runner.EFFORT)
         p.SetString("BaseUrl", self.url.text().strip())
         p.SetString("Model", self.model.text().strip())
         p.SetString("claudePath", self.claude.text().strip())
