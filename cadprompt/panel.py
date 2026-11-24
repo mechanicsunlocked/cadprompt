@@ -16,6 +16,7 @@ installation has no source: the panel shows three choices and contacts nothing.
 
 import html
 import os
+import time
 
 import FreeCAD as App
 import FreeCADGui as Gui
@@ -324,6 +325,17 @@ class Panel(QtWidgets.QWidget):
         self.status.setTextFormat(QtCore.Qt.PlainText)     # it shows a tool name that the AI gave
         self.status.setWordWrap(True)
         row.addWidget(self.status, 1)
+        # How long the AI has worked on this message. A request for an assembly can think for
+        # minutes with nothing else to show (measured 2026-11-24: 5.5 minutes before the
+        # first step): a number that counts says that it is alive.
+        self.clock = QtWidgets.QLabel("")
+        self.clock.setTextFormat(QtCore.Qt.PlainText)
+        self.clock.setToolTip("Time since you sent this message")
+        row.addWidget(self.clock)
+        self._since = 0.0
+        self._ticker = QtCore.QTimer(self)
+        self._ticker.setInterval(1000)
+        self._ticker.timeout.connect(self._tick)
         self.auto_btn = QtWidgets.QToolButton(text=AUTO_MARK)
         self.auto_btn.setToolTip("The AI's code runs without a question (Settings). "
                                  "Click to turn that off: CADprompt then asks before each step.")
@@ -404,6 +416,17 @@ class Panel(QtWidgets.QWidget):
         self._working = on
         self.send_btn.setText("Stop" if on else "Send")
         self.status.setText(msg)
+        if on:
+            self._since = time.monotonic()
+            self._tick()
+            self._ticker.start()
+        else:
+            self._ticker.stop()
+            self.clock.setText("")
+
+    def _tick(self):
+        """The clock next to the status: minutes and seconds since the message was sent."""
+        self.clock.setText("%d:%02d" % divmod(int(time.monotonic() - self._since), 60))
 
     # ---- setup checks -----------------------------------------------------
     def _setup(self, text, note=False):

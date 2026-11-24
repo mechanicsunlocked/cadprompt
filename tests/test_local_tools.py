@@ -211,12 +211,41 @@ class RunPython(unittest.TestCase):
         out = T.run_python('doc.addObject("Part::Cylinder", "Pin")\ndoc.addObject("Part::Cut", "Broken")')
         self.assertIn("ERROR:", out.splitlines())
         self.assertIn("- Broken (Part::Cut): Linked object is not a Part object", out)   # FreeCAD's own reason
-        self.assertIn("The changes of this run were taken back.", out)
+        self.assertIn(T.TAKEN_BACK, out)
         self.assertNotIn("PROBLEM OBJECTS", out)               # nothing broken is left to clean up
         self.assertTrue(local_agent.find_problem("run_python", out))
         self.assertEqual([o.Name for o in doc.Objects], ["Plate"])   # the good Pin of that run is gone too
         self.assertEqual(doc.UndoCount, undo)
         self.assertNotIn("PROBLEM", T.get_document_state())
+
+    def test_a_run_that_stops_with_an_error_names_the_object_that_freecad_could_not_build(self):
+        # The code's own check fell over the broken object (Claude Code, 2026-11-24). After the
+        # step back the object is gone, so the reason must be in this result.
+        doc = new_doc()
+        T.run_python('doc.addObject("Part::Box", "Plate")')
+        out = T.run_python('doc.addObject("Part::Cylinder", "Pin")\ncut = doc.addObject("Part::Cut", "Broken")\n'
+                           'doc.recompute()\nprint(cut.Shape.isValid())')
+        self.assertIn("NULL shape", out)                                     # the error of the code itself
+        self.assertIn("When the code stopped, FreeCAD could not build these objects:\n"
+                      "- Broken (Part::Cut): Linked object is not a Part object", out)
+        self.assertIn("HINT: an object has no shape", out)
+        self.assertIn(T.TAKEN_BACK, out)
+        self.assertEqual([o.Name for o in doc.Objects], ["Plate"])
+        out = T.run_python('doc.addObject("Part::Cylinder", "Pin")\nraise ValueError("my own check")')
+        self.assertNotIn("could not build", out)                             # nothing was broken: no such line
+        self.assertNotIn("Plate", out.split("ERROR:")[1])                    # a part that was not recomputed is no error
+
+    def test_after_a_failed_run_the_functions_of_that_run_are_still_there(self):
+        doc = new_doc()
+        out = T.run_python('def box(name, size):\n    b = doc.addObject("Part::Box", name)\n'
+                           '    b.Length = b.Width = b.Height = size\n    return b\n'
+                           'sizes = {"A": 10}\nfirst = box("A", sizes["A"])\nraise ValueError("stop here")')
+        self.assertIn(T.TAKEN_BACK, out)
+        self.assertIn("are still there", T.TAKEN_BACK)
+        self.assertEqual(doc.Objects, [])                                    # the box of that run is gone
+        out = T.run_python('b = box("B", sizes["A"] * 2)\ndoc.recompute()\nprint(b.Shape.Volume)')
+        self.assertNotIn("ERROR", out)                                       # box() and sizes were not sent again
+        self.assertIn("8000.0", out)
 
     def test_a_change_that_breaks_an_old_object_is_taken_back(self):
         doc = new_doc()
@@ -564,7 +593,7 @@ class Helpers(unittest.TestCase):
                       "x 0 to 120 and from y 0 to 80.\nExample: cad.hole(plate, 6.6, 15, 25)", out)
         self.assertNotIn("helpers.py", out)                   # the model's own line, not the lines of the library
         self.assertEqual(out.count("  File "), 1)
-        self.assertIn("The changes of this run were taken back.", out)
+        self.assertIn(T.TAKEN_BACK, out)
         self.assertEqual(sorted(o.Name for o in doc.Objects), ["Params", "Plate"])     # the good steps of the run too
         plate = doc.getObject("Plate")
         self.assertTrue(plate.Visibility)

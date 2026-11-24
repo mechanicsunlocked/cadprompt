@@ -125,6 +125,27 @@ class Tools(unittest.TestCase):
         self.assertTrue(weld.BothSides and weld.OtherFace == "Face2", weld.OtherFace)
         self.assertEqual(len(weld.Shape.Solids), 4)
 
+    def test_both_sides_works_with_the_plate_named_first_too(self):
+        # the far side is looked for on the part of face_b. Claude Code gave the plate first
+        # (2026-11-24, a leg on a round head) and the weld failed with no reason in the text.
+        doc = t_joint()
+        out = T.run_tool("/p", "make_weld", {"face_a": "Upright.Face1", "face_b": "Plate.Face6", "throat": 4,
+                                             "both_sides": True})
+        self.assertNotIn("ERROR", out)
+        self.assertIn("NOTE: the faces were taken in the other order (Plate.Face6, Upright.Face1)", out)
+        welds = [o for o in doc.Objects if o.Name.startswith("FilletWeld")]
+        self.assertEqual(len(welds), 1, [o.Name for o in doc.Objects])       # the try that failed left nothing
+        self.assertTrue(welds[0].BothSides and welds[0].OtherFace == "Face2", welds[0].OtherFace)
+        self.assertIn("welded 120.0 mm", out)
+        self.assertEqual(doc.UndoCount, 1)                                   # still one undo step
+
+    def test_a_weld_that_cannot_be_built_says_why(self):
+        doc = t_joint()
+        out = T.run_tool("/p", "make_weld", {"face_a": "Plate.Face6", "face_b": "Upright.Face5", "throat": 4})
+        line = [text for text in out.splitlines() if "could not be built" in text][-1]
+        self.assertRegex(line, r"between Plate\.Face6 and Upright\.Face5: \S")   # FreeCAD's reason follows
+        self.assertEqual(sorted(o.Name for o in doc.Objects), ["Plate", "Upright"])
+
     def test_a_bad_face_is_taken_back_and_says_how_to_do_it(self):
         doc = t_joint()
         for args, words in (({"face_a": "Plate.Face6", "face_b": "Upright.Face5"}, "ERROR"),   # no corner

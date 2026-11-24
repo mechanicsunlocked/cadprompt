@@ -1518,10 +1518,17 @@ def main():
     pid = ([c["pid"] for c in claude_calls()[n:] if c["stdin"].startswith("slow")] or [0])[0]
     check("account: (setup) a run that takes long is under way, the button says Stop",
           bool(started) and pid and alive(pid) and pan.send_btn.text() == "Stop", f"{pid} {pan.send_btn.text()}")
+    check("while the AI works the panel shows the time since the message, as minutes and seconds",
+          bool(re.fullmatch(r"\d+:\d\d", pan.clock.text())) and pan._ticker.isActive(), pan.clock.text())
+    pan._since -= 125
+    pan._tick()
+    check("... after 125 seconds it says 2:05", pan.clock.text() in ("2:05", "2:06"), pan.clock.text())
     pan.send_btn.click()                     # Stop
     stopped = wait_for(lambda: pan.send_btn.text() == "Send" and not alive(pid), 15)
     check("account: Stop ends the program that does the work, and the panel says 'Stopped.'",
           stopped and pan.entries[-1] == ("note", "Stopped."), f"alive={alive(pid) if pid else None} {pan.entries[-2:]}")
+    check("... and the clock is gone when the work has ended", pan.clock.text() == "" and not pan._ticker.isActive(),
+          pan.clock.text())
 
     # the two engines side by side
     p.SetString("Backend", "local")

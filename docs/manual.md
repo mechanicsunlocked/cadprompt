@@ -57,6 +57,14 @@ works at once: Claude Code is stopped when it is at work for that service.
   new one at the top of the panel.
 - **Build / Teach**: Build makes the whole part. Teach goes one feature at a time
   and says which tool a person would use and why.
+- **An assembly, or a build from photos** (Claude account): Claude first
+  answers with a short plan: how the thing works, the parts with their main
+  sizes, and what it could not see. That takes about half a minute. Correct
+  the plan or say go, and Claude builds part by part, so you see the assembly
+  grow. Write "build it without asking" when you do not want the plan. A
+  tool of 15 parts takes about 8 minutes; most of that is Claude working out
+  the geometry before the first part. The small clock next to the status
+  line counts while the AI works.
 - **Add reference…**, or drop a photo, a PDF or a link on the panel: it goes into
   `refs/` for the AI. With a local model or an API key, an image (PNG, JPEG) also
   goes with your next message, at most 4 for each message, made smaller to

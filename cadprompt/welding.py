@@ -126,19 +126,40 @@ def resolve(doc, text):
     return obj, face
 
 
+def _bead(doc, a, b, throat, props):
+    """(weld, "") or (None, why): one try to build the bead. A weld that failed is taken out again."""
+    from weldment.feature import make_fillet_weld
+    obj = make_fillet_weld(doc, a, b, throat=float(throat), **props)
+    doc.recompute()
+    if "Invalid" not in obj.State and not obj.Shape.isNull():
+        return obj, ""
+    why = " ".join(obj.getStatusString().split()) if "Invalid" in obj.State else "the bead is empty"
+    doc.removeObject(obj.Name)
+    doc.recompute()
+    return None, why
+
+
 def weld(doc, face_a, face_b, throat=DEFAULT_THROAT, **props):
     """Make one fillet weld, recompute, print its numbers. Raises on a weld that cannot be built,
     so run_python takes the step back."""
-    from weldment.feature import make_fillet_weld
     if doc is None:
         raise ValueError("there is no open document to weld in")
     a, b = resolve(doc, face_a), resolve(doc, face_b)
     if a[0] == b[0]:
         raise ValueError("both faces are on %s: a weld joins two parts" % a[0].Label)
-    obj = make_fillet_weld(doc, a, b, throat=float(throat), **props)
-    doc.recompute()
-    if "Invalid" in obj.State or obj.Shape.isNull():
-        raise ValueError("the weld could not be built between %s and %s" % (face_a, face_b))
+    obj, why = _bead(doc, a, b, throat, props)
+    swapped = False
+    if obj is None and props.get("BothSides"):
+        # The far side is looked for on the part of face_b: the plate that stands in the
+        # corner. A symmetrical weld has no arrow side to keep, so the other order is the
+        # same weld (measured 2026-11-24: a plate on a round bar, given plate first).
+        obj, _ = _bead(doc, b, a, throat, props)
+        swapped = obj is not None
+    if obj is None:
+        raise ValueError("the weld could not be built between %s and %s%s" % (face_a, face_b, why and ": " + why))
+    if swapped:
+        print("NOTE: the faces were taken in the other order (%s, %s): the far side is on the part of the "
+              "second face." % (face_b, face_a))
     print("WELD %s (%s): a%s, leg z %.1f mm, opening angle %.0f°, seam %.1f mm, welded %.1f mm, "
           "weld metal %.0f g%s" % (
               obj.Name, obj.Label, _num(obj.Throat.Value), obj.Leg.Value, obj.Dihedral.Value,

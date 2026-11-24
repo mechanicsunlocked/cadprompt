@@ -31,7 +31,8 @@ OLD = {
                                     "beb50d4d7805f7832553ef1e1c5cfe5d3f08c5ba0d92f94cb9cc7141dd07b5ce"),
     "CLAUDE.md": ("16c69921f8375c6c42958a3adf148432d7ceb8b6accb1f85b945c7a2a43a4817",
                   "a336ff37d32f4d322d4c25faec973beacbf2bfacb62d3e6e2e806bc86dd6ef56",    # 0.2.1, before welding
-                  "8e993b79993f1485a733a203d8ada1558f845d142db507d283b3ce105f6d91ee"),   # 0.3.0, before "save a file with run_python"
+                  "8e993b79993f1485a733a203d8ada1558f845d142db507d283b3ce105f6d91ee",    # 0.3.0, before "save a file with run_python"
+                  "209af10bae1c54d267a147fe10400b0943305cf9c3c6a7ab6f4c9b352bcc7b1a"),   # 2026-11-24, before "plan an assembly first"
 }
 NEEDED = ("CLAUDE.md",)       # Claude Code cannot work in a project without it
 # tools of the bridge that CADprompt used before it had its own

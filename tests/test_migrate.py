@@ -165,6 +165,13 @@ def main():
           and now[".claude/settings.json.old"] == was[".claude/settings.json"]
           and now[".claude/commands/drawing.md"] == new(".claude/commands/drawing.md")
           and now[".claude/commands/drawing.md.old"] == was[".claude/commands/drawing.md"] and notes == [], str(notes))
+    project = make("later", old["later"])
+    was = files(project)
+    projects.migrate(project)
+    now = files(project)
+    check("every later version of CLAUDE.md in the test data is known to migrate(), and is replaced with its .old",
+          all(projects._digest(text.encode("utf-8")) in projects.OLD[rel] for rel, text in old["later"].items())
+          and now["CLAUDE.md"] == new("CLAUDE.md") and now["CLAUDE.md.old"] == was["CLAUDE.md"])
     project = make("oldest-opened", older)
     runner.allow_web_in_project(project)                 # what the panel did to such a project before
     rewritten = read(os.path.join(project, ".claude", "settings.json"))

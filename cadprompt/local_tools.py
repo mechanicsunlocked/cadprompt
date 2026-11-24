@@ -35,6 +35,9 @@ ORIGIN_PARTS = ("App::Line", "App::Plane", "App::Point")    # the axes and plane
 _namespace = {}
 
 # Mistakes a small model makes again and again, and the one line that gets it out.
+TAKEN_BACK = ("The changes of this run were taken back: the objects that it made are gone. The variables "
+              "and the functions that the code defined before the error are still there, so do not send "
+              "them again. Correct the part that failed and run only that.")
 HINTS = (
     ("ParserError", 'HINT: a string is not a size. To bind a size to a parameter use '
                     'obj.setExpression("Length", "Params.Length").'),
@@ -48,6 +51,8 @@ HINTS = (
     ("Unit mismatch", 'HINT: a size and a plain number cannot be added. Give the number its unit in '
                       'the expression: "Params.X + 1 mm", not "Params.X + 1".'),
     ("No module named 'cad'", "HINT: cad is there already, like App and Part. Do not import it."),
+    ("NULL shape", "HINT: an object has no shape, so FreeCAD could not build it. Look at shape.isNull() "
+                   "before shape.isValid(); the line above says which object and why, when FreeCAD knows."),
 )
 
 # The system prompt forbids shell, network and deleting files. This refuses the
@@ -287,6 +292,23 @@ def _broken(obj):
         return True
 
 
+def _could_not_build(bad_before):
+    """Lines for the objects that FreeCAD itself calls broken at this moment and that were
+    fine before the run: "" when there is none. Only FreeCAD's own verdict (the state
+    Invalid): an object that the code did not recompute yet has no shape either, and is
+    not an error."""
+    found = []
+    for name, d in App.listDocuments().items():
+        try:
+            found += [o for o in d.Objects if "Invalid" in o.State and o.Name not in bad_before.get(name, ())]
+        except Exception:
+            pass
+    if not found:
+        return ""
+    return ("\nWhen the code stopped, FreeCAD could not build these objects:\n"
+            + "\n".join("- %s (%s): %s" % (o.Name, o.TypeId, _reason(o)) for o in found[:8]))
+
+
 def _bad(doc):
     return [o.Name for o in doc.Objects if _broken(o)] if doc is not None else []
 
@@ -440,6 +462,11 @@ def run_python(code, project=""):
         error = _traceback(code)
     failed = bool(error)
     if failed:
+        # The error is often the code's own check that fell over an object FreeCAD could not
+        # build. Which one, and why, is known only now: after the step back it is gone, and
+        # the model would run everything again only to find it (measured 2026-11-24: three
+        # calls and 90 s for one "Unit mismatch").
+        error += _could_not_build(bad_before)
         App.closeActiveTransaction(True)     # take the half-done run back
     doc = App.ActiveDocument
     names = [before_name] + ([doc.Name] if doc is not None and doc.Name != before_name else [])
@@ -526,7 +553,7 @@ def run_python(code, project=""):
         lines.append("ERROR:\n" + error.strip())
         lines += [hint for key, hint in HINTS if key in error]
         if failed and not changes:
-            lines.append("The changes of this run were taken back. Correct the code and run it again.")
+            lines.append(TAKEN_BACK)
     if changes or not error:
         # cut the list only: the lines above and the problem lines below must always arrive
         room = max(MAX_OUTPUT - sum(len(line) + 1 for line in lines), MAX_OUTPUT // 4)
