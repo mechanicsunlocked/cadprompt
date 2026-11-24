@@ -1,0 +1,7 @@
+The Weldment workbench, copied by tools/vendor_weldment.py. Do not edit here:
+change it in freecad-weldment and copy it again.
+
+repository https://github.com/mechanicsunlocked/freecad-weldment
+commit 34baf366dad5c87f5b18feb7896e779bf69bdd13
+date 2026-11-10
+icons iso2553_fillet.svg weldment_cutlist.svg weldment_fillet.svg weldment_symbol.svg weldment_update.svg weldment_weldlist.svg weldment_workbench.svg

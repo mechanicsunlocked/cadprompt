@@ -5,159 +5,96 @@
   </picture>
 </p>
 
-<h1 align="center">CAD prompt</h1>
+<h1 align="center">CADprompt</h1>
 
-<p align="center"><b>Tell Claude what to build. Watch FreeCAD build it.</b><br>
-A hotkey and a bar menu for Omarchy. One line to install, the same line to update.</p>
-
-https://github.com/user-attachments/assets/e0831170-1a63-43ba-8b24-3d5591cea3ef
+<p align="center"><b>Say what to build. Watch FreeCAD build it.</b></p>
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/mechanicsunlocked/cadprompt/main/install | bash
-```
+CADprompt is installed from inside FreeCAD. You don't need a terminal.
 
-You need: Omarchy 4, FreeCAD 1.1 (`sudo pacman -S freecad`, or the Flathub
-app), Claude Code logged in, and `uv jq git`. For the grab keys also
-`grim slurp wl-clipboard`. The installer checks all of it and says what is
-missing. Then restart FreeCAD if it was open, press SUPER+ALT+C, name a
-project, and say what to build.
+1. Open _Edit > Preferences > Addon Manager Options_.
+2. Under _Custom repositories_, press _+_ and fill in:
+   - Repository URL: `https://github.com/mechanicsunlocked/cadprompt`
+   - Branch: `freecad-addon`
+3. Open _Tools > Addon manager_, search for _CADprompt_ and install it.
+4. Restart FreeCAD.
 
-That clones into `~/Work/cadprompt` and installs. **The same line updates**:
-run it again and it pulls the newest version and reinstalls. From inside the
-folder, `./setup update` does the same, `./setup install` reinstalls without
-pulling, and:
+Now pick the _CADprompt_ workbench. The chat panel opens on the right and asks
+which AI you want to use. Choose one, and you're ready to build!
 
-```bash
-./setup remove           # takes every link and line away; --purge also token and vendor/
-```
-
-Nothing is copied into the system. `setup` makes symlinks into this folder
-(three in `~/.local/bin`, one in `~/.config/hypr`, two in FreeCAD's `Mod`),
-appends one `require` line to `~/.config/hypr/hyprland.lua`, adds one
-command-module entry to the bar in `~/.config/omarchy/shell.json`, writes a
-token to `~/.config/cadprompt/`, and sets FreeCAD's MCP addon to localhost
-plus token. `remove` undoes exactly that. Move or delete this folder after `remove`
-and nothing is left. `~/Work/CAD` is yours and never touched. No plugin code in the
-shell, no desktop files, no daemons.
+You need FreeCAD 1.0 or newer. It runs on Linux, macOS and Windows. Updates
+come through the Addon Manager, like for any other addon.
 
 ## What it is
 
-Press **SUPER+ALT+C**, name a project, say what you want. A Claude Code
-window opens tiled next to FreeCAD and the part appears there, feature by
-feature, parametric, with its sizes in one `Params` set. Keep talking to change
-it, or take over in FreeCAD.
+CADprompt is a chat panel inside FreeCAD. You write what you need, like "a
+plate 100 x 60 x 8 with a 9 mm hole in each corner", and the AI builds it in
+your open document. The sizes stay as parameters, so you can change one later
+without starting over.
 
-| Key | Does |
-|---|---|
-| SUPER+ALT+C | prompt (build mode) |
-| SUPER+ALT+SHIFT+C | prompt in teach mode: one feature at a time, which tool and why |
-| SUPER+ALT+R | screenshot a region into the project (a photo, a catalogue drawing) |
-| SUPER+ALT+SHIFT+R | newest file in Downloads into the project (that PDF you just saved) |
-| SUPER+ALT+V | clipboard into the project (image, copied files, or a link) |
+You choose the AI yourself:
 
-**Bar icon** (a cube, right section): click for the projects menu, right
-click for the prompt. The menu is Omarchy's own overlay: every project with
-its mode, age, model count and the last thing you asked Claude there as
-subtext. Pick one to open it; rows for a new project, for deleting one
-(folder and conversation, after a confirm), and for the full projects window
-(`cadprompt-tui`, a gum TUI with the same rows).
+- A local model on your own computer or in your own network (LM Studio,
+  Ollama, llama.cpp). Nothing goes to the internet.
+- An Anthropic API key. You pay per use.
+- Your Claude account, through Claude Code.
 
-In the prompt: `/teach`, `/build`, `/refs` (what is in the grabbed material),
-`/check` (review before the shop), `/drawing A3` (DIN workshop drawing, Hoischen
-style, PDF in `drawings/`).
+And this is what you can do with it:
 
-Each project is a folder in `~/Work/CAD`: `model/` (the .FCStd), `refs/` (what you
-grabbed), `drawings/` (PDFs). Reopening a project continues its conversation
-and opens its newest model in FreeCAD, in the running one if there is one.
+- _Build_ makes the whole part. _Teach_ goes one feature at a time and tells
+  you which FreeCAD tool a person would use, and why. That one is for
+  apprentices and students.
+- _Drawing_ makes a workshop drawing on an ISO sheet: three views, an isometric
+  view, the overall dimensions, the title block, and a PDF. The sheet follows
+  fixed rules. The AI doesn't get to improvise there.
+- _Welding_ puts fillet welds between your parts. The drawing then gets the
+  ISO 2553 symbols, a weld list and a cut list.
+- _Check_ lets the AI look over the model before it goes to the shop.
 
-### To the workshop tablet
+You stay in charge. Before any code runs, the panel shows it to you and waits
+for _Run_ or _Skip_. Every step of the AI is one Undo step in FreeCAD. And
+nothing is sent to any service before you have said _Allow_ to it.
 
-The cube menu has "Send newest drawing to tablet". It takes the newest PDF in
-the active project's `drawings/` and sends it over Taildrop, Tailscale's own
-file drop: laptop to tablet directly, encrypted, nothing in between. The first
-time, it asks which tailnet machine is the tablet and remembers it in
-`~/.config/cadprompt/tablet` (`cadprompt-send --tablet` to change). On the
-tablet, Tailscale must be running; the file lands in its Downloads and opens in
-any PDF reader. If the tablet is asleep or off the tailnet, you get a
-"could not send" notification; send again when it is awake. Also:
-`cadprompt-send some.pdf other.pdf`.
+## Before you rely on it
 
-## In depth
+This is a test version (0.3). The automatic tests pass on Linux and on
+Windows 11 with FreeCAD 1.1.4. macOS is written for, but no person has tried
+it there yet.
 
-### What runs, what it can reach
+A small local model makes mistakes. It can build a wrong part and tell you it
+is right. So check the part before you cut metal!
 
-```
-key -> cadprompt -> foot, tiled: Claude Code in ~/Work/CAD/<project>
-                        | .mcp.json: uvx freecad-mcp==0.1.28 (token from env)
-                        v
-        FreeCAD + freecad-mcp addon (127.0.0.1:9875, token required)
-        + Hoischen addon for TechDraw
-```
+## More
 
-Claude in a project may: use the FreeCAD tools, and read and write inside
-the project. Reads outside it are refused, not just denied by rule. It never
-sees `~/Downloads`: the grab keys copy what you pick into `refs/`. No shell. WebSearch and WebFetch ask first. It cannot edit its
-own `.claude/`, `.mcp.json` or `CLAUDE.md`.
+- [Manual](docs/manual.md): how to connect each AI, and everything the panel
+  can do.
+- [Safety and privacy](docs/privacy.md): what is sent where, where your keys
+  are kept, and what is not done yet. Read it before you give CADprompt to a
+  class.
+- [Hoischen tools](docs/hoischen.md): DIN dimensioning for TechDraw. They come
+  with the addon.
 
-**Security, the honest version.** `execute_code` runs Python inside FreeCAD,
-as your user. CLAUDE.md tells Claude to keep it to FreeCAD; that is an
-instruction, not a wall. The wall is a sandboxed FreeCAD. With the Flatpak:
+## For developers
 
-```bash
-flatpak override --user --nofilesystem=home --filesystem=~/Work/CAD org.freecad.FreeCAD
-```
-
-Then FreeCAD, and anything Claude runs inside it, sees `~/Work/CAD` and nothing
-else of your home. Network stays shared (the MCP bridge needs localhost).
-With the Arch package there is no such wall; keep homelab keys out of this
-machine's home or use the Flatpak.
-
-The bridge listens on localhost only and answers 401 without the token, so a
-web page in your browser cannot post code to FreeCAD.
-
-**Privacy.** What leaves the machine: your prompts, the project files Claude
-reads, and FreeCAD screenshots when Claude asks for one (to Anthropic, via
-Claude Code). At install, `git` fetches freecad-mcp from GitHub and `uvx`
-fetches it from PyPI. Nothing else phones anywhere. No telemetry of its own.
-
-### Updates
-
-- **cadprompt itself**: the install line above, again. Or `./setup update`.
-- **freecad-mcp** (the bridge inside FreeCAD): pinned to one version in
-  `lib/common.sh`; `./setup upgrade` moves to its newest release, prints the
-  GitHub compare link for the jump, then asks you to restart FreeCAD.
-  `./setup upgrade 0.1.28` pins a specific one, e.g. to go back.
-- Nothing updates by itself. Claude Code and `uv` update through their own
-  channels; the Hoischen addon ships in this repo.
-
-### Layout
+`python3 tests/run_all.py` runs all tests in a throw-away FreeCAD profile
+(see [tests/README.md](tests/README.md)).
 
 ```
-install               the one-line installer (clone or pull, then setup install)
-setup                 install | update | upgrade | remove
-bin/cadprompt         launcher: picker, project from template, FreeCAD, terminal
-bin/cadprompt-grab    region | clipboard | last-download | FILE...
-bin/cadprompt-tui     projects window and the bar menu: open, new, delete, send
-bin/cadprompt-send    newest drawing to the tablet over Taildrop
-lib/common.sh         FreeCAD detection, RPC check, active project
-hypr/cadprompt.lua    the five keys (Omarchy Lua config)
-template/             copied into every new project
-freecad-hoischen/     TechDraw addon: DIN preset, dimension lines at 10 / 7 mm
-vendor/               freecad-mcp checkout, created by setup
+cadprompt/    the chat panel, the engines, the drawing tool
+hoischen/     DIN helpers for TechDraw (LGPL-2.1-or-later)
+weldment/     the Weldment workbench, a pinned copy (LGPL-2.1-or-later): do not edit here,
+              change freecad-weldment and run tools/vendor_weldment.py
+tools/        vendor_weldment.py
+template/     copied into every new project
+tests/        run_all.py and the test files
 ```
 
-### Checks after install
+The older Omarchy launcher (hotkeys, bar menu, `setup`) is at the tag
+`omarchy-launcher`.
 
-1. `hyprctl configerrors` empty; `omarchy menu keybindings --print | grep CAD`
-   shows five lines.
-2. `cadprompt test1`: a tiled window titled `CAD · test1`, class `cadprompt`
-   (`hyprctl clients`), FreeCAD starts. Trust the folder when asked; `/mcp`
-   shows `freecad` connected.
-3. "a 100 x 50 x 10 plate with four 8 mm holes, 10 mm from the edges" appears
-   live, driven by `Params`, saved in `model/`. If calls hang, FreeCAD has a
-   dialog open; close it.
-4. `curl -s -o /dev/null -w '%{http_code}\n' -X POST 127.0.0.1:9875/RPC2` prints 401.
-5. In the prompt, ask Claude to read `~/.bashrc` (a harmless file outside the
-   project). Claude Code itself must refuse, before the model gets to decide.
+## Licence
+
+MIT for CADprompt ([LICENSE](LICENSE)). The Hoischen tools in `hoischen/` are
+LGPL-2.1-or-later ([hoischen/LICENSE](hoischen/LICENSE)), and so is the
+Weldment workbench in `weldment/` ([weldment/LICENSE](weldment/LICENSE)).
