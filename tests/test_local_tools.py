@@ -146,6 +146,25 @@ class RunPython(unittest.TestCase):
         T.reset()
         self.assertIn("NameError", T.run_python("print(answer)"))
 
+    def test_the_way_to_save_a_file_that_the_project_instructions_name_works(self):
+        # Claude Code has no Write tool in the panel. template/CLAUDE.md tells it to save a file
+        # of the project with run_python and shows the code: that code must pass the guard.
+        with open(os.path.join(os.path.dirname(HERE), "template", "CLAUDE.md"), encoding="utf-8") as f:
+            told = f.read()
+        self.assertIn("Your own Write, Edit and Bash tools are switched off in the panel.", told)
+        self.assertIn("Never ask the user to allow a", told)
+        blocks = [b for b in told.split("```python")[1:] if "open(PROJECT" in b.split("```")[0]]
+        self.assertEqual(len(blocks), 1, "one code block of CLAUDE.md that saves a file")
+        code = "\n".join(line[2:] if line.startswith("  ") else line        # the block is in a list item
+                         for line in blocks[0].split("```")[0].splitlines())
+        project = tempfile.mkdtemp(prefix="save-", dir=os.environ["FREECAD_USER_HOME"])
+        new_doc()
+        out = T.run_python("text = 'print(6000)\\n'\n" + code.replace("<name>", "hello_box"), project)
+        self.assertNotIn("ERROR", out)
+        self.assertNotIn("refused", out)
+        with open(os.path.join(project, "scripts", "hello_box.py"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "print(6000)\n")
+
     def test_exception_is_reported_with_traceback_and_taken_back(self):
         doc = new_doc()
         T.run_python('doc.addObject("Part::Box", "Plate")')

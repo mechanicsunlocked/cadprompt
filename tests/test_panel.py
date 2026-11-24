@@ -1066,9 +1066,10 @@ def main():
     pan.send("more")
     pan.run.finished.emit({"is_error": False, "result": "", "permission_denials": [
         {"tool_name": "Write"}, {"tool_name": "Write"}, {"tool_name": "mcp__other__thing"}]})
-    check("account: a file tool of Claude Code that was refused: one plain line for each tool, which says why",
-          pan.entries[-2:] == [("error", "`Write` was blocked: Claude Code must ask you before it uses this tool, "
-                                         "and it cannot ask in this panel."),
+    check("account: a file tool of Claude Code that was refused: one plain line for each tool, which says why "
+          "and, for a file, what to ask for",
+          pan.entries[-2:] == [("error", "`Write` was blocked: Claude Code cannot write files itself in this panel. "
+                                         "Ask it to save the file with run_python: you then see the code and press Run."),
                                ("error", "`thing` was blocked: Claude Code must ask you before it uses this tool, "
                                          "and it cannot ask in this panel.")], str(pan.entries[-3:]))
     check("account: tooltips and notes name Claude", pan.build_btn.toolTip() == "Claude builds the whole part"

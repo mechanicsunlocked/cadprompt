@@ -27,6 +27,12 @@ HIDDEN_TOOLS = ("ToolSearch",)   # Claude Code housekeeping, not something the u
 MCP_SERVER = "freecad"           # the name of the bridge in the .mcp.json of the addon
 LOCAL_HOSTS = ("127.0.0.1", "localhost")   # the bridge, and a model server on this computer
 WEB_TOOLS = ("WebSearch", "WebFetch")
+# Claude Code's own tools that change a file. Started with -p it cannot ask anybody, so each
+# call is refused (--permission-mode default). template/CLAUDE.md tells it to save a file of
+# the project with run_python, where the user says Run or Skip; the panel says the same to
+# the user when one of these was refused (measured 2026-11-24 with 2.1.331: without that
+# text Claude Code asked the user for a permission that nobody can give).
+FILE_TOOLS = ("Write", "Edit", "NotebookEdit")
 NO_STORED_TRUST = "CLAUDE_CODE_IGNORE_PERSISTED_TRUST"   # Claude Code: no "trust this folder" answer counts
 SETTINGS_FILES = (".claude/settings.json", ".claude/settings.local.json")
 HOOKS = ("Claude Code was not started: this project has hooks in %s. A hook is a command that Claude Code "

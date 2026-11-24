@@ -990,8 +990,11 @@ class Panel(QtWidgets.QWidget):
             if name in runner.WEB_TOOLS:
                 self._add("error", f"`{name}` was blocked: web access is off. "
                                    "Turn it on in Settings, then ask again.")
+            elif name in runner.FILE_TOOLS:
+                # see ClaudeRun.start. The CLAUDE.md of the template tells Claude Code the same.
+                self._add("error", f"`{name}` was blocked: Claude Code cannot write files itself in this panel. "
+                                   "Ask it to save the file with run_python: you then see the code and press Run.")
             else:
-                # Claude Code's own Write and Edit, for example: see ClaudeRun.start
                 self._add("error", f"`{name}` was blocked: Claude Code must ask you before it uses this tool, "
                                    "and it cannot ask in this panel.")
         if not res.get("is_error"):
