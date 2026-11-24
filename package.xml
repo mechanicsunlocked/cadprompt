@@ -2,11 +2,12 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>CADprompt</name>
   <description>A chat panel in FreeCAD: say what to build and the AI builds it in the open document, parametric, with a teach mode for students and DIN workshop drawings. Works with a local model, an API key, or a signed-in AI account.</description>
-  <version>0.2.1</version>
-  <date>2026-11-20</date>
+  <version>0.3.0</version>
+  <date>2026-11-23</date>
   <maintainer email="noreply@example.invalid">mechanicsunlocked</maintainer>
   <license file="LICENSE">MIT</license>
   <license file="hoischen/LICENSE">LGPL-2.1-or-later</license>
+  <license file="weldment/LICENSE">LGPL-2.1-or-later</license>
   <url type="repository" branch="freecad-addon">https://github.com/mechanicsunlocked/cadprompt</url>
   <url type="readme">https://github.com/mechanicsunlocked/cadprompt/blob/freecad-addon/README.md</url>
   <icon>icons/cadprompt.svg</icon>

@@ -208,7 +208,7 @@ def main():
     c = ask("tools/list", {})
     names = [t["name"] for t in c.body["result"]["tools"]] if c.status == 200 else []
     check("tools/list: run_python, get_document_state, make_drawing, get_view; no read_project_file",
-          names == ["run_python", "get_document_state", "make_drawing", "get_view"], str(names))
+          names == ["run_python", "get_document_state", "make_drawing", "find_joints", "make_weld", "get_view"], str(names))
     check("tools/list is the list of local_prompt, the same that the built-in engine uses",
           c.status == 200 and c.body["result"]["tools"] == local_prompt.bridge_tools())
 
@@ -348,7 +348,7 @@ def main():
     c = tool("get_document_state")
     check("... also not a tool that only looks", not ran and c.failed() is True and c.text() == bridge.GONE, c.text())
     c = ask("tools/list", {})
-    check("... the server itself still answers", c.status == 200 and len(c.body["result"]["tools"]) == 4, c.text())
+    check("... the server itself still answers", c.status == 200 and len(c.body["result"]["tools"]) == 6, c.text())
 
     def stopping_request(tool_name, args, source):
         """Stop, or the end of Claude Code, while the question is open. Then the user says yes."""

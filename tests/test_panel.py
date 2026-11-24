@@ -1216,9 +1216,9 @@ def main():
           and rec["env"].get("PANEL_BUNDLE_OTHER") == "kept",
           str({k: v for k, v in rec["env"].items() if k.startswith(("PYTHON", "PANEL_"))}) + str(rec["path"][:3]))
     freecad_tools = ["mcp__freecad__run_python", "mcp__freecad__get_document_state", "mcp__freecad__make_drawing",
-                     "mcp__freecad__get_view"]
+                     "mcp__freecad__find_joints", "mcp__freecad__make_weld", "mcp__freecad__get_view"]
     check("account: arguments: stream-json, the model, and the tools that need no question of Claude Code: "
-          "the four FreeCAD tools by name, and the web tools because they are on in Settings",
+          "the FreeCAD tools by name, and the web tools because they are on in Settings",
           rec["argv"] == ["-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
                           "--mcp-config", runner.mcp_config(), "--strict-mcp-config",
                           "--permission-mode", "default", "--disallowedTools", "Bash",
@@ -1269,7 +1269,7 @@ def main():
           and mcp.get("type") == "http" and mcp.get("url") == rec["env"].get("CADPROMPT_MCP_URL")
           and (mcp.get("initialize") or [0])[0] == 200 and mcp.get("initialized") == [202, None]
           and "error" not in mcp, str(mcp)[:600])
-    check("... it gets the four tools", mcp.get("tools") == ["run_python", "get_document_state", "make_drawing", "get_view"],
+    check("... it gets the six tools", mcp.get("tools") == ["run_python", "get_document_state", "make_drawing", "find_joints", "make_weld", "get_view"],
           str(mcp.get("tools")))
     call_status, call_body = mcp.get("call") or (0, {})
     check("... and its run_python call makes the object in this FreeCAD while the panel waits",
@@ -1277,8 +1277,8 @@ def main():
           and "+ new FromClaude" in call_body["result"]["content"][0]["text"]
           and call_body["result"]["isError"] is False, str(mcp.get("call"))[:400])
     check("... a request without the token is refused", mcp.get("no_token") == 401, str(mcp.get("no_token")))
-    check("with the web off in Settings only the four FreeCAD tools are allowed: no web tool, no Bash, no wildcard",
-          rec["argv"][-5:] == ["--allowedTools"] + freecad_tools, str(rec["argv"]))
+    check("with the web off in Settings only the FreeCAD tools are allowed: no web tool, no Bash, no wildcard",
+          rec["argv"][-7:] == ["--allowedTools"] + freecad_tools, str(rec["argv"]))
     check("the panel shows the tool call and the answer as before",
           ("tool", "`run_python` doc.recompute()") in pan.entries and pan.send_btn.text() == "Send")
     at = rec["argv"].index("--permission-mode") if "--permission-mode" in rec["argv"] else -1

@@ -221,11 +221,11 @@ def main():
     first = srv.requests[0]
     check("no Authorization header without a key",
           "authorization" not in {k.lower() for k in first["headers"]})
-    check("system prompt and four tools are sent",
+    check("system prompt and the six tools are sent",
           first["body"]["messages"][0]["role"] == "system"
           and "Mode: build" in first["body"]["messages"][0]["content"]
           and [t["function"]["name"] for t in first["body"]["tools"]]
-          == ["run_python", "get_document_state", "read_project_file", "make_drawing"])
+          == ["run_python", "get_document_state", "read_project_file", "make_drawing", "find_joints", "make_weld"])
     check("the model saw the tool result",
           "+ new Plate: Part::Box, size 100.000 x 50.000 x 10.000" in srv.requests[1]["body"]["messages"][-1]["content"])
 
@@ -717,9 +717,9 @@ def main():
     check("anthropic: POST /v1/messages with x-api-key and the API version, no Authorization header",
           cl.requests[-1]["path"] == "/v1/messages" and head.get("x-api-key") == "sk-ant-made-up"
           and head.get("anthropic-version") == "2026-10-21" and "authorization" not in head, head)
-    check("anthropic: the system prompt is a field of its own, the four tools are in Anthropic's shape",
+    check("anthropic: the system prompt is a field of its own, the six tools are in Anthropic's shape",
           first["system"].startswith("You are CADprompt") and [t["name"] for t in first["tools"]] ==
-          ["run_python", "get_document_state", "read_project_file", "make_drawing"]
+          ["run_python", "get_document_state", "read_project_file", "make_drawing", "find_joints", "make_weld"]
           and all(set(t) == {"name", "description", "input_schema"} for t in first["tools"])
           and first["max_tokens"] > 0 and "temperature" not in first, str(first)[:300])
     check("anthropic: the tool result goes back as a tool_result, the thinking block unchanged before the call",

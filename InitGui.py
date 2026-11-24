@@ -29,6 +29,15 @@ class CADpromptWorkbench(Gui.Workbench):
         self.appendToolbar("Drawing", drawing)
         self.appendMenu("CADprompt", [workbench.PANEL, "Separator"])
         self.appendMenu(["CADprompt", "Drawing"], drawing)
+        try:
+            workbench.register_weld_commands()
+        except Exception as exc:     # no TechDraw, a broken copy: the chat must still work
+            import FreeCAD as App
+            App.Console.PrintError(f"CADprompt: the weld tools did not load: {exc}\n")
+        else:
+            weld = list(workbench.WELD)
+            self.appendToolbar("Weld", weld)
+            self.appendMenu(["CADprompt", "Weld"], weld)
 
     def Activated(self):
         from cadprompt import workbench

@@ -36,6 +36,15 @@ BLOCK_GUESS = (180.0, 60.0)   # title block size when a template cannot be read
 WAIT = 60.0       # seconds to wait for TechDraw to work out the views
 
 PAGE_PREFIX = "Drawing "
+LISTS_PREFIX = "Weld lists "     # the second page of a welded part: weld list and cut list
+SYMBOL_STEP = 8.0                # mm between the reference lines of two weld symbols
+# A part with more edges than this is "large": a frame of profiles with their radii. TechDraw
+# works on FreeCAD's main thread after its hidden-line threads, and on such a part that froze
+# FreeCAD for minutes (a rack of 4464 edges: 6 to 8 minutes; Windows 11, FreeCAD 1.1.4). Most of
+# it is the isometric view of the whole part and TechDraw's search for the faces of each view
+# (needed only to hatch or pick a face). A large part gets neither: the rack took 25 s then.
+LARGE_EDGES = 1500
+TECHDRAW_GENERAL = "User parameter:BaseApp/Preferences/Mod/TechDraw/General"
 
 
 # ---- small helpers ---------------------------------------------------------
@@ -149,6 +158,20 @@ def _global_shape(obj):
     except Exception:
         pass
     return shape
+
+
+def _compound(shapes):
+    import Part
+    return Part.makeCompound(shapes)
+
+
+def welded_assembly(doc, obj):
+    """(parts, welds): the parts that welds join to `obj` and those welds, or ([obj], [])."""
+    try:
+        from . import welding
+        return welding.assembly(doc, obj)
+    except Exception:            # no Weldment copy: draw the one part as before
+        return [obj], []
 
 
 def _bound_box(shape):
@@ -497,7 +520,7 @@ def plan_layout(size, iso, frame, block):
     """Scale and positions for one sheet, or None when nothing fits.
 
     size = (w, h, d) of the front view (width, height) and the depth behind
-    it, iso = (width, height) of the isometric view, all in model mm.
+    it, iso = (width, height) of the isometric view, all in model mm, or None for no isometric view.
     Returns {"scale", "front": (x, y), "top_y", "left_x", "rects",
              "iso": None or {"scale", "pos": (x, y), "rect", "where"}}.
     """
@@ -510,6 +533,8 @@ def plan_layout(size, iso, frame, block):
             continue
         plan = {"scale": scale, "front": at, "top_y": top_y, "left_x": left_x,
                 "rects": _shift(rects, *at), "iso": None}
+        if iso is None:          # no isometric view wanted (a large part, see LARGE_EDGES)
+            return plan
         fw, fh = w * s, h * s
         gb = _box(rects)
         # The isometric view may be smaller than the others (it then gets its
@@ -940,6 +965,12 @@ def describe(sheet="A3", obj_name=""):
     if obj is None:
         which = f"object {wanted}" if wanted else "the main object"
         return f"Make drawing: sheet {size}, {which}. No such solid is there now, so it will draw nothing."
+    parts, welds = welded_assembly(doc, obj)
+    if welds:
+        if obj not in parts:
+            obj = parts[0]
+        return (f"Make drawing: sheet {size}, welded part {obj.Label} ({len(parts)} parts, {len(welds)} welds) "
+                f"\u2192 drawings/{_file_name(obj.Label)}-{size}.pdf and the weld lists")
     return f"Make drawing: sheet {size}, object {obj.Label} \u2192 drawings/{_file_name(obj.Label)}-{size}.pdf"
 
 
@@ -949,8 +980,9 @@ def make_drawing(project, sheet="A3", obj_name=""):
     Never raises: what went wrong comes back as text that starts with "ERROR:".
     """
     doc = App.ActiveDocument
+    undo = []        # what _make changed in the user's TechDraw settings, to put back afterwards
     try:
-        return _make(doc, project, sheet, obj_name)
+        return _make(doc, project, sheet, obj_name, undo)
     except Exception as exc:
         try:
             if doc is not None:
@@ -958,6 +990,27 @@ def make_drawing(project, sheet="A3", obj_name=""):
         except Exception:
             pass
         return f"ERROR: the drawing could not be made: {type(exc).__name__}: {exc}"
+    finally:
+        for put_back in undo:
+            try:
+                put_back()
+            except Exception:
+                pass
+
+
+def _face_search_off():
+    """Switch TechDraw's face search off; returns the function that puts the user's setting back."""
+    p = App.ParamGet(TECHDRAW_GENERAL)
+    had = "HandleFaces" in p.GetBools()
+    old = p.GetBool("HandleFaces", True)
+    p.SetBool("HandleFaces", False)
+
+    def put_back():
+        if had:
+            p.SetBool("HandleFaces", old)
+        else:
+            p.RemBool("HandleFaces")
+    return put_back
 
 
 def _parse_sheet(sheet):
@@ -997,7 +1050,7 @@ def _make_techdraw_groups():
         App.ParamGet("User parameter:BaseApp/Preferences/Mod/TechDraw/" + name)
 
 
-def _make(doc, project, sheet, obj_name):
+def _make(doc, project, sheet, obj_name, undo=None):
     if doc is None:
         return ("ERROR: no document is open. Open or build a model first, "
                 "then ask for the drawing again.")
@@ -1007,9 +1060,13 @@ def _make(doc, project, sheet, obj_name):
     obj, error = pick_object(doc, str(obj_name or "").strip())
     if obj is None:
         return error
+    parts, welds = welded_assembly(doc, obj)
+    if welds and obj not in parts:
+        obj = parts[0]            # a weld was picked: the drawing is named after its first part
+    sources = parts + welds       # the beads are drawn too
 
     doc.recompute()
-    shape = _global_shape(obj)
+    shape = _global_shape(obj) if len(sources) == 1 else _compound([_global_shape(o) for o in sources])
     box = _bound_box(shape)
     size3 = (box.XLength, box.YLength, box.ZLength)
     if max(size3) <= 1e-6:
@@ -1018,7 +1075,9 @@ def _make(doc, project, sheet, obj_name):
     direction, xdir, looking = front_view(size3, turned)
     up = _cross(direction, xdir)
     size = (_extent(size3, xdir), _extent(size3, up), _extent(size3, direction))
-    iso = iso_extent(size3)
+    edges = len(shape.Edges)
+    large = edges > LARGE_EDGES
+    iso = None if large else iso_extent(size3)
 
     if find_template(sheet, "Landscape") is None and find_template(sheet, "Portrait") is None:
         return (f"ERROR: this FreeCAD has no ISO 5457 template for {sheet} "
@@ -1053,7 +1112,8 @@ def _make(doc, project, sheet, obj_name):
     replaced = False
     for _ in range(5):
         _events()    # let the open page finish its redraws before its views go away
-    for old in [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage") and o.Label == page_label]:
+    for old in [o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawPage")
+                and o.Label in (page_label, LISTS_PREFIX + label)]:
         remove_page(doc, old)
         replaced = True
 
@@ -1084,9 +1144,14 @@ def _make(doc, project, sheet, obj_name):
     german = os.path.basename(tpl_path).endswith("_ISO7200_DE.svg")
     filled, to_fill = fill_title_block(template, tpl["autofill"], values, keep_rest=german)
 
+    if large and undo is not None:
+        undo.append(_face_search_off())
+        notes.append(f"Large part ({edges} edges): drawn without an isometric view and without "
+                     "TechDraw's face search, so that FreeCAD does not stop for minutes. The faces of "
+                     "these views cannot be hatched or picked until the page is recomputed.")
     group = doc.addObject("TechDraw::DrawProjGroup", "Views")
     page.addView(group)
-    group.Source = [obj]
+    group.Source = sources
     group.ProjectionType = "First angle"
     group.ScaleType = "Page"
     front = group.addProjection("Front")
@@ -1105,7 +1170,7 @@ def _make(doc, project, sheet, obj_name):
     if plan["iso"]:
         iso_view = doc.addObject("TechDraw::DrawViewPart", "Isometric")
         page.addView(iso_view)
-        iso_view.Source = [obj]
+        iso_view.Source = sources
         iso_view.Direction, iso_view.XDirection = iso_axes()
         if plan["iso"]["scale"] == scale:
             iso_view.ScaleType = "Page"
@@ -1145,11 +1210,22 @@ def _make(doc, project, sheet, obj_name):
         doc.commitTransaction()
         doc.recompute()
         _events()
+        if welds:
+            symbols, note = add_weld_symbols(doc, page, front, welds)
+            if note:
+                notes.append(note)
     else:
         notes.append("TechDraw did not finish the views in time, so no dimensions and no centre lines "
                      "were added. Ask for the drawing again when FreeCAD is idle.")
     if own:
         doc.commitTransaction()
+
+    lists_page, lists_note = None, None
+    if welds:
+        lists_page, lists_note = add_lists_page(doc, LISTS_PREFIX + label, tpl_path, tpl, values, german,
+                                                parts)
+        if lists_note:
+            notes.append(lists_note)
 
     problems = _check_layout(views, iso_view, s, tpl) if ready else []
 
@@ -1164,6 +1240,13 @@ def _make(doc, project, sheet, obj_name):
             pdf = _export_pdf(page, os.path.join(project, "drawings", f"{_file_name(label)}-{sheet}.pdf"))
         except Exception as exc:
             notes.append(f"The PDF could not be written ({exc}).")
+    lists_pdf = None
+    if pdf and lists_page is not None:
+        try:
+            lists_pdf = _export_pdf(lists_page, os.path.join(
+                project, "drawings", f"{_file_name(label)}-{sheet}-weld-lists.pdf"))
+        except Exception as exc:
+            notes.append(f"The PDF of the weld lists could not be written ({exc}).")
 
     # ---- the report ----
     lines = [f"Drawing made: page \"{page.Label}\" in document {doc.Label}"
@@ -1176,6 +1259,8 @@ def _make(doc, project, sheet, obj_name):
         view_line += f"; isometric view {plan['iso']['where']}"
         if plan["iso"]["scale"] != scale:
             view_line += f" at {scale_text(plan['iso']['scale'])}"
+    elif large:
+        view_line += "; no isometric view (a large part, see below)"
     else:
         view_line += "; no isometric view (no room for it)"
     lines.append(view_line + ".")
@@ -1190,6 +1275,12 @@ def _make(doc, project, sheet, obj_name):
         lines.append("Style: Hoischen / DIN preset.")
     lines.append("Title block filled: " + (", ".join(filled) if filled else "nothing") + ".")
     lines.append(f"PDF: {pdf}" if pdf else "PDF: not written.")
+    if welds:
+        lines.append(f"Welded part: {len(parts)} parts and {len(welds)} welds drawn together; "
+                     f"weld symbols (ISO 2553) on the front view: {symbols if ready else 0}.")
+        if lists_page is not None:
+            lines.append(f"Weld list and cut list: page \"{lists_page.Label}\""
+                         + (f", PDF: {lists_pdf}" if lists_pdf else "") + ".")
     lines += notes
     lines.append("Open points:")
     for p in problems:
@@ -1199,6 +1290,9 @@ def _make(doc, project, sheet, obj_name):
     if to_fill:
         lines.append("- Title block, to fill in: " + ", ".join(to_fill)
                      + (" (the template's own words are still in these fields)." if german else "."))
+    if welds:
+        lines.append("- The weld symbols are placed by rule, all on the front view: move a leader where it "
+                     "covers a line, or where the seam is better seen in another view.")
     lines.append("- Only the overall sizes are dimensioned. Still missing: position and size of holes, "
                  "steps, radii, chamfers, threads.")
     lines.append("- No tolerances, surface finish or material on the drawing yet.")
@@ -1237,6 +1331,73 @@ def _check_layout(views, iso_view, scale, tpl):
         elif tpl["block"] and not _fits([box], tpl["frame"], tpl["block"]):
             problems.append(f"the {name} view is too close to the frame or the title block")
     return problems
+
+
+# ---- welded parts ------------------------------------------------------------
+
+def add_weld_symbols(doc, page, view, welds):
+    """An ISO 2553 symbol for each weld on `view`, one undo step. Returns (count, note or None).
+
+    The reference lines are stacked SYMBOL_STEP apart, so that two welds of one
+    corner do not put their symbols on top of each other.
+    """
+    try:
+        from weldment.drawing import add_symbol
+    except Exception as exc:
+        return 0, f"The weld symbols could not be drawn: the Weldment tools did not load ({exc})."
+    made, failed = 0, []
+    doc.openTransaction("Weld symbols")
+    try:
+        for i, w in enumerate(welds):
+            try:
+                add_symbol(w, view, page, offset=(-12.0, 12.0 + SYMBOL_STEP * i))
+                made += 1
+            except Exception as exc:
+                failed.append(f"{w.Label} ({exc})")
+    finally:
+        doc.commitTransaction()
+    doc.recompute()
+    _events()
+    return made, ("No weld symbol for: " + ", ".join(failed) + ".") if failed else None
+
+
+def add_lists_page(doc, page_label, tpl_path, tpl, values, german, parts):
+    """A second page with the weld list and the cut list of the welded part, one undo step.
+
+    The lists get a page of their own: on the drawing they would need room that
+    the layout of the views does not keep free. Returns (page or None, note or None).
+    """
+    try:
+        from weldment import lists
+    except Exception as exc:
+        return None, f"No weld list and cut list: the Weldment tools did not load ({exc})."
+    doc.openTransaction("Weld lists")
+    try:
+        page = doc.addObject("TechDraw::DrawPage", "WeldLists")
+        template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
+        template.Template = tpl_path
+        page.Template = template
+        page.Label = page_label
+        page.KeepUpdated = True
+        fill_title_block(template, tpl["autofill"], dict(values, title=values["title"] + " – weld lists",
+                                                         scale="", sheet="2 / 2"), keep_rest=german)
+        x0, _y0, _x1, y1 = tpl["frame"]
+        y = y1 - EDGE - 5.0
+        for sheet, widths in ((lists.make_weld_list(doc), lists.WELD_WIDTHS),
+                              (lists.make_cut_list(doc, parts), lists.CUT_WIDTHS)):
+            rows = 1
+            while sheet.getContents(f"A{rows + 1}") or sheet.getContents(f"B{rows + 1}"):
+                rows += 1
+            height = rows * lists.ROW_HEIGHT
+            lists.add_table(page, sheet, x=x0 + EDGE + 5.0 + sum(widths) / 2.0, y=y - height / 2.0)
+            y -= height + 15.0
+    except Exception as exc:
+        doc.abortTransaction()
+        return None, f"No weld list and cut list: {type(exc).__name__}: {exc}"
+    doc.commitTransaction()
+    doc.recompute()
+    _events()
+    return page, None
 
 
 def _export_pdf(page, path):

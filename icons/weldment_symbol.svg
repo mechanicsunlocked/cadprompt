@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- ISO 2553 fillet symbol on a reference line with its leader -->
+  <path d="M 58,50 L 38,30 L 6,30" fill="none" stroke="#2e3338" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M 58,50 L 50,40 L 46,48 Z" fill="#2e3338"/>
+  <path d="M 30,30 L 14,30 L 14,14 Z" fill="#e0a030" stroke="#2e3338" stroke-width="3" stroke-linejoin="round"/>
+</svg>

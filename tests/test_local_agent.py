@@ -1387,7 +1387,9 @@ class ThroughAProxy(unittest.TestCase):
         status, body = self.get(proxy.url)
         self.assertEqual((status, json.loads(body)["data"][0]["id"]), (200, "model-1"))
         # the proxy got one request: where to connect to. No address of ours, no key.
-        self.assertEqual([line for line, _ in proxy.requests], ["CONNECT 127.0.0.1:%d HTTP/1.1" % self.service.port])
+        # http.client up to Python 3.11 (the FreeCAD for Windows) says HTTP/1.0 in a CONNECT, later ones 1.1
+        self.assertIn([line for line, _ in proxy.requests],
+                      [["CONNECT 127.0.0.1:%d HTTP/1.%d" % (self.service.port, v)] for v in (0, 1)])
         self.assertNotIn("proxy-authorization", proxy.requests[0][1])
         self.assertNotIn(self.KEY.encode(), proxy.clear)
         self.assertNotIn(b"/v1/models", proxy.clear)

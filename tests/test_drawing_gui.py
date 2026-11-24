@@ -510,12 +510,112 @@ class NoHoischen(Case):
         self.assertEqual(group.ProjectionType, "First angle")
 
 
+class Welded(Case):
+    """A T-joint with two welds: the parts and the beads in the views, symbols, a lists page."""
+
+    def t_joint(self):
+        from cadprompt import welding
+        for d in list(App.listDocuments()):
+            App.closeDocument(d)
+        doc = App.newDocument("Bracket_welded")
+        plate = doc.addObject("Part::Box", "Plate")
+        plate.Length, plate.Width, plate.Height = 200, 100, 10
+        up = doc.addObject("Part::Box", "Upright")
+        up.Length, up.Width, up.Height = 10, 60, 80
+        up.Placement.Base = App.Vector(95, 20, 10)
+        loose = doc.addObject("Part::Box", "Loose")         # not welded: not on this drawing
+        loose.Placement.Base = App.Vector(400, 0, 0)
+        doc.recompute()
+        w1 = welding.weld(doc, "Plate.Face6", "Upright.Face1", 4.0)
+        w2 = welding.weld(doc, "Plate.Face6", "Upright.Face2", 3.0, Segment=20.0, Gap=10.0)
+        return doc, (plate, up, loose), (w1, w2)
+
+    def test_a_welded_part_is_drawn_with_its_welds_symbols_and_lists(self):
+        doc, (plate, up, loose), welds = self.t_joint()
+        project = self.project("Welded")
+        self.assertIn("welded part Plate (2 parts, 2 welds)", D.describe("A3", "Plate"))
+        out = D.make_drawing(project, "A3", "Plate")
+        self.assertNotIn("ERROR", out)
+        self.assertIn("Welded part: 2 parts and 2 welds drawn together; weld symbols (ISO 2553) "
+                      "on the front view: 2.", out)
+        self.assertIn("Object: Plate, 200 x 100 x 90 mm", out)           # the size of the whole part
+        page = [p for p in pages(doc) if p.Label == "Drawing Plate"][0]
+        group = [v for v in page.Views if v.isDerivedFrom("TechDraw::DrawProjGroup")][0]
+        self.assertEqual([o.Name for o in group.Source], ["Plate", "Upright", "FilletWeld", "FilletWeld001"])
+        symbols = [v for v in page.Views if v.isDerivedFrom("TechDraw::DrawWeldSymbol")]
+        self.assertEqual(sorted(s.Weld.Name for s in symbols), ["FilletWeld", "FilletWeld001"])
+        lists = [p for p in pages(doc) if p.Label == "Weld lists Plate"]
+        self.assertEqual(len(lists), 1)
+        tables = [v for v in lists[0].Views if v.isDerivedFrom("TechDraw::DrawViewSpreadsheet")]
+        self.assertEqual(sorted(t.Source.Name for t in tables), ["CutList", "WeldList"])
+        profiles = [doc.CutList.getContents(f"C{r}").lstrip("'") for r in (2, 3, 4)]
+        self.assertEqual(profiles, ["100x10", "60x10", "Total"])     # the welded parts, not the loose box
+        for name in ("Plate-A3.pdf", "Plate-A3-weld-lists.pdf"):
+            path = os.path.join(project, "drawings", name)
+            self.assertTrue(os.path.isfile(path) and os.path.getsize(path) > 1000, path)
+            self.assertIn(name, out)
+        # a second call replaces both pages and the symbols, it does not add more
+        out = D.make_drawing(project, "A3", "FilletWeld")                 # a weld named: the same part
+        self.assertIn("Object: Plate,", out)
+        self.assertEqual(sorted(p.Label for p in pages(doc)), ["Drawing Plate", "Weld lists Plate"])
+        self.assertEqual(len([o for o in doc.Objects if o.isDerivedFrom("TechDraw::DrawWeldSymbol")]), 2)
+
+    def test_a_part_without_welds_is_drawn_as_before(self):
+        doc, (plate, up, loose), welds = self.t_joint()
+        out = D.make_drawing(self.project("Welded"), "A4", "Loose")
+        self.assertNotIn("Welded part", out)
+        self.assertEqual([p.Label for p in pages(doc)], ["Drawing Loose"])
+
+
+class Large(Case):
+    """A part with more than LARGE_EDGES edges: no isometric view, no face search, setting put back."""
+
+    def grid(self):
+        for d in list(App.listDocuments()):
+            App.closeDocument(d)
+        doc = App.newDocument("Grid")
+        boxes = [Part.makeBox(20, 20, 5, App.Vector(30 * i, 30 * j, 0)) for i in range(14) for j in range(10)]
+        obj = doc.addObject("Part::Feature", "Grid")
+        obj.Shape = Part.makeCompound(boxes)               # 140 boxes, 1680 edges
+        doc.recompute()
+        self.assertGreater(len(obj.Shape.Edges), D.LARGE_EDGES)
+        return doc
+
+    def test_a_large_part_is_drawn_without_iso_view_and_face_search(self):
+        params = App.ParamGet(D.TECHDRAW_GENERAL)
+        for before in (None, True, False):      # not set, set on, set off by the user
+            if before is None:
+                params.RemBool("HandleFaces")
+            else:
+                params.SetBool("HandleFaces", before)
+            doc = self.grid()
+            out = D.make_drawing(self.project("Grid"), "A3", "Grid")
+            self.assertNotIn("ERROR", out)
+            self.assertIn("no isometric view (a large part, see below)", out)
+            self.assertIn("Large part (1680 edges)", out)
+            self.assertFalse([v for v in doc.Objects if v.Name.startswith("Isometric")])
+            self.assertEqual("HandleFaces" in params.GetBools(), before is not None, before)
+            if before is not None:
+                self.assertEqual(params.GetBool("HandleFaces", not before), before)
+        params.RemBool("HandleFaces")
+
+    def test_a_small_part_keeps_its_iso_view(self):
+        for d in list(App.listDocuments()):
+            App.closeDocument(d)
+        doc = App.newDocument("Small")
+        doc.addObject("Part::Box", "Block")
+        doc.recompute()
+        out = D.make_drawing(self.project("Small"), "A3", "Block")
+        self.assertNotIn("Large part", out)
+        self.assertTrue([v for v in doc.Objects if v.Name.startswith("Isometric")], out)
+
+
 def run():
     code = 1
     try:
         with open(REPORT, "w", encoding="utf-8") as stream:
             suite = unittest.TestSuite()
-            for case in (Parts, Choice, Shapes, Helpers, NoHoischen):
+            for case in (Parts, Choice, Shapes, Helpers, NoHoischen, Welded, Large):
                 suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
             result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
             code = 0 if result.wasSuccessful() else 1

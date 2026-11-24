@@ -21,6 +21,10 @@ PANEL = "CADprompt_Panel"
 # In the order of the work: set the drawing rules, then tidy the dimensions.
 DRAWING = ("Hoischen_Preset05", "Hoischen_Preset07", "Hoischen_Arrange", "Hoischen_Settings")
 TECHDRAW_TOOLBAR = "TechDraw Attributes"   # where TechDraw keeps its own Cascade tools
+# The Weldment workbench that comes with this addon (weldment/, see weldment/VENDORED):
+# weld, its symbols on the drawing, then the lists for the shop.
+WELD = ("Weldment_FilletWeld", "Weldment_WeldSymbol", "Weldment_UpdateSymbols",
+        "Weldment_WeldList", "Weldment_CutList")
 
 
 class PanelCommand:
@@ -46,6 +50,33 @@ def register_drawing_commands():
     if any(Gui.Command.get(name) is None for name in DRAWING):
         from hoischen import commands
         commands.register()
+
+
+def weldment_source():
+    """The folder that `import weldment` loads, and whether it is the copy in this addon.
+
+    FreeCAD puts every Mod folder on sys.path. When the standalone Weldment
+    workbench is installed as well, whichever comes first wins; both open the
+    same models (the package has the same name), but only one version runs.
+    """
+    import os
+    import weldment
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    folder = os.path.dirname(os.path.abspath(weldment.__file__))
+    return folder, os.path.normcase(os.path.dirname(folder)) == os.path.normcase(here)
+
+
+def register_weld_commands():
+    """The Weldment commands. Loads weldment and TechDraw, so not at FreeCAD start."""
+    if all(Gui.Command.get(name) is not None for name in WELD):
+        return
+    from weldment import commands
+    commands.register()
+    folder, ours = weldment_source()
+    if not ours:
+        App.Console.PrintWarning(
+            f"CADprompt: the welds come from {folder}, not from the copy in CADprompt. "
+            "If you installed the Weldment workbench on its own, you can remove it.\n")
 
 
 def show_panel():

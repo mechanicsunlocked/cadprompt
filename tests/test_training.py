@@ -143,10 +143,11 @@ def main():
                result("e1", "CHANGES:\n+ new Disc"), dict(said("A disc."), _native=[{"type": "thinking", "signature": "SIGNED"}])]
     request = [asked("EXPANDED: now a plate", shown="/build a plate")] + plate[1:]
     info = training.begin("local", "teach", agent, earlier + request[:1])
-    check("begin(): source, model as it is set, mode, the system prompt, the names of the four tools",
+    check("begin(): source, model as it is set, mode, the system prompt, the names of the six tools",
           info["source"] == "local" and info["model"] == "google/gemma-4-e4b" and info["mode"] == "teach"
           and info["system"] == local_prompt.system_prompt("teach")
-          and info["tools"] == ["run_python", "get_document_state", "read_project_file", "make_drawing"], str(info)[:300])
+          and info["tools"] == ["run_python", "get_document_state", "read_project_file", "make_drawing",
+                               "find_joints", "make_weld"], str(info)[:300])
     check("begin(): the context is the earlier conversation, without the new message",
           [m["role"] for m in info["context"]] == ["user", "assistant", "tool", "assistant"]
           and info["context"][0]["content"] == "make a disc", str(info["context"]))

@@ -35,6 +35,7 @@ def auto():
 
 def set_auto(on):
     paths.params().SetBool(PARAM, bool(on))
+    paths.save_params()
 
 
 def shown(tool_name, args):
@@ -43,6 +44,9 @@ def shown(tool_name, args):
     args = args if isinstance(args, dict) else {}
     if tool_name == "run_python":
         return str(args.get("code", ""))
+    if tool_name == "make_weld":
+        from . import welding
+        return welding.describe(args)
     sheet, obj_name = str(args.get("sheet") or "A3"), str(args.get("obj_name") or "")
     try:
         from . import drawing

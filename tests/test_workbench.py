@@ -219,13 +219,14 @@ def static_checks():
              and isinstance(n.args[0], ast.Call)]
     check("package.xml: <classname> is the one workbench class that InitGui.py defines and adds",
           classname and classes == [classname] and added == [classname], f"{classname!r} {classes} {added}")
-    check("package.xml: version 0.2.1, FreeCAD 1.0.0 or newer, no upper limit",
-          texts("^version") == ["0.2.1"] and texts("^freecadmin") == ["1.0.0"] and texts("^freecadmax") == []
+    check("package.xml: version 0.3.0, FreeCAD 1.0.0 or newer, no upper limit",
+          texts("^version") == ["0.3.0"] and texts("^freecadmin") == ["1.0.0"] and texts("^freecadmax") == []
           and not pkg.findall(".//" + NS + "freecadmax"), f"{texts('^version')} {texts('^freecadmin')}")
-    licences = {(e.text or "").strip(): e.get("file") for e in pkg.findall(NS + "license")}
-    check("package.xml: both licences, each with its file",
-          licences == {"MIT": "LICENSE", "LGPL-2.1-or-later": "hoischen/LICENSE"}
-          and all(os.path.isfile(os.path.join(REPO, *f.split("/"))) for f in licences.values()), str(licences))
+    licences = [((e.text or "").strip(), e.get("file")) for e in pkg.findall(NS + "license")]
+    check("package.xml: the three licences, each with its file (CADprompt, Hoischen, Weldment)",
+          licences == [("MIT", "LICENSE"), ("LGPL-2.1-or-later", "hoischen/LICENSE"),
+                       ("LGPL-2.1-or-later", "weldment/LICENSE")]
+          and all(os.path.isfile(os.path.join(REPO, *f.split("/"))) for _l, f in licences), str(licences))
     repo = [e for e in pkg.findall(NS + "url") if e.get("type") == "repository"]
     # the index rule: the branch attribute names the branch this package.xml lives on
     check("package.xml: the repository url names the branch it lives on (%s)" % " or ".join(sorted(_branches())),

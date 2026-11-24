@@ -171,7 +171,8 @@ def main():
     check("... the system prompt that the server got, and the names of the tools that it got",
           row.get("system") == body["messages"][0].get("content") and len(row.get("system") or "") > 500
           and row.get("tools") == [t["function"]["name"] for t in body["tools"]]
-          == ["run_python", "get_document_state", "read_project_file", "make_drawing"], str(row.get("tools")))
+          == ["run_python", "get_document_state", "read_project_file", "make_drawing",
+              "find_joints", "make_weld"], str(row.get("tools")))
     shape = [(m.get("role"), bool(m.get("context")), bool(m.get("tool_calls"))) for m in row["messages"]]
     check("... the first request as context, then this one: user, assistant with its tool call, tool result, answer",
           shape == [("user", True, False), ("assistant", True, True), ("tool", True, False), ("assistant", True, False),

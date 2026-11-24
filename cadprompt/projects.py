@@ -25,16 +25,18 @@ OLD = {
                               "a31d13aa5ba48ed15399043c7d22f35d11ac8474649037519f5098fe805592c3"),
     ".claude/commands/build.md": ("0fce8d988123bb0985d324be50108406971d07e62d7ed6ded8851411de347482",),
     ".claude/commands/teach.md": ("0dcc70e27f67736f2f41b03ccc3519fd33f7c02e3adf0ad2240b3d62bf41e9ae",),
-    ".claude/commands/check.md": ("30c6d72929571ce50254aeaf724c4663621613291de25cc7d398c4d5035538e9",),
+    ".claude/commands/check.md": ("30c6d72929571ce50254aeaf724c4663621613291de25cc7d398c4d5035538e9",
+                                  "fafa97cf9ef6e908df832ddf6fa7e73f8cfa261f0a06eff6315c23a3072efbc6"),
     ".claude/commands/drawing.md": ("c2ed1b666962393bb6cdc796370c6c9f49a2508d110aad2a2ffaef45f59ea83a",
                                     "beb50d4d7805f7832553ef1e1c5cfe5d3f08c5ba0d92f94cb9cc7141dd07b5ce"),
-    "CLAUDE.md": ("16c69921f8375c6c42958a3adf148432d7ceb8b6accb1f85b945c7a2a43a4817",),
+    "CLAUDE.md": ("16c69921f8375c6c42958a3adf148432d7ceb8b6accb1f85b945c7a2a43a4817",
+                  "a336ff37d32f4d322d4c25faec973beacbf2bfacb62d3e6e2e806bc86dd6ef56"),   # 0.2.1, before welding
 }
 NEEDED = ("CLAUDE.md",)       # Claude Code cannot work in a project without it
 # tools of the bridge that CADprompt used before it had its own
 OLD_TOOLS = ("execute_code", "list_documents", "get_object", "get_objects", "create_object", "edit_object",
              "delete_object", "create_document", "insert_part_from_library", "get_parts_list")
-NEW_TOOLS = "`run_python`, `get_document_state`, `make_drawing` and `get_view`"
+NEW_TOOLS = "`run_python`, `get_document_state`, `make_drawing`, `find_joints`, `make_weld` and `get_view`"
 
 
 def slug(name):
